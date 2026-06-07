@@ -7,6 +7,7 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck "$ROOT/bin/tmux-save-session" \
     "$ROOT/bin/tmux-restore-session" \
+    "$ROOT/bin/tmux-clip-paste" \
     "$ROOT/install.sh" \
     "$ROOT/test/tmux-tools-test" \
     "$ROOT/test/run"
