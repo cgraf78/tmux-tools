@@ -67,6 +67,8 @@ save_help=$(tmux-save-session --help 2>&1)
 _assert_contains "tmux-save-session help documents --dir" "--dir DIR" "$save_help"
 restore_help=$(tmux-restore-session --help 2>&1)
 _assert_contains "tmux-restore-session help documents --no-attach" "--no-attach" "$restore_help"
+clip_help=$(tmux-clip-paste --help 2>&1)
+_assert_contains "tmux-clip-paste help documents --path" "--path" "$clip_help"
 
 list_dir=$(_tmpdir)
 mkdir -p "$list_dir"
@@ -99,6 +101,49 @@ result=$(
 )
 _assert_contains "restore picks only saved session directly" "restored: solo" "$result"
 _assert_eq "restore runs picked session script" "solo" "$(cat "$single_log")"
+
+clip_dir=$(_tmpdir)
+clip_file="$clip_dir/selection"
+clip_bin=$(_tmpdir)
+clip_log="$clip_dir/tmux.log"
+cat >"$clip_bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMUX_TOOLS_TEST_TMUX_LOG"
+MOCK
+chmod +x "$clip_bin/tmux"
+
+result=$(TMPDIR="$clip_dir" tmux-clip-paste --path)
+_assert_eq "clip paste prints default per-user path" \
+  "$clip_dir/.tmux-clip-paste-$(id -u)" "$result"
+
+result=$(TMUX_TOOLS_CLIP_PASTE_FILE="$clip_file" tmux-clip-paste --path)
+_assert_eq "clip paste path honors env override" "$clip_file" "$result"
+
+printf 'picked text\n' >"$clip_file"
+PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  tmux-clip-paste --file "$clip_file"
+expected="$(printf 'load-buffer %s\npaste-buffer -p' "$clip_file")"
+_assert_eq "clip paste loads and pastes selected file" "$expected" "$(cat "$clip_log")"
+if [[ -e "$clip_file" ]]; then
+  _fail "clip paste removes selected file"
+else
+  _pass "clip paste removes selected file"
+fi
+
+: >"$clip_file"
+rm -f "$clip_log"
+PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  tmux-clip-paste --file "$clip_file"
+if [[ -e "$clip_log" ]]; then
+  _fail "clip paste ignores empty selection"
+else
+  _pass "clip paste ignores empty selection"
+fi
+if [[ -e "$clip_file" ]]; then
+  _fail "clip paste removes empty selection file"
+else
+  _pass "clip paste removes empty selection file"
+fi
 
 if command -v tmux >/dev/null 2>&1; then
   real_tmux=$(command -v tmux)

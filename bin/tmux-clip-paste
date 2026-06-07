@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# tmux-clip-paste -- paste picker output into the current tmux pane.
+#
+# This supports tmux popup flows where the popup writes a selection to a temp
+# file, then tmux runs a second command after the popup exits to paste it.
+
+set -euo pipefail
+
+_usage() {
+  cat <<'EOF'
+Usage: tmux-clip-paste [--file FILE]
+       tmux-clip-paste --path
+
+Load picker output from a file into the tmux paste buffer, paste it into the
+current pane, then remove the file.
+
+Options:
+  -f, --file FILE    File to read. Defaults to $TMUX_TOOLS_CLIP_PASTE_FILE,
+                    then ${TMPDIR:-/tmp}/.tmux-clip-paste-$(id -u).
+  --path             Print the default file path and exit.
+  -h, --help         Show this help.
+EOF
+}
+
+_die() {
+  printf 'tmux-clip-paste: %s\n' "$*" >&2
+  exit 2
+}
+
+_default_file() {
+  if [[ -n "${TMUX_TOOLS_CLIP_PASTE_FILE:-}" ]]; then
+    printf '%s\n' "$TMUX_TOOLS_CLIP_PASTE_FILE"
+  else
+    printf '%s\n' "${TMPDIR:-/tmp}/.tmux-clip-paste-$(id -u)"
+  fi
+}
+
+file="$(_default_file)"
+print_path=0
+
+while (($#)); do
+  case "$1" in
+    -f | --file)
+      shift
+      (($#)) || _die "--file requires a value"
+      file="$1"
+      shift
+      ;;
+    --file=*)
+      file="${1#--file=}"
+      [[ -n "$file" ]] || _die "--file requires a value"
+      shift
+      ;;
+    --path)
+      print_path=1
+      shift
+      ;;
+    -h | --help)
+      _usage
+      exit 0
+      ;;
+    --)
+      shift
+      (($# == 0)) || _die "unexpected argument: $1"
+      ;;
+    -*)
+      _die "unknown option: $1"
+      ;;
+    *)
+      _die "unexpected argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "$file" ]] || _die "file path is empty"
+
+if ((print_path)); then
+  printf '%s\n' "$file"
+  exit 0
+fi
+
+if [[ ! -s "$file" ]]; then
+  rm -f "$file"
+  exit 0
+fi
+
+tmux load-buffer "$file"
+tmux paste-buffer -p
+rm -f "$file"

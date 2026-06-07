@@ -53,6 +53,27 @@ ${TMUX_TOOLS_SESSION_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/tmux/sessions}
 
 Use `--dir DIR` on either command to read or write a different directory.
 
+### `tmux-clip-paste`
+
+Pastes text written by a tmux popup or picker into the current pane. This is
+useful when a popup must write its selected text first and tmux should paste
+after the popup closes.
+
+```sh
+tmux-clip-paste --path
+tmux-clip-paste
+tmux-clip-paste --file /tmp/selection
+```
+
+Example tmux binding:
+
+```tmux
+bind P display-popup -E 'your-picker > "$(tmux-clip-paste --path)"' \; run-shell tmux-clip-paste
+```
+
+Set `TMUX_TOOLS_CLIP_PASTE_FILE` or pass `--file FILE` to use a custom handoff
+file.
+
 ## Requirements
 
 - Bash
