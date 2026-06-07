@@ -1,0 +1,207 @@
+#!/usr/bin/env bash
+# tmux-save-session -- save tmux session layout for later restoration.
+#
+# Captures window names, pane layouts, pane working directories, and the active
+# window. Restore files are executable Bash scripts under the session save dir.
+
+set -euo pipefail
+
+_usage() {
+  cat <<'EOF'
+Usage: tmux-save-session [--dir DIR] [session-name]
+
+Save a tmux session layout for later restoration.
+
+Arguments:
+  session-name       Session to save. Defaults to the current tmux session.
+
+Options:
+  -d, --dir DIR      Directory for saved restore scripts.
+                    Defaults to $TMUX_TOOLS_SESSION_DIR, then
+                    $XDG_DATA_HOME/tmux/sessions, then
+                    ~/.local/share/tmux/sessions.
+  -h, --help         Show this help.
+EOF
+}
+
+_die() {
+  printf 'tmux-save-session: %s\n' "$*" >&2
+  exit 2
+}
+
+_default_save_dir() {
+  if [[ -n "${TMUX_TOOLS_SESSION_DIR:-}" ]]; then
+    printf '%s\n' "$TMUX_TOOLS_SESSION_DIR"
+  else
+    printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/tmux/sessions"
+  fi
+}
+
+_quote() {
+  printf '%q' "$1"
+}
+
+_validate_session_name() {
+  local session="$1"
+  [[ -n "$session" ]] || _die "session name is empty"
+  if [[ "$session" != "${session//[^A-Za-z0-9._-]/}" ]]; then
+    _die "session name contains unsafe characters: $session"
+  fi
+}
+
+save_dir="$(_default_save_dir)"
+session=""
+
+while (($#)); do
+  case "$1" in
+    -d | --dir)
+      shift
+      (($#)) || _die "--dir requires a value"
+      save_dir="$1"
+      shift
+      ;;
+    --dir=*)
+      save_dir="${1#--dir=}"
+      [[ -n "$save_dir" ]] || _die "--dir requires a value"
+      shift
+      ;;
+    -h | --help)
+      _usage
+      exit 0
+      ;;
+    --)
+      shift
+      (($# <= 1)) || _die "expected at most one session name"
+      session="${1:-}"
+      shift "$#"
+      ;;
+    -*)
+      _die "unknown option: $1"
+      ;;
+    *)
+      [[ -z "$session" ]] || _die "expected at most one session name"
+      session="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$save_dir" ]] || _die "save directory is empty"
+
+if [[ -z "$session" ]]; then
+  session=$(tmux display-message -p '#S' 2>/dev/null) ||
+    _die "not in a tmux session; pass a session name"
+fi
+
+_validate_session_name "$session"
+
+if ! tmux has-session -t "$session" 2>/dev/null; then
+  _die "no such tmux session: $session"
+fi
+
+mkdir -p "$save_dir"
+outfile="$save_dir/${session}.sh"
+
+active_window_index=$(tmux display-message -p -t "$session" '#{window_index}')
+
+window_indexes=()
+while IFS= read -r index; do
+  window_indexes+=("$index")
+done < <(tmux list-windows -t "$session" -F '#{window_index}')
+
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'set -euo pipefail\n'
+  printf '# Saved: %s\n' "$(date -Iseconds)"
+  printf '# Session: %s\n\n' "$session"
+  printf 'SESSION=%s\n' "$(_quote "$session")"
+  printf 'ACTIVE_WINDOW_INDEX=%s\n\n' "$(_quote "$active_window_index")"
+  cat <<'EOF'
+_existing_dir() {
+  local dir="$1"
+  if [[ -d "$dir" ]]; then
+    printf '%s\n' "$dir"
+  else
+    printf '%s\n' "${HOME:-/}"
+  fi
+}
+
+_new_session_window() {
+  local name="$1"
+  local dir
+  dir=$(_existing_dir "$2")
+  tmux new-session -d -P -F '#{window_id}' -s "$SESSION" -n "$name" -c "$dir"
+}
+
+_new_window() {
+  local name="$1"
+  local dir
+  dir=$(_existing_dir "$2")
+  tmux new-window -P -F '#{window_id}' -t "$SESSION" -n "$name" -c "$dir"
+}
+
+_split_window() {
+  local target="$1"
+  local dir
+  dir=$(_existing_dir "$2")
+  tmux split-window -t "$target" -c "$dir"
+}
+
+if tmux has-session -t "$SESSION" 2>/dev/null; then
+  printf 'tmux session already exists: %s\n' "$SESSION" >&2
+  exit 1
+fi
+
+window_ids=()
+window_indexes=()
+
+EOF
+
+  for i in "${!window_indexes[@]}"; do
+    widx="${window_indexes[$i]}"
+    wlayout=$(tmux display-message -p -t "$session:$widx" '#{window_layout}')
+    wname=$(tmux display-message -p -t "$session:$widx" '#{window_name}')
+
+    pane_dirs=()
+    while IFS= read -r pdir; do
+      pane_dirs+=("$pdir")
+    done < <(tmux list-panes -t "$session:$widx" -F '#{pane_current_path}')
+
+    printf 'window_indexes+=(%s)\n' "$(_quote "$widx")"
+    if ((i == 0)); then
+      # shellcheck disable=SC2016 # emitted into the generated restore script.
+      printf 'window_id=$(_new_session_window %s %s)\n' \
+        "$(_quote "$wname")" "$(_quote "${pane_dirs[0]:-$HOME}")"
+    else
+      # shellcheck disable=SC2016 # emitted into the generated restore script.
+      printf 'window_id=$(_new_window %s %s)\n' \
+        "$(_quote "$wname")" "$(_quote "${pane_dirs[0]:-$HOME}")"
+    fi
+    # shellcheck disable=SC2016 # emitted into the generated restore script.
+    printf 'window_ids+=("$window_id")\n'
+
+    for ((p = 1; p < ${#pane_dirs[@]}; p++)); do
+      # shellcheck disable=SC2016 # emitted into the generated restore script.
+      printf '_split_window "$window_id" %s\n' "$(_quote "${pane_dirs[$p]}")"
+    done
+
+    if ((${#pane_dirs[@]} > 1)); then
+      # shellcheck disable=SC2016 # emitted into the generated restore script.
+      printf 'tmux select-layout -t "$window_id" %s\n' "$(_quote "$wlayout")"
+    fi
+
+    printf '\n'
+  done
+
+  cat <<'EOF'
+for i in "${!window_indexes[@]}"; do
+  if [[ "${window_indexes[$i]}" == "$ACTIVE_WINDOW_INDEX" ]]; then
+    tmux select-window -t "${window_ids[$i]}"
+    break
+  fi
+done
+EOF
+} >"$outfile"
+
+chmod +x "$outfile"
+printf 'saved: %s\n' "$outfile"

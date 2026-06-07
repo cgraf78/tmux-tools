@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# tmux-restore-session -- restore a saved tmux session layout.
+
+set -euo pipefail
+
+_usage() {
+  cat <<'EOF'
+Usage: tmux-restore-session [--dir DIR] [--no-attach] [session-name]
+       tmux-restore-session [--dir DIR] --list
+
+Restore a tmux session saved by tmux-save-session.
+
+Arguments:
+  session-name       Session to restore. If omitted, pick with fzf.
+
+Options:
+  -d, --dir DIR      Directory containing saved restore scripts.
+                    Defaults to $TMUX_TOOLS_SESSION_DIR, then
+                    $XDG_DATA_HOME/tmux/sessions, then
+                    ~/.local/share/tmux/sessions.
+  -l, --list         List saved sessions and exit.
+  --no-attach        Restore without attaching or switching the current client.
+  -h, --help         Show this help.
+EOF
+}
+
+_die() {
+  printf 'tmux-restore-session: %s\n' "$*" >&2
+  exit 2
+}
+
+_default_save_dir() {
+  if [[ -n "${TMUX_TOOLS_SESSION_DIR:-}" ]]; then
+    printf '%s\n' "$TMUX_TOOLS_SESSION_DIR"
+  else
+    printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/tmux/sessions"
+  fi
+}
+
+_validate_session_name() {
+  local session="$1"
+  [[ -n "$session" ]] || _die "session name is empty"
+  if [[ "$session" != "${session//[^A-Za-z0-9._-]/}" ]]; then
+    _die "session name contains unsafe characters: $session"
+  fi
+}
+
+_saved_sessions() {
+  local file
+  shopt -s nullglob
+  for file in "$save_dir"/*.sh; do
+    basename "$file" .sh
+  done | sort
+}
+
+save_dir="$(_default_save_dir)"
+session=""
+list_only=0
+attach=1
+
+while (($#)); do
+  case "$1" in
+    -d | --dir)
+      shift
+      (($#)) || _die "--dir requires a value"
+      save_dir="$1"
+      shift
+      ;;
+    --dir=*)
+      save_dir="${1#--dir=}"
+      [[ -n "$save_dir" ]] || _die "--dir requires a value"
+      shift
+      ;;
+    -l | --list)
+      list_only=1
+      shift
+      ;;
+    --no-attach)
+      attach=0
+      shift
+      ;;
+    -h | --help)
+      _usage
+      exit 0
+      ;;
+    --)
+      shift
+      (($# <= 1)) || _die "expected at most one session name"
+      session="${1:-}"
+      shift "$#"
+      ;;
+    -*)
+      _die "unknown option: $1"
+      ;;
+    *)
+      [[ -z "$session" ]] || _die "expected at most one session name"
+      session="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ -n "$save_dir" ]] || _die "save directory is empty"
+
+if ((list_only)); then
+  [[ -d "$save_dir" ]] || exit 0
+  _saved_sessions
+  exit 0
+fi
+
+if [[ -z "$session" ]]; then
+  [[ -d "$save_dir" ]] || _die "no saved sessions"
+  mapfile -t sessions < <(_saved_sessions)
+  case "${#sessions[@]}" in
+    0)
+      _die "no saved sessions"
+      ;;
+    1)
+      session="${sessions[0]}"
+      ;;
+    *)
+      if ! command -v fzf >/dev/null 2>&1; then
+        _die "fzf is required to pick from multiple sessions; pass a session name or use --list"
+      fi
+      session=$(printf '%s\n' "${sessions[@]}" | fzf --height 40% --reverse --prompt="session> ") ||
+        exit
+      ;;
+  esac
+fi
+
+_validate_session_name "$session"
+
+savefile="$save_dir/${session}.sh"
+[[ -f "$savefile" ]] || _die "no saved session '$session'"
+
+if tmux has-session -t "$session" 2>/dev/null; then
+  printf "session '%s' already exists -- attach with: tmux attach -t %s\n" "$session" "$session"
+  exit 1
+fi
+
+bash "$savefile"
+printf 'restored: %s\n' "$session"
+
+if ((attach)); then
+  if [[ -z "${TMUX:-}" ]]; then
+    tmux attach -t "$session"
+  else
+    tmux switch-client -t "$session"
+  fi
+fi

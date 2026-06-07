@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+PATH="$ROOT/bin:$PATH"
+export NO_COLOR=1
+
+_failures=0
+_temps=()
+
+_tmpdir() {
+  local dir
+  dir=$(mktemp -d)
+  _temps+=("$dir")
+  printf '%s\n' "$dir"
+}
+
+_cleanup() {
+  local dir
+  for dir in "${_temps[@]}"; do
+    rm -rf "$dir"
+  done
+}
+trap _cleanup EXIT
+
+_pass() {
+  printf 'ok - %s\n' "$1"
+}
+
+_fail() {
+  printf 'not ok - %s\n' "$1" >&2
+  _failures=$((_failures + 1))
+}
+
+_assert_eq() {
+  local name="$1"
+  local expected="$2"
+  local actual="$3"
+
+  if [[ "$actual" == "$expected" ]]; then
+    _pass "$name"
+  else
+    _fail "$name"
+    printf '  expected: %q\n' "$expected" >&2
+    printf '  actual:   %q\n' "$actual" >&2
+  fi
+}
+
+_assert_contains() {
+  local name="$1"
+  local needle="$2"
+  local haystack="$3"
+
+  if [[ "$haystack" == *"$needle"* ]]; then
+    _pass "$name"
+  else
+    _fail "$name"
+    printf '  expected output to contain: %s\n' "$needle" >&2
+    printf '  actual output:\n%s\n' "$haystack" >&2
+  fi
+}
+
+echo "=== tmux session tools ==="
+
+save_help=$(tmux-save-session --help 2>&1)
+_assert_contains "tmux-save-session help documents --dir" "--dir DIR" "$save_help"
+restore_help=$(tmux-restore-session --help 2>&1)
+_assert_contains "tmux-restore-session help documents --no-attach" "--no-attach" "$restore_help"
+
+list_dir=$(_tmpdir)
+mkdir -p "$list_dir"
+: >"$list_dir/beta.sh"
+: >"$list_dir/alpha.sh"
+result=$(tmux-restore-session --dir "$list_dir" --list)
+expected="$(printf 'alpha\nbeta')"
+_assert_eq "restore lists saved sessions sorted" "$expected" "$result"
+
+single_dir=$(_tmpdir)
+single_log=$(_tmpdir)/single.log
+single_bin=$(_tmpdir)
+mkdir -p "$single_dir"
+cat >"$single_dir/solo.sh" <<'MOCK'
+#!/usr/bin/env bash
+printf 'solo\n' >"$TMUX_TOOLS_TEST_RESTORED"
+MOCK
+chmod +x "$single_dir/solo.sh"
+cat >"$single_bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+case "$1" in
+  has-session) exit 1 ;;
+  *) printf 'unexpected tmux command: %s\n' "$*" >&2; exit 99 ;;
+esac
+MOCK
+chmod +x "$single_bin/tmux"
+result=$(
+  PATH="$single_bin:$PATH" TMUX_TOOLS_TEST_RESTORED="$single_log" \
+    tmux-restore-session --dir "$single_dir" --no-attach 2>&1
+)
+_assert_contains "restore picks only saved session directly" "restored: solo" "$result"
+_assert_eq "restore runs picked session script" "solo" "$(cat "$single_log")"
+
+if command -v tmux >/dev/null 2>&1; then
+  real_tmux=$(command -v tmux)
+  socket_dir=$(_tmpdir)
+  socket="$socket_dir/tmux-tools.sock"
+  tool_bin=$(_tmpdir)
+  session_dir=$(_tmpdir)
+  project_dir=$(_tmpdir)
+  stale_dir=$(_tmpdir)
+
+  cat >"$tool_bin/tmux" <<MOCK
+#!/usr/bin/env bash
+exec "$real_tmux" -S "$socket" "\$@"
+MOCK
+  chmod +x "$tool_bin/tmux"
+
+  "$real_tmux" -S "$socket" -f /dev/null new-session -d -s tmux-tools-test -n dup \
+    -c "$project_dir" 'sleep 60'
+  "$real_tmux" -S "$socket" new-window -t tmux-tools-test -n dup \
+    -c "$stale_dir" 'sleep 60'
+  second_window=$("$real_tmux" -S "$socket" display-message -p -t tmux-tools-test '#{window_index}')
+  "$real_tmux" -S "$socket" split-window -t "tmux-tools-test:$second_window" \
+    -c "$project_dir" 'sleep 60'
+  "$real_tmux" -S "$socket" new-window -t tmux-tools-test -n stale \
+    -c "$stale_dir" 'sleep 60'
+  "$real_tmux" -S "$socket" select-window -t "tmux-tools-test:$second_window"
+
+  PATH="$tool_bin:$PATH" TMUX_TOOLS_SESSION_DIR="$session_dir" \
+    tmux-save-session tmux-tools-test >/dev/null
+
+  rm -rf "$stale_dir"
+  "$real_tmux" -S "$socket" kill-session -t tmux-tools-test
+
+  PATH="$tool_bin:$PATH" TMUX_TOOLS_SESSION_DIR="$session_dir" \
+    tmux-restore-session --no-attach tmux-tools-test >/dev/null
+
+  active_panes=$("$real_tmux" -S "$socket" list-panes -t tmux-tools-test | wc -l | tr -d ' ')
+  _assert_eq "restore preserves active saved window" "2" "$active_panes"
+
+  mapfile -t restored_indexes < <("$real_tmux" -S "$socket" list-windows -t tmux-tools-test -F '#{window_index}')
+  first_index="${restored_indexes[0]}"
+  second_index="${restored_indexes[1]}"
+  third_index="${restored_indexes[2]}"
+  first_panes=$("$real_tmux" -S "$socket" list-panes -t "tmux-tools-test:$first_index" | wc -l | tr -d ' ')
+  second_panes=$("$real_tmux" -S "$socket" list-panes -t "tmux-tools-test:$second_index" | wc -l | tr -d ' ')
+  _assert_eq "restore handles duplicate first window name" "1" "$first_panes"
+  _assert_eq "restore handles duplicate second window name" "2" "$second_panes"
+
+  restored_dir=$("$real_tmux" -S "$socket" display-message -p -t "tmux-tools-test:$third_index.0" '#{pane_current_path}')
+  _assert_eq "restore falls back to HOME for missing cwd" "$HOME" "$restored_dir"
+
+  "$real_tmux" -S "$socket" kill-server
+else
+  printf 'skip - tmux server integration checks (tmux not installed)\n'
+fi
+
+if ((_failures > 0)); then
+  printf '%s failure(s)\n' "$_failures" >&2
+  exit 1
+fi
+
+printf 'all tests passed\n'
