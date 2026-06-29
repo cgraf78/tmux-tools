@@ -3,6 +3,16 @@
 
 set -euo pipefail
 
+_self="${BASH_SOURCE[0]}"
+if [[ -L "$_self" ]]; then
+  _target="$(readlink "$_self")"
+  [[ "$_target" == /* ]] || _target="$(cd "$(dirname "$_self")" && pwd)/$_target"
+  _self="$_target"
+fi
+# shellcheck source=lib/tmux-tools/session.sh
+. "$(cd "$(dirname "$_self")/.." && pwd)/lib/tmux-tools/session.sh"
+unset _self _target
+
 _usage() {
   cat <<'EOF'
 Usage: tmux-restore-session [--dir DIR] [--no-attach] [session-name]
@@ -29,14 +39,6 @@ _die() {
   exit 2
 }
 
-_default_save_dir() {
-  if [[ -n "${TMUX_TOOLS_SESSION_DIR:-}" ]]; then
-    printf '%s\n' "$TMUX_TOOLS_SESSION_DIR"
-  else
-    printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/tmux/sessions"
-  fi
-}
-
 _validate_session_name() {
   local session="$1"
   [[ -n "$session" ]] || _die "session name is empty"
@@ -45,15 +47,7 @@ _validate_session_name() {
   fi
 }
 
-_saved_sessions() {
-  local file
-  shopt -s nullglob
-  for file in "$save_dir"/*.sh; do
-    basename "$file" .sh
-  done | sort
-}
-
-save_dir="$(_default_save_dir)"
+save_dir="$(tmux_tools_default_session_dir)"
 session=""
 list_only=0
 attach=1
@@ -104,13 +98,13 @@ done
 
 if ((list_only)); then
   [[ -d "$save_dir" ]] || exit 0
-  _saved_sessions
+  tmux_tools_saved_sessions "$save_dir"
   exit 0
 fi
 
 if [[ -z "$session" ]]; then
   [[ -d "$save_dir" ]] || _die "no saved sessions"
-  mapfile -t sessions < <(_saved_sessions)
+  mapfile -t sessions < <(tmux_tools_saved_sessions "$save_dir")
   case "${#sessions[@]}" in
     0)
       _die "no saved sessions"
@@ -130,7 +124,7 @@ fi
 
 _validate_session_name "$session"
 
-savefile="$save_dir/${session}.sh"
+savefile="$(tmux_tools_session_file "$save_dir" "$session")"
 [[ -f "$savefile" ]] || _die "no saved session '$session'"
 
 if tmux has-session -t "$session" 2>/dev/null; then

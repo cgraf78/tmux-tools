@@ -6,6 +6,9 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 PATH="$ROOT/bin:$PATH"
 export NO_COLOR=1
 
+# shellcheck source=lib/tmux-tools/session.sh
+. "$ROOT/lib/tmux-tools/session.sh"
+
 _failures=0
 _temps=()
 
@@ -61,7 +64,38 @@ _assert_contains() {
   fi
 }
 
+_assert_symlink() {
+  local name="$1"
+  local path="$2"
+
+  if [[ -L "$path" ]]; then
+    _pass "$name"
+  else
+    _fail "$name"
+    printf '  expected symlink: %s\n' "$path" >&2
+  fi
+}
+
 echo "=== tmux session tools ==="
+
+helper_dir=$(_tmpdir)
+mkdir -p "$helper_dir"
+: >"$helper_dir/beta.sh"
+: >"$helper_dir/alpha.sh"
+helper_sessions=$(tmux_tools_saved_sessions "$helper_dir")
+_assert_eq "session helper lists saved sessions sorted" "$(printf 'alpha\nbeta')" "$helper_sessions"
+_assert_eq "session helper builds restore script path" \
+  "$helper_dir/alpha.sh" "$(tmux_tools_session_file "$helper_dir" alpha)"
+helper_default=$(
+  HOME="$helper_dir/home" XDG_DATA_HOME='' TMUX_TOOLS_SESSION_DIR='' \
+    tmux_tools_default_session_dir
+)
+_assert_eq "session helper default dir follows XDG data fallback" \
+  "$helper_dir/home/.local/share/tmux/sessions" "$helper_default"
+helper_override=$(
+  TMUX_TOOLS_SESSION_DIR="$helper_dir/custom" tmux_tools_default_session_dir
+)
+_assert_eq "session helper default dir honors env override" "$helper_dir/custom" "$helper_override"
 
 save_help=$(tmux-save-session --help 2>&1)
 _assert_contains "tmux-save-session help documents --dir" "--dir DIR" "$save_help"
@@ -101,6 +135,23 @@ result=$(
 )
 _assert_contains "restore picks only saved session directly" "restored: solo" "$result"
 _assert_eq "restore runs picked session script" "solo" "$(cat "$single_log")"
+
+install_prefix=$(_tmpdir)
+PREFIX="$install_prefix" "$ROOT/install.sh" >/dev/null
+_assert_symlink "install links save command" "$install_prefix/bin/tmux-save-session"
+_assert_symlink "install links restore command" "$install_prefix/bin/tmux-restore-session"
+installed_save_help=$("$install_prefix/bin/tmux-save-session" --help 2>&1)
+_assert_contains "installed save command resolves helper library" \
+  "tmux-save-session" "$installed_save_help"
+installed_restore_list=$("$install_prefix/bin/tmux-restore-session" --dir "$single_dir" --list)
+_assert_eq "installed restore command resolves helper library" "solo" "$installed_restore_list"
+
+custom_install_prefix=$(_tmpdir)
+custom_install_bin=$(_tmpdir)/custom-bin
+PREFIX="$custom_install_prefix" BIN_DIR="$custom_install_bin" "$ROOT/install.sh" >/dev/null
+custom_save_help=$("$custom_install_bin/tmux-save-session" --help 2>&1)
+_assert_contains "custom BIN_DIR save command resolves helper library" \
+  "tmux-save-session" "$custom_save_help"
 
 clip_dir=$(_tmpdir)
 clip_file="$clip_dir/selection"
