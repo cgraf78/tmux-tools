@@ -140,6 +140,9 @@ install_prefix=$(_tmpdir)
 PREFIX="$install_prefix" "$ROOT/install.sh" >/dev/null
 _assert_symlink "install links save command" "$install_prefix/bin/tmux-save-session"
 _assert_symlink "install links restore command" "$install_prefix/bin/tmux-restore-session"
+_assert_symlink "install links save manpage" "$install_prefix/share/man/man1/tmux-save-session.1"
+_assert_symlink "install links restore manpage" "$install_prefix/share/man/man1/tmux-restore-session.1"
+_assert_symlink "install links clip manpage" "$install_prefix/share/man/man1/tmux-clip-paste.1"
 installed_save_help=$("$install_prefix/bin/tmux-save-session" --help 2>&1)
 _assert_contains "installed save command resolves helper library" \
   "tmux-save-session" "$installed_save_help"
@@ -148,10 +151,13 @@ _assert_eq "installed restore command resolves helper library" "solo" "$installe
 
 custom_install_prefix=$(_tmpdir)
 custom_install_bin=$(_tmpdir)/custom-bin
-PREFIX="$custom_install_prefix" BIN_DIR="$custom_install_bin" "$ROOT/install.sh" >/dev/null
+custom_install_man=$(_tmpdir)/custom-man
+PREFIX="$custom_install_prefix" BIN_DIR="$custom_install_bin" MAN_DIR="$custom_install_man" \
+  "$ROOT/install.sh" >/dev/null
 custom_save_help=$("$custom_install_bin/tmux-save-session" --help 2>&1)
 _assert_contains "custom BIN_DIR save command resolves helper library" \
   "tmux-save-session" "$custom_save_help"
+_assert_symlink "custom MAN_DIR receives save manpage" "$custom_install_man/tmux-save-session.1"
 
 clip_dir=$(_tmpdir)
 clip_file="$clip_dir/selection"

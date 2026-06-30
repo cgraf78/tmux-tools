@@ -1,0 +1,61 @@
+.TH TMUX-RESTORE-SESSION 1 "2026-06-30" "tmux-tools" "User Commands"
+.SH NAME
+tmux-restore-session \- restore a tmux session saved by tmux-save-session
+.SH SYNOPSIS
+.B tmux-restore-session
+.RB [ -d
+.IR dir | --dir
+.IR dir ]
+.RB [ --no-attach ]
+.RI [ session-name ]
+.br
+.B tmux-restore-session
+.RB [ -d
+.IR dir | --dir
+.IR dir ]
+.B --list
+.SH DESCRIPTION
+.B tmux-restore-session
+runs an executable restore script produced by
+.BR tmux-save-session (1).
+When no session name is supplied, it restores the only saved session directly
+or opens an
+.BR fzf (1)
+picker when multiple saved sessions exist.
+.PP
+After restoring, the command attaches from outside tmux and switches the
+current client from inside tmux unless
+.B --no-attach
+is set.
+.SH OPTIONS
+.TP
+.BI -d ", --dir " dir
+Directory where restore scripts are read.
+.TP
+.BR -l ", " --list
+List saved sessions and exit.
+.TP
+.B --no-attach
+Restore without attaching or switching clients.
+.TP
+.BR -h ", " --help
+Show usage.
+.SH ENVIRONMENT
+.TP
+.B TMUX_TOOLS_SESSION_DIR
+Default session directory. If unset, the default is
+.IR ${XDG_DATA_HOME:-$HOME/.local/share}/tmux/sessions .
+.SH EXIT STATUS
+.TP
+.B 0
+The session was restored or listed.
+.TP
+.B 1
+No matching saved session exists or restore failed.
+.TP
+.B 2
+Usage error.
+.SH SEE ALSO
+.BR tmux-save-session (1),
+.BR fzf (1),
+.BR tmux (1)

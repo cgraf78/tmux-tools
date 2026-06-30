@@ -1,0 +1,44 @@
+.TH TMUX-CLIP-PASTE 1 "2026-06-30" "tmux-tools" "User Commands"
+.SH NAME
+tmux-clip-paste \- paste popup-selected text into the current tmux pane
+.SH SYNOPSIS
+.B tmux-clip-paste
+.RB [ -f
+.IR file | --file
+.IR file ]
+.br
+.B tmux-clip-paste
+.B --path
+.SH DESCRIPTION
+.B tmux-clip-paste
+loads a handoff file into the tmux paste buffer, pastes it into the current
+pane, and removes the file. It is useful when a tmux popup or picker must write
+its selected text before tmux can paste after the popup closes.
+.SH OPTIONS
+.TP
+.BI -f ", --file " file
+Read selected text from
+.IR file .
+.TP
+.B --path
+Print the default handoff file path and exit.
+.TP
+.BR -h ", " --help
+Show usage.
+.SH ENVIRONMENT
+.TP
+.B TMUX_TOOLS_CLIP_PASTE_FILE
+Override the default handoff file path.
+.SH EXIT STATUS
+.TP
+.B 0
+Text was pasted, an empty handoff file was removed, or the handoff path was
+printed.
+.TP
+.B 1
+tmux failed to load or paste the buffer.
+.TP
+.B 2
+Usage error.
+.SH SEE ALSO
+.BR tmux (1)

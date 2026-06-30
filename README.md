@@ -83,6 +83,7 @@ file.
 ## Install
 
 Put `bin/` on `PATH`, or link the command files into a directory on `PATH`.
+Manual pages live in `man/man1/`.
 
 For a simple local install:
 
@@ -90,7 +91,7 @@ For a simple local install:
 ./install.sh
 ```
 
-Set `PREFIX` or `BIN_DIR` to choose another destination.
+Set `PREFIX`, `BIN_DIR`, or `MAN_DIR` to choose another destination.
 
 ## Test
 
