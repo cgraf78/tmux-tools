@@ -51,10 +51,11 @@ Default session directory. If unset, the default is
 The session was restored or listed.
 .TP
 .B 1
-No matching saved session exists or restore failed.
+Unexpected shell failure.
 .TP
 .B 2
-Usage error.
+The command reported an error, such as invalid arguments, no matching saved
+session, or a restore failure.
 .SH SEE ALSO
 .BR tmux-save-session (1),
 .BR fzf (1),

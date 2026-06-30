@@ -30,10 +30,11 @@ Default session directory. If unset, the default is
 The session was saved.
 .TP
 .B 1
-tmux state could not be read or the restore script could not be written.
+Unexpected shell failure.
 .TP
 .B 2
-Usage error.
+The command reported an error, such as invalid arguments, missing tmux context,
+or an unreadable session.
 .SH SEE ALSO
 .BR tmux-restore-session (1),
 .BR tmux (1)
