@@ -74,11 +74,33 @@ bind P display-popup -E 'your-picker > "$(tmux-clip-paste --path)"' \; run-shell
 Set `TMUX_TOOLS_CLIP_PASTE_FILE` or pass `--file FILE` to use a custom handoff
 file.
 
+### `wezterm-switch-tab`
+
+Requests a parent WezTerm tab switch by writing an OSC 1337 user-var escape to
+a terminal device. Any terminal program or script can call it when it has the
+controlling tty; tmux bindings are the common use case.
+
+```sh
+wezterm-switch-tab next /dev/ttys001
+wezterm-switch-tab previous --tty /dev/ttys001
+```
+
+Example tmux binding fragment:
+
+```tmux
+bind-key -n C-Tab if-shell -F '#{>:#{session_windows},1}' 'next-window' 'run-shell -b "wezterm-switch-tab next #{client_tty}"'
+```
+
+Because this command writes terminal escape sequences rather than calling the
+local WezTerm CLI, it also works from remote SSH/tmux sessions when the escape
+reaches a local WezTerm window.
+
 ## Requirements
 
 - Bash
 - tmux
 - `fzf` for interactive restore when multiple saved sessions exist
+- WezTerm for `wezterm-switch-tab` requests to have an effect
 
 ## Install
 

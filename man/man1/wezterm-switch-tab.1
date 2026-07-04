@@ -1,0 +1,68 @@
+.TH WEZTERM-SWITCH-TAB 1 "2026-07-04" "tmux-tools" "User Commands"
+.SH NAME
+wezterm-switch-tab \- request a parent WezTerm tab switch
+.SH SYNOPSIS
+.B wezterm-switch-tab
+.RI [ next | previous ]
+.RI [ tty ]
+.br
+.B wezterm-switch-tab
+.RI [ next | previous ]
+.B --tty
+.I tty
+.SH DESCRIPTION
+.B wezterm-switch-tab
+emits a WezTerm OSC 1337
+.B SetUserVar
+request named
+.B DOT_SWITCH_TAB
+to the target terminal device. The value contains the requested direction and a
+nonce, encoded as required by WezTerm user variables.
+.PP
+Any terminal program or script can call this command when it has a terminal
+device to write to. A common use is a tmux binding that switches tmux windows
+when the current session has multiple windows, but calls
+.B wezterm-switch-tab
+when the current session has only one window.
+.PP
+Because the command writes ordinary terminal escape sequences to a terminal
+device, it works through SSH and remote tmux sessions when the escape reaches a
+local WezTerm window.
+.SH ARGUMENTS
+.TP
+.B next
+Request the next WezTerm tab. This is the default.
+.TP
+.B previous
+Request the previous WezTerm tab.
+.TP
+.I tty
+Terminal device to write to.
+.SH OPTIONS
+.TP
+.BI --tty " tty"
+Terminal device to write to.
+.TP
+.BR -h ", " --help
+Show usage.
+.SH ENVIRONMENT
+.TP
+.B WEZTERM_SWITCH_TAB_TTY
+Default terminal device when no
+.I tty
+argument or
+.B --tty
+option is supplied.
+.SH EXIT STATUS
+.TP
+.B 0
+The request was written.
+.TP
+.B 1
+The target terminal device could not be written.
+.TP
+.B 2
+Usage error.
+.SH SEE ALSO
+.BR tmux (1),
+.BR wezterm (1)
