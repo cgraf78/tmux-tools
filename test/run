@@ -8,6 +8,7 @@ if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -x -P "$ROOT" "$ROOT/bin/tmux-save-session" \
     "$ROOT/bin/tmux-restore-session" \
     "$ROOT/bin/tmux-clip-paste" \
+    "$ROOT/bin/wezterm-switch-tab" \
     "$ROOT/lib/tmux-tools/session.sh" \
     "$ROOT/install.sh" \
     "$ROOT/test/tmux-tools-test" \
