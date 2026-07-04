@@ -95,12 +95,37 @@ Because this command writes terminal escape sequences rather than calling the
 local WezTerm CLI, it also works from remote SSH/tmux sessions when the escape
 reaches a local WezTerm window.
 
+### `wezterm-move-tab`
+
+Requests a parent WezTerm tab move by writing an OSC 1337 user-var escape to a
+terminal device. It is the move/reorder counterpart to `wezterm-switch-tab`.
+
+```sh
+wezterm-move-tab left /dev/ttys001
+wezterm-move-tab right --tty /dev/ttys001
+```
+
+Example tmux binding fragment:
+
+```tmux
+bind-key -n 'M-}' if-shell -F '#{==:#{session_windows},1}' \
+  'run-shell -b "wezterm-move-tab right #{client_tty}"' \
+  { if-shell -F '#{<:#{window_index},#{e|+:#{base-index},#{e|-:#{session_windows},1}}}' \
+      'swap-window -d -t :+' \
+      'display-message -p ""' }
+```
+
+Because this command writes terminal escape sequences rather than calling the
+local WezTerm CLI, it also works from remote SSH/tmux sessions when the escape
+reaches a local WezTerm window.
+
 ## Requirements
 
 - Bash
 - tmux
 - `fzf` for interactive restore when multiple saved sessions exist
-- WezTerm for `wezterm-switch-tab` requests to have an effect
+- WezTerm for `wezterm-switch-tab` and `wezterm-move-tab` requests to have an
+  effect
 
 ## Install
 

@@ -105,6 +105,8 @@ clip_help=$(tmux-clip-paste --help 2>&1)
 _assert_contains "tmux-clip-paste help documents --path" "--path" "$clip_help"
 switch_help=$(wezterm-switch-tab --help 2>&1)
 _assert_contains "wezterm-switch-tab help documents --tty" "--tty TTY" "$switch_help"
+move_help=$(wezterm-move-tab --help 2>&1)
+_assert_contains "wezterm-move-tab help documents --tty" "--tty TTY" "$move_help"
 
 list_dir=$(_tmpdir)
 mkdir -p "$list_dir"
@@ -143,10 +145,12 @@ PREFIX="$install_prefix" "$ROOT/install.sh" >/dev/null
 _assert_symlink "install links save command" "$install_prefix/bin/tmux-save-session"
 _assert_symlink "install links restore command" "$install_prefix/bin/tmux-restore-session"
 _assert_symlink "install links WezTerm tab switch command" "$install_prefix/bin/wezterm-switch-tab"
+_assert_symlink "install links WezTerm tab move command" "$install_prefix/bin/wezterm-move-tab"
 _assert_symlink "install links save manpage" "$install_prefix/share/man/man1/tmux-save-session.1"
 _assert_symlink "install links restore manpage" "$install_prefix/share/man/man1/tmux-restore-session.1"
 _assert_symlink "install links clip manpage" "$install_prefix/share/man/man1/tmux-clip-paste.1"
 _assert_symlink "install links WezTerm tab switch manpage" "$install_prefix/share/man/man1/wezterm-switch-tab.1"
+_assert_symlink "install links WezTerm tab move manpage" "$install_prefix/share/man/man1/wezterm-move-tab.1"
 installed_save_help=$("$install_prefix/bin/tmux-save-session" --help 2>&1)
 _assert_contains "installed save command resolves helper library" \
   "tmux-save-session" "$installed_save_help"
@@ -178,6 +182,22 @@ _assert_contains "wezterm switch tab honors tty env override" \
 switch_error=$(wezterm-switch-tab --sideways 2>&1)
 _assert_contains "wezterm switch tab rejects unknown option" \
   "unknown option: --sideways" "$switch_error"
+
+move_tty=$(_tmpdir)/wezterm-move.out
+wezterm-move-tab right --tty "$move_tty"
+move_osc=$(cat "$move_tty")
+_assert_contains "wezterm move tab emits DOT_MOVE_TAB user var" \
+  "SetUserVar=DOT_MOVE_TAB=" "$move_osc"
+
+move_tty=$(_tmpdir)/wezterm-move-env.out
+WEZTERM_MOVE_TAB_TTY="$move_tty" wezterm-move-tab left
+move_osc=$(cat "$move_tty")
+_assert_contains "wezterm move tab honors tty env override" \
+  "SetUserVar=DOT_MOVE_TAB=" "$move_osc"
+
+move_error=$(wezterm-move-tab --sideways 2>&1)
+_assert_contains "wezterm move tab rejects unknown option" \
+  "unknown option: --sideways" "$move_error"
 
 clip_dir=$(_tmpdir)
 clip_file="$clip_dir/selection"
