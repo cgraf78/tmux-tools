@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# wezterm-move-tab -- ask the outer WezTerm tab layer to move the current tab.
+
+set -euo pipefail
+
+_usage() {
+  cat <<'EOF'
+Usage: wezterm-move-tab [left|right] [tty]
+       wezterm-move-tab [left|right] --tty TTY
+
+Emit a WezTerm OSC 1337 SetUserVar request that asks the outer WezTerm tab
+layer to move the current tab left or right. Any terminal program or script can
+call this when it has the controlling tty; tmux bindings are the common use
+case.
+
+Arguments:
+  left|right         Direction to move. Defaults to right.
+  tty                Terminal device to write to. Defaults to
+                     $WEZTERM_MOVE_TAB_TTY, then /dev/tty.
+
+Options:
+  --tty TTY          Terminal device to write to.
+  -h, --help         Show this help.
+EOF
+}
+
+_die() {
+  printf 'wezterm-move-tab: %s\n' "$*" >&2
+  exit 2
+}
+
+direction="right"
+tty="${WEZTERM_MOVE_TAB_TTY:-}"
+
+while (($#)); do
+  case "$1" in
+    left | right)
+      direction="$1"
+      shift
+      ;;
+    --tty)
+      shift
+      (($#)) || _die "--tty requires a value"
+      tty="$1"
+      shift
+      ;;
+    --tty=*)
+      tty="${1#--tty=}"
+      [[ -n "$tty" ]] || _die "--tty requires a value"
+      shift
+      ;;
+    -h | --help)
+      _usage
+      exit 0
+      ;;
+    --)
+      shift
+      (($# <= 1)) || _die "expected at most one tty"
+      if (($#)); then
+        tty="$1"
+        shift
+      fi
+      ;;
+    -*)
+      _die "unknown option: $1"
+      ;;
+    *)
+      if [[ -n "$tty" ]]; then
+        _die "unexpected argument: $1"
+      fi
+      tty="$1"
+      shift
+      ;;
+  esac
+done
+
+case "$direction" in
+  left | right) ;;
+  *) _die "direction must be left or right" ;;
+esac
+
+tty="${tty:-/dev/tty}"
+[[ -n "$tty" ]] || _die "tty is empty"
+
+payload=$(printf '%s:%s.%s' "$direction" "$(date +%s)" "$$" | base64 | tr -d '\n')
+printf '\033]1337;SetUserVar=DOT_MOVE_TAB=%s\007' "$payload" >"$tty"
