@@ -20,6 +20,7 @@ Arguments:
 
 Options:
   --tty TTY          Terminal device to write to.
+  --parent           Ask WezTerm to bubble the move to the parent tmux layer.
   -h, --help         Show this help.
 EOF
 }
@@ -31,6 +32,7 @@ _die() {
 
 direction="right"
 tty="${WEZTERM_MOVE_TAB_TTY:-}"
+parent=0
 
 while (($#)); do
   case "$1" in
@@ -47,6 +49,10 @@ while (($#)); do
     --tty=*)
       tty="${1#--tty=}"
       [[ -n "$tty" ]] || _die "--tty requires a value"
+      shift
+      ;;
+    --parent)
+      parent=1
       shift
       ;;
     -h | --help)
@@ -83,4 +89,9 @@ tty="${tty:-/dev/tty}"
 [[ -n "$tty" ]] || _die "tty is empty"
 
 payload=$(printf '%s:%s.%s' "$direction" "$(date +%s)" "$$" | base64 | tr -d '\n')
-printf '\033]1337;SetUserVar=DOT_MOVE_TAB=%s\007' "$payload" >"$tty"
+user_var="DOT_MOVE_TAB"
+if ((parent)); then
+  user_var="DOT_PARENT_MOVE_TAB"
+fi
+
+printf '\033]1337;SetUserVar=%s=%s\007' "$user_var" "$payload" >"$tty"

@@ -8,6 +8,11 @@ wezterm-move-tab \- request a parent WezTerm tab move
 .br
 .B wezterm-move-tab
 .RI [ left | right ]
+.B --parent
+.RI [ tty ]
+.br
+.B wezterm-move-tab
+.RI [ left | right ]
 .B --tty
 .I TTY
 .SH DESCRIPTION
@@ -22,6 +27,14 @@ variables, so an outer WezTerm config can move the current tab left or right.
 This is useful from tmux or SSH sessions where calling the local WezTerm CLI is
 not possible, but escape sequences written to the controlling terminal still
 reach the local WezTerm window.
+.PP
+With
+.BR --parent ,
+the request is named
+.B DOT_PARENT_MOVE_TAB
+instead. This is for one-window tmux sessions attached inside another tmux: a
+cooperating WezTerm config can translate the request into a private key
+sequence for the parent tmux layer instead of moving the WezTerm tab directly.
 .SH ARGUMENTS
 .TP
 .B left
@@ -40,6 +53,9 @@ when set, then
 .BI --tty " TTY"
 Write the OSC request to
 .IR TTY .
+.TP
+.B --parent
+Ask WezTerm to bubble the move to the parent tmux layer.
 .TP
 .B -h, --help
 Show usage.
@@ -63,6 +79,7 @@ Usage error.
 .EX
 wezterm-move-tab left /dev/ttys001
 wezterm-move-tab right --tty /dev/ttys001
+wezterm-move-tab --parent left /dev/ttys001
 .EE
 .SH SEE ALSO
 .BR tmux (1),
