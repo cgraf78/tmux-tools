@@ -83,6 +83,7 @@ controlling tty; tmux bindings are the common use case.
 ```sh
 wezterm-switch-tab next /dev/ttys001
 wezterm-switch-tab previous --tty /dev/ttys001
+wezterm-switch-tab --parent next /dev/ttys001
 ```
 
 Example tmux binding fragment:
@@ -95,6 +96,11 @@ Because this command writes terminal escape sequences rather than calling the
 local WezTerm CLI, it also works from remote SSH/tmux sessions when the escape
 reaches a local WezTerm window.
 
+Use `--parent` when the caller is a one-window tmux session attached inside
+another tmux. That emits `DOT_PARENT_SWITCH_TAB`; a cooperating WezTerm config
+can turn it into a private key sequence for the parent tmux layer instead of
+switching the WezTerm tab directly.
+
 ### `wezterm-move-tab`
 
 Requests a parent WezTerm tab move by writing an OSC 1337 user-var escape to a
@@ -103,6 +109,7 @@ terminal device. It is the move/reorder counterpart to `wezterm-switch-tab`.
 ```sh
 wezterm-move-tab left /dev/ttys001
 wezterm-move-tab right --tty /dev/ttys001
+wezterm-move-tab --parent left /dev/ttys001
 ```
 
 Example tmux binding fragment:
@@ -118,6 +125,11 @@ bind-key -n 'M-}' if-shell -F '#{==:#{session_windows},1}' \
 Because this command writes terminal escape sequences rather than calling the
 local WezTerm CLI, it also works from remote SSH/tmux sessions when the escape
 reaches a local WezTerm window.
+
+Use `--parent` when the caller is a one-window tmux session attached inside
+another tmux. That emits `DOT_PARENT_MOVE_TAB`; a cooperating WezTerm config
+can turn it into a private key sequence for the parent tmux layer instead of
+moving the WezTerm tab directly.
 
 ## Requirements
 

@@ -8,6 +8,11 @@ wezterm-switch-tab \- request a parent WezTerm tab switch
 .br
 .B wezterm-switch-tab
 .RI [ next | previous ]
+.B --parent
+.RI [ tty ]
+.br
+.B wezterm-switch-tab
+.RI [ next | previous ]
 .B --tty
 .I tty
 .SH DESCRIPTION
@@ -28,6 +33,15 @@ when the current session has only one window.
 Because the command writes ordinary terminal escape sequences to a terminal
 device, it works through SSH and remote tmux sessions when the escape reaches a
 local WezTerm window.
+.PP
+With
+.BR --parent ,
+the request is named
+.B DOT_PARENT_SWITCH_TAB
+instead. This is for one-window tmux sessions attached inside another tmux: a
+cooperating WezTerm config can translate the request into a private key
+sequence for the parent tmux layer instead of switching the WezTerm tab
+directly.
 .SH ARGUMENTS
 .TP
 .B next
@@ -42,6 +56,9 @@ Terminal device to write to.
 .TP
 .BI --tty " tty"
 Terminal device to write to.
+.TP
+.B --parent
+Ask WezTerm to bubble the switch to the parent tmux layer.
 .TP
 .BR -h ", " --help
 Show usage.

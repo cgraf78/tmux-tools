@@ -105,8 +105,10 @@ clip_help=$(tmux-clip-paste --help 2>&1)
 _assert_contains "tmux-clip-paste help documents --path" "--path" "$clip_help"
 switch_help=$(wezterm-switch-tab --help 2>&1)
 _assert_contains "wezterm-switch-tab help documents --tty" "--tty TTY" "$switch_help"
+_assert_contains "wezterm-switch-tab help documents --parent" "--parent" "$switch_help"
 move_help=$(wezterm-move-tab --help 2>&1)
 _assert_contains "wezterm-move-tab help documents --tty" "--tty TTY" "$move_help"
+_assert_contains "wezterm-move-tab help documents --parent" "--parent" "$move_help"
 
 list_dir=$(_tmpdir)
 mkdir -p "$list_dir"
@@ -173,6 +175,12 @@ switch_osc=$(cat "$switch_tty")
 _assert_contains "wezterm switch tab emits DOT_SWITCH_TAB user var" \
   "SetUserVar=DOT_SWITCH_TAB=" "$switch_osc"
 
+switch_tty=$(_tmpdir)/wezterm-switch-parent.out
+wezterm-switch-tab --parent next --tty "$switch_tty"
+switch_osc=$(cat "$switch_tty")
+_assert_contains "wezterm switch tab can request parent tmux switch" \
+  "SetUserVar=DOT_PARENT_SWITCH_TAB=" "$switch_osc"
+
 switch_tty=$(_tmpdir)/wezterm-switch-env.out
 WEZTERM_SWITCH_TAB_TTY="$switch_tty" wezterm-switch-tab previous
 switch_osc=$(cat "$switch_tty")
@@ -188,6 +196,12 @@ wezterm-move-tab right --tty "$move_tty"
 move_osc=$(cat "$move_tty")
 _assert_contains "wezterm move tab emits DOT_MOVE_TAB user var" \
   "SetUserVar=DOT_MOVE_TAB=" "$move_osc"
+
+move_tty=$(_tmpdir)/wezterm-move-parent.out
+wezterm-move-tab --parent left --tty "$move_tty"
+move_osc=$(cat "$move_tty")
+_assert_contains "wezterm move tab can request parent tmux move" \
+  "SetUserVar=DOT_PARENT_MOVE_TAB=" "$move_osc"
 
 move_tty=$(_tmpdir)/wezterm-move-env.out
 WEZTERM_MOVE_TAB_TTY="$move_tty" wezterm-move-tab left
