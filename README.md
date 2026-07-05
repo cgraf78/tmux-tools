@@ -74,70 +74,15 @@ bind P display-popup -E 'your-picker > "$(tmux-clip-paste --path)"' \; run-shell
 Set `TMUX_TOOLS_CLIP_PASTE_FILE` or pass `--file FILE` to use a custom handoff
 file.
 
-### `wezterm-switch-tab`
-
-Requests a parent WezTerm tab switch by writing an OSC 1337 user-var escape to
-a terminal device. Any terminal program or script can call it when it has the
-controlling tty; tmux bindings are the common use case.
-
-```sh
-wezterm-switch-tab next /dev/ttys001
-wezterm-switch-tab previous --tty /dev/ttys001
-wezterm-switch-tab --parent next /dev/ttys001
-```
-
-Example tmux binding fragment:
-
-```tmux
-bind-key -n C-Tab if-shell -F '#{>:#{session_windows},1}' 'next-window' 'run-shell -b "wezterm-switch-tab next #{client_tty}"'
-```
-
-Because this command writes terminal escape sequences rather than calling the
-local WezTerm CLI, it also works from remote SSH/tmux sessions when the escape
-reaches a local WezTerm window.
-
-Use `--parent` when the caller is a one-window tmux session attached inside
-another tmux. That emits `DOT_PARENT_SWITCH_TAB`; a cooperating WezTerm config
-can turn it into a private key sequence for the parent tmux layer instead of
-switching the WezTerm tab directly.
-
-### `wezterm-move-tab`
-
-Requests a parent WezTerm tab move by writing an OSC 1337 user-var escape to a
-terminal device. It is the move/reorder counterpart to `wezterm-switch-tab`.
-
-```sh
-wezterm-move-tab left /dev/ttys001
-wezterm-move-tab right --tty /dev/ttys001
-wezterm-move-tab --parent left /dev/ttys001
-```
-
-Example tmux binding fragment:
-
-```tmux
-bind-key -n 'M-}' if-shell -F '#{==:#{session_windows},1}' \
-  'run-shell -b "wezterm-move-tab right #{client_tty}"' \
-  { if-shell -F '#{<:#{window_index},#{e|+:#{base-index},#{e|-:#{session_windows},1}}}' \
-      'swap-window -d -t :+' \
-      'display-message -p ""' }
-```
-
-Because this command writes terminal escape sequences rather than calling the
-local WezTerm CLI, it also works from remote SSH/tmux sessions when the escape
-reaches a local WezTerm window.
-
-Use `--parent` when the caller is a one-window tmux session attached inside
-another tmux. That emits `DOT_PARENT_MOVE_TAB`; a cooperating WezTerm config
-can turn it into a private key sequence for the parent tmux layer instead of
-moving the WezTerm tab directly.
+The WezTerm tab helpers `wezterm-switch-tab` and `wezterm-move-tab` moved to
+`termnav`, which owns cross-layer terminal navigation and OSC passthrough
+helpers.
 
 ## Requirements
 
 - Bash
 - tmux
 - `fzf` for interactive restore when multiple saved sessions exist
-- WezTerm for `wezterm-switch-tab` and `wezterm-move-tab` requests to have an
-  effect
 
 ## Install
 
