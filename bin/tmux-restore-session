@@ -112,7 +112,10 @@ fi
 
 if [[ -z "$session" ]]; then
   [[ -d "$save_dir" ]] || _die "no saved sessions"
-  mapfile -t sessions < <(tmux_tools_saved_sessions "$save_dir")
+  sessions=()
+  while IFS= read -r saved_session; do
+    sessions+=("$saved_session")
+  done < <(tmux_tools_saved_sessions "$save_dir")
   case "${#sessions[@]}" in
     0)
       _die "no saved sessions"

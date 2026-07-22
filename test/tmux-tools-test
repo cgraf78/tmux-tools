@@ -64,6 +64,20 @@ _assert_contains() {
   fi
 }
 
+_assert_not_contains() {
+  local name="$1"
+  local needle="$2"
+  local haystack="$3"
+
+  if [[ "$haystack" != *"$needle"* ]]; then
+    _pass "$name"
+  else
+    _fail "$name"
+    printf '  expected output not to contain: %s\n' "$needle" >&2
+    printf '  actual output:\n%s\n' "$haystack" >&2
+  fi
+}
+
 _assert_symlink() {
   local name="$1"
   local path="$2"
@@ -148,6 +162,13 @@ result=$(tmux-restore-session --dir "$list_dir" --list)
 expected="$(printf 'alpha\nbeta')"
 _assert_eq "restore lists saved sessions sorted" "$expected" "$result"
 
+empty_dir=$(_tmpdir)
+empty_output=$(tmux-restore-session --dir "$empty_dir" --no-attach 2>&1)
+empty_rc=$?
+_assert_eq "restore rejects an empty save directory" "2" "$empty_rc"
+_assert_contains "restore explains that no sessions are saved" \
+  "no saved sessions" "$empty_output"
+
 single_dir=$(_tmpdir)
 single_log=$(_tmpdir)/single.log
 single_bin=$(_tmpdir)
@@ -171,6 +192,60 @@ result=$(
 )
 _assert_contains "restore picks only saved session directly" "restored: solo" "$result"
 _assert_eq "restore runs picked session script" "solo" "$(cat "$single_log")"
+
+multiple_dir=$(_tmpdir)
+multiple_bin=$(_tmpdir)
+multiple_log=$(_tmpdir)/multiple.log
+mkdir -p "$multiple_dir"
+for selected_session in alpha release-1.2_test; do
+  cat >"$multiple_dir/$selected_session.sh" <<MOCK
+#!/usr/bin/env bash
+printf '%s\n' '$selected_session' >"\$TMUX_TOOLS_TEST_RESTORED"
+MOCK
+  chmod +x "$multiple_dir/$selected_session.sh"
+done
+cat >"$multiple_bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+case "$1" in
+  has-session) exit 1 ;;
+  *) printf 'unexpected tmux command: %s\n' "$*" >&2; exit 99 ;;
+esac
+MOCK
+cat >"$multiple_bin/fzf" <<'MOCK'
+#!/usr/bin/env bash
+cat >"$TMUX_TOOLS_TEST_FZF_INPUT"
+printf '%s\n' 'release-1.2_test'
+MOCK
+chmod +x "$multiple_bin/tmux" "$multiple_bin/fzf"
+result=$(
+  PATH="$multiple_bin:$PATH" TMUX_TOOLS_TEST_RESTORED="$multiple_log" \
+    TMUX_TOOLS_TEST_FZF_INPUT="$multiple_log.fzf" \
+    /bin/bash "$ROOT/bin/tmux-restore-session" --dir "$multiple_dir" --no-attach 2>&1
+)
+_assert_contains "restore runs the session selected by fzf" \
+  "restored: release-1.2_test" "$result"
+_assert_eq "restore offers every saved session to fzf" \
+  "$(printf 'alpha\nrelease-1.2_test')" "$(cat "$multiple_log.fzf")"
+_assert_eq "restore accepts permitted punctuation in selected session names" \
+  "release-1.2_test" "$(cat "$multiple_log")"
+
+missing_fzf_bin=$(_tmpdir)
+for required_command in bash basename dirname pwd sort; do
+  ln -s "$(command -v "$required_command")" "$missing_fzf_bin/$required_command"
+done
+ln -s "$multiple_bin/tmux" "$missing_fzf_bin/tmux"
+missing_fzf_output=$(
+  PATH="$missing_fzf_bin" /bin/bash "$ROOT/bin/tmux-restore-session" \
+    --dir "$multiple_dir" --no-attach 2>&1
+)
+missing_fzf_rc=$?
+_assert_eq "restore rejects multiple sessions when fzf is unavailable" \
+  "2" "$missing_fzf_rc"
+_assert_contains "restore explains the missing fzf dependency" \
+  "fzf is required" "$missing_fzf_output"
+
+restore_source=$(cat "$ROOT/bin/tmux-restore-session")
+_assert_not_contains "restore avoids Bash 4 mapfile" "mapfile" "$restore_source"
 
 install_prefix=$(_tmpdir)
 PREFIX="$install_prefix" "$ROOT/install.sh" >/dev/null
@@ -276,7 +351,10 @@ MOCK
   active_panes=$("$real_tmux" -S "$socket" list-panes -t tmux-tools-test | wc -l | tr -d ' ')
   _assert_eq "restore preserves active saved window" "2" "$active_panes"
 
-  mapfile -t restored_indexes < <("$real_tmux" -S "$socket" list-windows -t tmux-tools-test -F '#{window_index}')
+  restored_indexes=()
+  while IFS= read -r restored_index; do
+    restored_indexes+=("$restored_index")
+  done < <("$real_tmux" -S "$socket" list-windows -t tmux-tools-test -F '#{window_index}')
   first_index="${restored_indexes[0]}"
   second_index="${restored_indexes[1]}"
   third_index="${restored_indexes[2]}"
