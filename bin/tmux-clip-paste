@@ -8,51 +8,361 @@ set -euo pipefail
 
 _usage() {
   cat <<'EOF'
-Usage: tmux-clip-paste [--file FILE]
-       tmux-clip-paste --path
+Usage: tmux-clip-paste [--file FILE] [--pane PANE]
+       tmux-clip-paste [--file FILE] [--pane PANE] --path
+       tmux-clip-paste [--file FILE] [--pane PANE] --publish
 
 Load picker output from a file into the tmux paste buffer, paste it into the
 current pane, then remove the file.
 
 Options:
   -f, --file FILE    File to read. Defaults to $TMUX_TOOLS_CLIP_PASTE_FILE,
-                    then ${TMPDIR:-/tmp}/.tmux-clip-paste-$(id -u).
+                    then a private server-and-pane-specific runtime path.
+  -t, --pane PANE    Target tmux pane ID, such as %3. Defaults to $TMUX_PANE,
+                    then tmux's current pane when $TMUX_PANE is unset.
   --path             Print the default file path and exit.
+  --publish          Atomically replace the handoff file with standard input.
   -h, --help         Show this help.
 EOF
 }
 
-_die() {
+_usage_error() {
   printf 'tmux-clip-paste: %s\n' "$*" >&2
   exit 2
 }
 
-_default_file() {
-  if [[ -n "${TMUX_TOOLS_CLIP_PASTE_FILE:-}" ]]; then
-    printf '%s\n' "$TMUX_TOOLS_CLIP_PASTE_FILE"
+_fail() {
+  printf 'tmux-clip-paste: %s\n' "$*" >&2
+  exit 1
+}
+
+_warn() {
+  printf 'tmux-clip-paste: warning: %s\n' "$*" >&2
+}
+
+_private_dir() {
+  local runtime_root="${TMPDIR:-/tmp}"
+  local uid user_dir clip_dir dir
+
+  uid=$(id -u) || _fail "cannot determine the current user ID"
+  user_dir="$runtime_root/tmux-tools-$uid"
+  clip_dir="$user_dir/clip-paste"
+
+  for dir in "$user_dir" "$clip_dir"; do
+    if [[ -e "$dir" || -L "$dir" ]]; then
+      [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] ||
+        _fail "runtime path is not a private directory owned by the current user: $dir"
+    else
+      (umask 077 && mkdir "$dir") ||
+        _fail "cannot create private runtime directory: $dir"
+    fi
+    chmod 700 "$dir" || _fail "cannot secure runtime directory: $dir"
+  done
+
+  REPLY="$clip_dir"
+}
+
+_validate_pane() {
+  local pane="$1"
+
+  [[ "$pane" == %* && -n "${pane#%}" && "${pane#%}" != *[!0-9]* ]]
+}
+
+_resolve_identity() {
+  local requested_pane="$target_pane"
+  local identity resolved_pane
+
+  if [[ -z "$requested_pane" && -n "${TMUX_PANE:-}" ]]; then
+    requested_pane="$TMUX_PANE"
+  fi
+  if [[ -n "$requested_pane" ]]; then
+    _validate_pane "$requested_pane" || _fail "invalid tmux pane ID: $requested_pane"
+    identity=$(tmux display-message -p -t "$requested_pane" '#{pid}:#{pane_id}') ||
+      _fail "cannot determine the current tmux server and pane"
   else
-    printf '%s\n' "${TMPDIR:-/tmp}/.tmux-clip-paste-$(id -u)"
+    identity=$(tmux display-message -p '#{pid}:#{pane_id}') ||
+      _fail "cannot determine the current tmux server and pane"
+  fi
+  server_pid="${identity%%:*}"
+  resolved_pane="${identity#*:}"
+  if [[ -z "$server_pid" || "$server_pid" == *[!0-9]* ||
+    "$resolved_pane" != %* || -z "${resolved_pane#%}" ||
+    "${resolved_pane#%}" == *[!0-9]* ]]; then
+    _fail "tmux returned an invalid server or pane identity: $identity"
+  fi
+  if [[ -n "$requested_pane" && "$resolved_pane" != "$requested_pane" ]]; then
+    _fail "tmux resolved $requested_pane as unexpected pane $resolved_pane"
+  fi
+  target_pane="$resolved_pane"
+}
+
+_default_file() {
+  _resolve_identity
+
+  _private_dir
+  REPLY="$REPLY/$server_pid-${target_pane#%}"
+}
+
+_file_identity() {
+  local path="$1" identity
+
+  [[ "$path" != -* ]] || path="./$path"
+  if identity=$(stat -L -c '%d:%i' "$path" 2>/dev/null); then
+    :
+  elif identity=$(stat -L -f '%d:%i' "$path" 2>/dev/null); then
+    :
+  else
+    return 1
+  fi
+  REPLY="$identity"
+}
+
+_owns_temporary_path() {
+  local path="$1"
+
+  [[ -n "$tmp_identity" && -f "$path" && ! -L "$path" ]] || return 1
+  _file_identity "$path" && [[ "$REPLY" == "$tmp_identity" ]]
+}
+
+_publish() {
+  local dir base tmpfile="" tmp_prefix tmp_identity="" attempt
+  local redirected="" old_umask had_noclobber=0
+  local pending_signal=0 mv_status=0
+
+  dir=$(dirname "$file")
+  base=$(basename "$file")
+  [[ ! -d "$file" ]] || _fail "handoff destination is a directory: $file"
+  tmp_prefix="$dir/.${base}.tmp.$$"
+
+  # shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap.
+  _publish_cleanup() {
+    if [[ -n "$tmpfile" ]] && _owns_temporary_path "$tmpfile"; then
+      rm -f -- "$tmpfile" || :
+    fi
+    if [[ -n "$redirected" ]] && _file_identity "$redirected" &&
+      [[ -n "$tmp_identity" && "$REPLY" == "$tmp_identity" ]]; then
+      rm -f -- "$redirected" || :
+    fi
+    exec 3>&- 2>/dev/null || :
+  }
+  # shellcheck disable=SC2317,SC2329 # Invoked indirectly by signal traps.
+  _record_publish_signal() {
+    pending_signal="$1"
+  }
+  trap _publish_cleanup EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  [[ ! -o noclobber ]] || had_noclobber=1
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    tmpfile="$tmp_prefix.$RANDOM.$RANDOM"
+    old_umask=$(umask)
+    umask 077
+    set -o noclobber
+    if { exec 3>"$tmpfile"; } 2>/dev/null; then
+      ((had_noclobber)) || set +o noclobber
+      umask "$old_umask"
+      [[ -f "$tmpfile" && ! -L "$tmpfile" ]] ||
+        _fail "temporary handoff changed during creation: $tmpfile"
+      _file_identity "$tmpfile" || _fail "cannot identify temporary handoff: $tmpfile"
+      tmp_identity="$REPLY"
+      if ! _owns_temporary_path "$tmpfile"; then
+        _fail "temporary handoff changed during creation: $tmpfile"
+      fi
+      break
+    fi
+    ((had_noclobber)) || set +o noclobber
+    umask "$old_umask"
+  done
+  if [[ -z "$tmp_identity" ]]; then
+    tmpfile=""
+    _fail "cannot create an exclusive temporary handoff in: $dir"
+  fi
+
+  cat >&3 || _fail "cannot read handoff payload from standard input"
+  _owns_temporary_path "$tmpfile" ||
+    _fail "temporary handoff changed before publication: $tmpfile"
+  chmod 600 "$tmpfile" || _fail "cannot secure temporary handoff: $tmpfile"
+  if ! _owns_temporary_path "$tmpfile"; then
+    _fail "temporary handoff changed before publication: $tmpfile"
+  fi
+  redirected="$file/${tmpfile##*/}"
+  trap '_record_publish_signal 129' HUP
+  trap '_record_publish_signal 130' INT
+  trap '_record_publish_signal 143' TERM
+  mv -- "$tmpfile" "$file" || mv_status=$?
+  local redirected_owned=0
+  if _file_identity "$redirected" && [[ "$REPLY" == "$tmp_identity" ]]; then
+    redirected_owned=1
+  fi
+  if ((redirected_owned == 0)) && {
+    ((mv_status == 0)) || [[ ! -e "$tmpfile" && ! -L "$tmpfile" ]]
+  }; then
+    tmpfile=""
+    redirected=""
+    exec 3>&- 2>/dev/null || :
+    trap '' HUP INT TERM
+    trap - EXIT
+    return 0
+  else
+    if ((redirected_owned)); then
+      rm -f -- "$redirected" || :
+    fi
+    if ((pending_signal)); then
+      exit "$pending_signal"
+    fi
+    if ((mv_status)); then
+      _fail "cannot publish handoff payload: $file"
+    fi
+    _fail "handoff destination changed during publication: $file"
   fi
 }
 
-file="$(_default_file)"
+claim_dir=""
+claim_file=""
+claim_identity=""
+claim_active=0
+buffer_name=""
+pending_paste_signal=0
+
+_discard_claim() {
+  if ((claim_active)); then
+    if ! _file_identity "$claim_file" || [[ "$REPLY" != "$claim_identity" ]]; then
+      _fail "claimed payload changed before removal: $claim_file"
+    fi
+    rm -f -- "$claim_file" || _fail "cannot remove claimed payload: $claim_file"
+    rmdir "$claim_dir" || _fail "cannot remove payload claim directory: $claim_dir"
+    claim_active=0
+  fi
+}
+
+_discard_committed_claim() {
+  ((claim_active)) || return 0
+
+  if ! _file_identity "$claim_file" || [[ "$REPLY" != "$claim_identity" ]]; then
+    _warn "paste committed but claimed payload changed before cleanup: $claim_file"
+  elif ! rm -f -- "$claim_file"; then
+    _warn "paste committed but claimed payload remains at: $claim_file"
+  elif ! rmdir "$claim_dir"; then
+    _warn "paste committed but empty claim directory remains at: $claim_dir"
+  fi
+  claim_active=0
+}
+
+_retain_claim() {
+  local restore_file="$file"
+
+  ((claim_active)) || return 0
+
+  if [[ ! -e "$claim_file" && ! -L "$claim_file" ]]; then
+    rmdir "$claim_dir" 2>/dev/null || :
+    claim_active=0
+    return 0
+  fi
+  [[ "$restore_file" != -* ]] || restore_file="./$restore_file"
+  if [[ -n "$claim_identity" ]] && _file_identity "$claim_file" &&
+    [[ "$REPLY" == "$claim_identity" ]] &&
+    ln "$claim_file" "$restore_file" 2>/dev/null; then
+    :
+  fi
+  printf 'tmux-clip-paste: payload retained at: %s\n' "$claim_file" >&2
+  claim_active=0
+}
+
+_claim_payload() {
+  local dir base prefix attempt old_umask
+
+  [[ -e "$file" || -L "$file" ]] || return 1
+  [[ -f "$file" && ! -L "$file" ]] ||
+    _fail "handoff payload is not a non-symlink regular file: $file"
+  dir=$(dirname "$file")
+  base=$(basename "$file")
+  prefix="$dir/.${base}.consume.$$"
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    claim_dir="$prefix.$RANDOM.$RANDOM"
+    old_umask=$(umask)
+    umask 077
+    if mkdir "$claim_dir" 2>/dev/null; then
+      umask "$old_umask"
+      claim_file="$claim_dir/payload"
+      claim_active=1
+      break
+    fi
+    umask "$old_umask"
+  done
+  ((claim_active)) || _fail "cannot create a private payload claim in: $dir"
+
+  if ! mv -- "$file" "$claim_file"; then
+    if [[ -e "$claim_file" || -L "$claim_file" ]]; then
+      [[ -f "$claim_file" && ! -L "$claim_file" ]] ||
+        _fail "claimed payload is not a non-symlink regular file: $claim_file"
+      chmod 600 "$claim_file" || _fail "cannot secure claimed payload: $claim_file"
+      _file_identity "$claim_file" || _fail "cannot identify claimed payload: $claim_file"
+      claim_identity="$REPLY"
+      _fail "handoff claim command failed after moving the payload"
+    fi
+    if [[ ! -e "$file" && ! -L "$file" ]]; then
+      _retain_claim
+      return 1
+    fi
+    _fail "cannot claim handoff payload: $file"
+  fi
+  [[ -f "$claim_file" && ! -L "$claim_file" ]] ||
+    _fail "claimed payload is not a non-symlink regular file: $claim_file"
+  chmod 600 "$claim_file" || _fail "cannot secure claimed payload: $claim_file"
+  _file_identity "$claim_file" || _fail "cannot identify claimed payload: $claim_file"
+  claim_identity="$REPLY"
+}
+
+# shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap.
+_handoff_cleanup() {
+  if [[ -n "$buffer_name" ]]; then
+    tmux delete-buffer -b "$buffer_name" >/dev/null 2>&1 || :
+  fi
+  _retain_claim
+}
+
+# shellcheck disable=SC2317,SC2329 # Invoked indirectly by signal traps.
+_record_paste_signal() {
+  pending_paste_signal="$1"
+}
+
+file=""
+target_pane=""
+server_pid=""
 print_path=0
+publish=0
 
 while (($#)); do
   case "$1" in
     -f | --file)
       shift
-      (($#)) || _die "--file requires a value"
+      (($#)) || _usage_error "--file requires a value"
       file="$1"
       shift
       ;;
     --file=*)
       file="${1#--file=}"
-      [[ -n "$file" ]] || _die "--file requires a value"
+      [[ -n "$file" ]] || _usage_error "--file requires a value"
+      shift
+      ;;
+    -t | --pane)
+      shift
+      (($#)) || _usage_error "--pane requires a value"
+      target_pane="$1"
+      shift
+      ;;
+    --pane=*)
+      target_pane="${1#--pane=}"
+      [[ -n "$target_pane" ]] || _usage_error "--pane requires a value"
       shift
       ;;
     --path)
       print_path=1
+      shift
+      ;;
+    --publish)
+      publish=1
       shift
       ;;
     -h | --help)
@@ -61,29 +371,95 @@ while (($#)); do
       ;;
     --)
       shift
-      (($# == 0)) || _die "unexpected argument: $1"
+      (($# == 0)) || _usage_error "unexpected argument: $1"
       ;;
     -*)
-      _die "unknown option: $1"
+      _usage_error "unknown option: $1"
       ;;
     *)
-      _die "unexpected argument: $1"
+      _usage_error "unexpected argument: $1"
       ;;
   esac
 done
 
-[[ -n "$file" ]] || _die "file path is empty"
+((print_path == 0 || publish == 0)) || _usage_error "--path and --publish cannot be combined"
+[[ -z "$target_pane" ]] || _validate_pane "$target_pane" ||
+  _usage_error "invalid tmux pane ID: $target_pane"
+if [[ -z "$file" ]]; then
+  if [[ -n "${TMUX_TOOLS_CLIP_PASTE_FILE:-}" ]]; then
+    file="$TMUX_TOOLS_CLIP_PASTE_FILE"
+  else
+    _default_file
+    file="$REPLY"
+  fi
+fi
+[[ -n "$file" ]] || _usage_error "file path is empty"
+[[ "$file" != -* ]] || file="./$file"
 
 if ((print_path)); then
   printf '%s\n' "$file"
   exit 0
 fi
 
-if [[ ! -s "$file" ]]; then
-  rm -f "$file"
+if ((publish)); then
+  _publish
   exit 0
 fi
 
-tmux load-buffer "$file"
-tmux paste-buffer -p
-rm -f "$file"
+trap _handoff_cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! _claim_payload; then
+  trap - EXIT HUP INT TERM
+  exit 0
+fi
+
+if [[ ! -s "$claim_file" ]]; then
+  _discard_claim
+  trap - EXIT HUP INT TERM
+  exit 0
+fi
+
+if [[ -z "$server_pid" ]]; then
+  _resolve_identity
+fi
+
+buffer_name="tmux-tools-clip-$server_pid-${target_pane#%}-$$-$RANDOM"
+tmux load-buffer -b "$buffer_name" "$claim_file" ||
+  _fail "tmux could not load the claimed payload"
+trap '_record_paste_signal 129' HUP
+trap '_record_paste_signal 130' INT
+trap '_record_paste_signal 143' TERM
+paste_status=0
+tmux paste-buffer -b "$buffer_name" -p -t "$target_pane" -d || paste_status=$?
+paste_committed=0
+if ((paste_status == 0)); then
+  paste_committed=1
+else
+  buffer_listing=""
+  buffer_query_status=0
+  buffer_listing=$(tmux list-buffers -F '#{buffer_name}') || buffer_query_status=$?
+  if ((buffer_query_status == 0)); then
+    buffer_present=0
+    while IFS= read -r listed_buffer; do
+      if [[ "$listed_buffer" == "$buffer_name" ]]; then
+        buffer_present=1
+        break
+      fi
+    done <<<"$buffer_listing"
+    ((buffer_present)) || paste_committed=1
+  fi
+fi
+if ((paste_committed)); then
+  buffer_name=""
+  trap '' HUP INT TERM
+  _discard_committed_claim
+  trap - EXIT
+  exit 0
+fi
+if ((pending_paste_signal)); then
+  exit "$pending_paste_signal"
+fi
+_fail "tmux could not paste the claimed payload"
