@@ -109,15 +109,98 @@ if ! tmux has-session -t "$session" 2>/dev/null; then
   _die "no such tmux session: $session"
 fi
 
+old_umask=$(umask)
+umask 077
 mkdir -p "$save_dir"
+umask "$old_umask"
 outfile="$(tmux_tools_session_file "$save_dir" "$session")"
+[[ ! -d "$outfile" ]] || _die "save destination is a directory: $outfile"
+tmpfile=""
+tmp_prefix="$save_dir/.${session}.sh.tmp.$$"
+tmp_identity=""
+redirected=""
+pending_signal=0
+
+_file_identity() {
+  local path="$1" identity
+
+  [[ "$path" != -* ]] || path="./$path"
+  if identity=$(stat -L -c '%d:%i' "$path" 2>/dev/null); then
+    :
+  elif identity=$(stat -L -f '%d:%i' "$path" 2>/dev/null); then
+    :
+  else
+    return 1
+  fi
+  REPLY="$identity"
+}
+
+_owns_temporary_path() {
+  local path="$1"
+
+  [[ -n "$tmp_identity" && -f "$path" && ! -L "$path" ]] || return 1
+  _file_identity "$path" && [[ "$REPLY" == "$tmp_identity" ]]
+}
+
+_create_tmpfile() {
+  local attempt old_umask had_noclobber=0
+
+  [[ ! -o noclobber ]] || had_noclobber=1
+
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    tmpfile="$tmp_prefix.$RANDOM.$RANDOM"
+    old_umask=$(umask)
+    umask 077
+    set -o noclobber
+    if { exec 3>"$tmpfile"; } 2>/dev/null; then
+      ((had_noclobber)) || set +o noclobber
+      umask "$old_umask"
+      [[ -f "$tmpfile" && ! -L "$tmpfile" ]] ||
+        _die "temporary save changed during creation: $tmpfile"
+      _file_identity "$tmpfile" || _die "cannot identify temporary save: $tmpfile"
+      tmp_identity="$REPLY"
+      if ! _owns_temporary_path "$tmpfile"; then
+        _die "temporary save changed during creation: $tmpfile"
+      fi
+      return 0
+    fi
+    ((had_noclobber)) || set +o noclobber
+    umask "$old_umask"
+  done
+  tmpfile=""
+  _die "cannot create an exclusive temporary save in: $save_dir"
+}
+
+# shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap.
+_cleanup() {
+  if [[ -n "$tmpfile" ]] && _owns_temporary_path "$tmpfile"; then
+    rm -f -- "$tmpfile" || :
+  fi
+  if [[ -n "$redirected" ]] && _file_identity "$redirected" &&
+    [[ -n "$tmp_identity" && "$REPLY" == "$tmp_identity" ]]; then
+    rm -f -- "$redirected" || :
+  fi
+  exec 3>&- 2>/dev/null || :
+}
+
+# shellcheck disable=SC2317,SC2329 # Invoked indirectly by signal traps.
+_record_signal() {
+  pending_signal="$1"
+}
+
+trap _cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+_create_tmpfile
 
 active_window_index=$(tmux display-message -p -t "$session" '#{window_index}')
 
 window_indexes=()
+window_index_output=$(tmux list-windows -t "$session" -F '#{window_index}')
 while IFS= read -r index; do
   window_indexes+=("$index")
-done < <(tmux list-windows -t "$session" -F '#{window_index}')
+done <<<"$window_index_output"
 
 {
   printf '#!/usr/bin/env bash\n'
@@ -173,9 +256,10 @@ EOF
     wname=$(tmux display-message -p -t "$session:$widx" '#{window_name}')
 
     pane_dirs=()
+    pane_dir_output=$(tmux list-panes -t "$session:$widx" -F '#{pane_current_path}')
     while IFS= read -r pdir; do
       pane_dirs+=("$pdir")
-    done < <(tmux list-panes -t "$session:$widx" -F '#{pane_current_path}')
+    done <<<"$pane_dir_output"
 
     printf 'window_indexes+=(%s)\n' "$(_quote "$widx")"
     if ((i == 0)); then
@@ -211,7 +295,49 @@ for i in "${!window_indexes[@]}"; do
   fi
 done
 EOF
-} >"$outfile"
+} >&3
 
-chmod +x "$outfile"
-printf 'saved: %s\n' "$outfile"
+bash -n "$tmpfile"
+_owns_temporary_path "$tmpfile" ||
+  _die "temporary save changed before publication: $tmpfile"
+chmod 700 "$tmpfile" || _die "cannot secure temporary save: $tmpfile"
+if ! _owns_temporary_path "$tmpfile"; then
+  _die "temporary save changed before publication: $tmpfile"
+fi
+redirected="$outfile/${tmpfile##*/}"
+# A signal delivered while Bash waits for mv runs its trap before the next
+# command. Defer that signal until the installed inode tells us whether the
+# atomic replacement committed.
+trap '_record_signal 129' HUP
+trap '_record_signal 130' INT
+trap '_record_signal 143' TERM
+mv_status=0
+mv -- "$tmpfile" "$outfile" || mv_status=$?
+redirected_owned=0
+if _file_identity "$redirected" && [[ "$REPLY" == "$tmp_identity" ]]; then
+  redirected_owned=1
+fi
+if ((redirected_owned == 0)) && {
+  ((mv_status == 0)) || [[ ! -e "$tmpfile" && ! -L "$tmpfile" ]]
+}; then
+  tmpfile=""
+  redirected=""
+  exec 3>&- 2>/dev/null || :
+  # The rename is the commit point. Nothing after it may report failure while
+  # leaving the new save installed.
+  trap '' HUP INT TERM
+  trap - EXIT
+  printf 'saved: %s\n' "$outfile" || :
+  exit 0
+else
+  if ((redirected_owned)); then
+    rm -f -- "$redirected" || :
+  fi
+  if ((pending_signal)); then
+    exit "$pending_signal"
+  fi
+  if ((mv_status)); then
+    _die "cannot publish save: $outfile"
+  fi
+  _die "save destination changed during publication: $outfile"
+fi

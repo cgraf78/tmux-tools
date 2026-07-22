@@ -90,6 +90,31 @@ _assert_symlink() {
   fi
 }
 
+_assert_files_eq() {
+  local name="$1"
+  local expected="$2"
+  local actual="$3"
+
+  if _files_equal "$expected" "$actual"; then
+    _pass "$name"
+  else
+    _fail "$name"
+    printf '  expected byte-identical files: %s %s\n' "$expected" "$actual" >&2
+  fi
+}
+
+_files_equal() {
+  [[ "$(od -An -tx1 -v <"$1")" == "$(od -An -tx1 -v <"$2")" ]]
+}
+
+_mode() {
+  if stat -c '%a' "$1" >/dev/null 2>&1; then
+    stat -c '%a' "$1"
+  else
+    stat -f '%Lp' "$1"
+  fi
+}
+
 echo "=== tmux session tools ==="
 
 test_home="$HOME"
@@ -246,6 +271,449 @@ _assert_contains "restore explains the missing fzf dependency" \
 
 restore_source=$(cat "$ROOT/bin/tmux-restore-session")
 _assert_not_contains "restore avoids Bash 4 mapfile" "mapfile" "$restore_source"
+
+save_bin=$(_tmpdir)
+cat >"$save_bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+case "$1:$*" in
+  has-session:*)
+    exit 0
+    ;;
+  display-message:*'#{window_index}')
+    if [[ -n "${TMUX_TOOLS_TEST_FAIL_ACTIVE:-}" ]]; then
+      printf 'active window lookup failed\n' >&2
+      exit 42
+    fi
+    printf '0\n'
+    ;;
+  display-message:*'#{window_layout}')
+    printf 'layout-token\n'
+    ;;
+  display-message:*'#{window_name}')
+    printf '%s\n' "${TMUX_TOOLS_TEST_WINDOW_NAME:-main}"
+    ;;
+  list-windows:*)
+    printf '0\n'
+    ;;
+  list-panes:*)
+    if [[ -n "${TMUX_TOOLS_TEST_FAIL_PANES:-}" ]]; then
+      exit 42
+    fi
+    printf '%s\n' "$HOME"
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "$*" >&2
+    exit 99
+    ;;
+esac
+MOCK
+chmod +x "$save_bin/tmux"
+
+private_home=$(_tmpdir)
+(
+  umask 000
+  HOME="$private_home" XDG_DATA_HOME='' PATH="$save_bin:$PATH" \
+    tmux-save-session private-session >/dev/null
+)
+private_save_dir="$private_home/.local/share/tmux/sessions"
+private_save="$private_save_dir/private-session.sh"
+_assert_eq "save creates managed session directories privately" \
+  "700" "$(_mode "$private_save_dir")"
+_assert_eq "save creates restore scripts privately and executable" \
+  "700" "$(_mode "$private_save")"
+
+shared_dir=$(_tmpdir)
+chmod 0755 "$shared_dir"
+(
+  umask 000
+  PATH="$save_bin:$PATH" tmux-save-session --dir "$shared_dir" shared-session >/dev/null
+)
+_assert_eq "save preserves an existing explicit directory mode" \
+  "755" "$(_mode "$shared_dir")"
+_assert_eq "save restricts files in an existing explicit directory" \
+  "700" "$(_mode "$shared_dir/shared-session.sh")"
+
+failure_dir=$(_tmpdir)
+failure_save="$failure_dir/failure-session.sh"
+failure_reference="$failure_dir/reference"
+printf 'known-good-save\n' >"$failure_save"
+cp "$failure_save" "$failure_reference"
+PATH="$save_bin:$PATH" TMUX_TOOLS_TEST_FAIL_PANES=1 \
+  tmux-save-session --dir "$failure_dir" failure-session >/dev/null 2>&1
+failure_rc=$?
+if ((failure_rc == 0)); then
+  _fail "save reports a mid-generation tmux failure"
+else
+  _pass "save reports a mid-generation tmux failure"
+fi
+_assert_files_eq "save preserves the prior file byte-for-byte after generation failure" \
+  "$failure_reference" "$failure_save"
+failure_temps=$(printf '%s\n' "$failure_dir"/.*.tmp.*)
+_assert_eq "save removes temporary files after generation failure" \
+  "$failure_dir/.*.tmp.*" "$failure_temps"
+
+stderr_dir=$(_tmpdir)
+stderr_output=$(PATH="$save_bin:$PATH" TMUX_TOOLS_TEST_FAIL_ACTIVE=1 \
+  tmux-save-session --dir "$stderr_dir" stderr-session 2>&1)
+stderr_rc=$?
+if ((stderr_rc == 0)); then
+  _fail "save reports a post-create query failure"
+else
+  _pass "save reports a post-create query failure"
+fi
+_assert_contains "save preserves actionable stderr after temporary-file creation" \
+  "active window lookup failed" "$stderr_output"
+
+directory_dest_dir=$(_tmpdir)
+directory_dest="$directory_dest_dir/directory-session.sh"
+mkdir "$directory_dest"
+printf 'directory marker\n' >"$directory_dest/marker"
+PATH="$save_bin:$PATH" \
+  tmux-save-session --dir "$directory_dest_dir" directory-session >/dev/null 2>&1
+directory_dest_rc=$?
+if ((directory_dest_rc == 0)); then
+  _fail "save rejects a destination directory"
+else
+  _pass "save rejects a destination directory"
+fi
+_assert_eq "save leaves a destination directory unchanged" \
+  "directory marker" "$(cat "$directory_dest/marker")"
+directory_dest_entries=$(printf '%s\n' "$directory_dest"/*)
+_assert_eq "save leaves no artifact inside a destination directory" \
+  "$directory_dest/marker" "$directory_dest_entries"
+directory_dest_temps=$(printf '%s\n' "$directory_dest"/.*.tmp.*)
+_assert_eq "save leaves no hidden temp inside a destination directory" \
+  "$directory_dest/.*.tmp.*" "$directory_dest_temps"
+
+symlink_dest_dir=$(_tmpdir)
+symlink_target=$(_tmpdir)
+symlink_dest="$symlink_dest_dir/symlink-session.sh"
+printf 'symlink marker\n' >"$symlink_target/marker"
+ln -s "$symlink_target" "$symlink_dest"
+PATH="$save_bin:$PATH" \
+  tmux-save-session --dir "$symlink_dest_dir" symlink-session >/dev/null 2>&1
+symlink_dest_rc=$?
+if ((symlink_dest_rc == 0)); then
+  _fail "save rejects a symlink to a destination directory"
+else
+  _pass "save rejects a symlink to a destination directory"
+fi
+symlink_target_entries=$(printf '%s\n' "$symlink_target"/*)
+_assert_eq "save leaves no artifact through a destination symlink" \
+  "$symlink_target/marker" "$symlink_target_entries"
+symlink_target_temps=$(printf '%s\n' "$symlink_target"/.*.tmp.*)
+_assert_eq "save leaves no hidden temp through a destination symlink" \
+  "$symlink_target/.*.tmp.*" "$symlink_target_temps"
+
+identity_dir=$(_tmpdir)
+identity_save="$identity_dir/identity-session.sh"
+identity_bin=$(_tmpdir)
+identity_real_stat=$(command -v stat)
+printf 'known-good-identity-save\n' >"$identity_save"
+ln -s "$save_bin/tmux" "$identity_bin/tmux"
+cat >"$identity_bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "${!#}" == /dev/fd/3 ]]; then
+  printf 'synthetic-platform-descriptor-identity\n'
+  exit 0
+fi
+exec "$TMUX_TOOLS_TEST_REAL_STAT" "$@"
+MOCK
+chmod +x "$identity_bin/stat"
+PATH="$identity_bin:$PATH" TMUX_TOOLS_TEST_REAL_STAT="$identity_real_stat" \
+  tmux-save-session --dir "$identity_dir" identity-session >/dev/null 2>&1
+identity_rc=$?
+_assert_eq "save ignores nonportable external descriptor identity" "0" "$identity_rc"
+_assert_contains "save publishes with portable pathname identity" \
+  '_new_session_window main ' "$(cat "$identity_save")"
+identity_owned_temps=""
+for identity_candidate in "$identity_dir"/.identity-session.sh.tmp.*; do
+  [[ -e "$identity_candidate" || -L "$identity_candidate" ]] || continue
+  identity_owned_temps+="${identity_owned_temps:+$'\n'}$identity_candidate"
+done
+_assert_eq "save removes its pathname-identified temporary" \
+  "" "$identity_owned_temps"
+
+creation_race_dir=$(_tmpdir)
+creation_race_save="$creation_race_dir/creation-race-session.sh"
+creation_race_bin=$(_tmpdir)
+creation_race_real_stat=$(command -v stat)
+printf 'known-good-creation-race-save\n' >"$creation_race_save"
+ln -s "$save_bin/tmux" "$creation_race_bin/tmux"
+cat >"$creation_race_bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+target="${!#}"
+if output=$("$TMUX_TOOLS_TEST_REAL_STAT" "$@"); then
+  :
+else
+  exit $?
+fi
+if [[ "$target" == *.tmp.* ]]; then
+  if [[ ! -e "$TMUX_TOOLS_TEST_SEEN" ]]; then
+    : >"$TMUX_TOOLS_TEST_SEEN"
+  elif [[ ! -e "$TMUX_TOOLS_TEST_RACED" ]]; then
+    : >"$TMUX_TOOLS_TEST_RACED"
+    rm -f -- "$target"
+    printf 'unrelated creation replacement\n' >"$target"
+    exec "$TMUX_TOOLS_TEST_REAL_STAT" "$@"
+  fi
+fi
+printf '%s\n' "$output"
+MOCK
+chmod +x "$creation_race_bin/stat"
+PATH="$creation_race_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_STAT="$creation_race_real_stat" \
+  TMUX_TOOLS_TEST_SEEN="$creation_race_dir/seen" \
+  TMUX_TOOLS_TEST_RACED="$creation_race_dir/raced" \
+  tmux-save-session --dir "$creation_race_dir" creation-race-session \
+  >/dev/null 2>&1
+creation_race_rc=$?
+if ((creation_race_rc == 0)); then
+  _fail "save rejects replacement after its initial pathname identity read"
+else
+  _pass "save rejects replacement after its initial pathname identity read"
+fi
+_assert_eq "save preserves its prior file after creation-time replacement" \
+  "known-good-creation-race-save" "$(cat "$creation_race_save")"
+creation_race_replacement=$(printf '%s\n' \
+  "$creation_race_dir"/.creation-race-session.sh.tmp.*)
+_assert_eq "save does not delete an unrelated creation-time replacement" \
+  "unrelated creation replacement" "$(cat "$creation_race_replacement")"
+
+temp_race_dir=$(_tmpdir)
+temp_race_save="$temp_race_dir/temp-race-session.sh"
+temp_race_bin=$(_tmpdir)
+temp_race_real_chmod=$(command -v chmod)
+printf 'known-good-temp-race-save\n' >"$temp_race_save"
+ln -s "$save_bin/tmux" "$temp_race_bin/tmux"
+cat >"$temp_race_bin/chmod" <<'MOCK'
+#!/usr/bin/env bash
+target="${!#}"
+if [[ "$target" == *.tmp.* ]]; then
+  "$TMUX_TOOLS_TEST_REAL_CHMOD" "$@"
+  rm -f -- "$target"
+  printf 'unrelated replacement\n' >"$target"
+  exit 0
+fi
+exec "$TMUX_TOOLS_TEST_REAL_CHMOD" "$@"
+MOCK
+chmod +x "$temp_race_bin/chmod"
+PATH="$temp_race_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_CHMOD="$temp_race_real_chmod" \
+  tmux-save-session --dir "$temp_race_dir" temp-race-session >/dev/null 2>&1
+temp_race_rc=$?
+if ((temp_race_rc == 0)); then
+  _fail "save rejects a replaced temporary file"
+else
+  _pass "save rejects a replaced temporary file"
+fi
+_assert_eq "save preserves its prior file after temporary replacement" \
+  "known-good-temp-race-save" "$(cat "$temp_race_save")"
+temp_race_replacement=$(printf '%s\n' "$temp_race_dir"/.temp-race-session.sh.tmp.*)
+_assert_eq "save does not delete an unrelated temporary replacement" \
+  "unrelated replacement" "$(cat "$temp_race_replacement")"
+_assert_eq "save does not chmod an unrelated temporary replacement" \
+  "644" "$(_mode "$temp_race_replacement")"
+
+race_dest_dir=$(_tmpdir)
+race_dest="$race_dest_dir/race-session.sh"
+race_bin=$(_tmpdir)
+real_mv=$(command -v mv)
+ln -s "$save_bin/tmux" "$race_bin/tmux"
+cat >"$race_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+destination="${!#}"
+rm -f "$destination"
+mkdir "$destination"
+printf 'unrelated\n' >"$destination/marker"
+exec "$TMUX_TOOLS_TEST_REAL_MV" "$@"
+MOCK
+chmod +x "$race_bin/mv"
+PATH="$race_bin:$PATH" TMUX_TOOLS_TEST_REAL_MV="$real_mv" \
+  tmux-save-session --dir "$race_dest_dir" race-session >/dev/null 2>&1
+race_rc=$?
+if ((race_rc == 0)); then
+  _fail "save rejects a destination changed to a directory during publication"
+else
+  _pass "save rejects a destination changed to a directory during publication"
+fi
+race_entries=$(printf '%s\n' "$race_dest"/*)
+_assert_eq "save removes only its file redirected into a raced directory" \
+  "$race_dest/marker" "$race_entries"
+race_hidden=$(printf '%s\n' "$race_dest"/.*.tmp.*)
+_assert_eq "save leaves no hidden file redirected into a raced directory" \
+  "$race_dest/.*.tmp.*" "$race_hidden"
+
+move_signal_dir=$(_tmpdir)
+move_signal_dest="$move_signal_dir/move-signal-session.sh"
+move_signal_reference="$move_signal_dir/reference"
+move_signal_bin=$(_tmpdir)
+printf 'known-good-save\n' >"$move_signal_dest"
+cp "$move_signal_dest" "$move_signal_reference"
+ln -s "$save_bin/tmux" "$move_signal_bin/tmux"
+cat >"$move_signal_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+"$TMUX_TOOLS_TEST_REAL_MV" "$@"
+kill -TERM "$PPID"
+exit 143
+MOCK
+chmod +x "$move_signal_bin/mv"
+move_signal_output=$(PATH="$move_signal_bin:$PATH" TMUX_TOOLS_TEST_REAL_MV="$real_mv" \
+  tmux-save-session --dir "$move_signal_dir" move-signal-session 2>&1)
+move_signal_rc=$?
+_assert_eq "save commits successfully when TERM arrives after a completed mv" \
+  "0" "$move_signal_rc"
+_assert_contains "save reports the committed destination after post-mv TERM" \
+  "saved: $move_signal_dest" "$move_signal_output"
+if _files_equal "$move_signal_reference" "$move_signal_dest"; then
+  _fail "save installs the new restore script after post-mv TERM"
+else
+  _pass "save installs the new restore script after post-mv TERM"
+fi
+bash -n "$move_signal_dest"
+_assert_eq "save keeps the committed script private after post-mv TERM" \
+  "700" "$(_mode "$move_signal_dest")"
+move_signal_residue=""
+for move_signal_candidate in "$move_signal_dir"/.*.tmp.* \
+  "$move_signal_dir"/.*.backup.*; do
+  [[ -e "$move_signal_candidate" || -L "$move_signal_candidate" ]] || continue
+  move_signal_residue+="${move_signal_residue:+$'\n'}$move_signal_candidate"
+done
+_assert_eq "save leaves no transaction residue after post-mv TERM" \
+  "" "$move_signal_residue"
+
+concurrent_save_dir=$(_tmpdir)
+concurrent_save_dest="$concurrent_save_dir/concurrent-session.sh"
+concurrent_save_ready="$concurrent_save_dir/first-move.ready"
+concurrent_save_continue="$concurrent_save_dir/first-move.continue"
+concurrent_save_bin=$(_tmpdir)
+ln -s "$save_bin/tmux" "$concurrent_save_bin/tmux"
+cat >"$concurrent_save_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+"$TMUX_TOOLS_TEST_REAL_MV" "$@"
+: >"$TMUX_TOOLS_TEST_READY"
+for ((attempt = 0; attempt < 500; attempt++)); do
+  [[ ! -e "$TMUX_TOOLS_TEST_CONTINUE" ]] || exit 0
+  sleep 0.01
+done
+exit 98
+MOCK
+chmod +x "$concurrent_save_bin/mv"
+PATH="$concurrent_save_bin:$PATH" TMUX_TOOLS_TEST_REAL_MV="$real_mv" \
+  TMUX_TOOLS_TEST_READY="$concurrent_save_ready" \
+  TMUX_TOOLS_TEST_CONTINUE="$concurrent_save_continue" \
+  TMUX_TOOLS_TEST_WINDOW_NAME=first \
+  tmux-save-session --dir "$concurrent_save_dir" concurrent-session \
+  >/dev/null 2>&1 &
+concurrent_save_first=$!
+concurrent_save_ready_seen=0
+for ((attempt = 0; attempt < 500; attempt++)); do
+  if [[ -e "$concurrent_save_ready" ]]; then
+    concurrent_save_ready_seen=1
+    break
+  fi
+  sleep 0.01
+done
+if ((concurrent_save_ready_seen)); then
+  _pass "first save commits before a concurrent replacement"
+  PATH="$save_bin:$PATH" TMUX_TOOLS_TEST_WINDOW_NAME=second \
+    tmux-save-session --dir "$concurrent_save_dir" concurrent-session \
+    >/dev/null 2>&1
+  concurrent_save_second_rc=$?
+  : >"$concurrent_save_continue"
+  wait "$concurrent_save_first"
+  concurrent_save_first_rc=$?
+else
+  _fail "first save commits before a concurrent replacement"
+  kill "$concurrent_save_first" 2>/dev/null || :
+  wait "$concurrent_save_first" 2>/dev/null || :
+  concurrent_save_first_rc=98
+  concurrent_save_second_rc=98
+fi
+_assert_eq "superseded first save still reports its completed commit" \
+  "0" "$concurrent_save_first_rc"
+_assert_eq "concurrent second save reports success" \
+  "0" "$concurrent_save_second_rc"
+_assert_contains "concurrent second save remains the final destination" \
+  '_new_session_window second ' "$(cat "$concurrent_save_dest")"
+
+post_commit_stat_dir=$(_tmpdir)
+post_commit_stat_dest="$post_commit_stat_dir/post-commit-stat-session.sh"
+post_commit_stat_reference="$post_commit_stat_dir/reference"
+post_commit_stat_called="$post_commit_stat_dir/post-commit-stat-called"
+post_commit_stat_bin=$(_tmpdir)
+real_stat=$(command -v stat)
+printf 'known-good-save\n' >"$post_commit_stat_dest"
+cp "$post_commit_stat_dest" "$post_commit_stat_reference"
+ln -s "$save_bin/tmux" "$post_commit_stat_bin/tmux"
+cat >"$post_commit_stat_bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "${!#}" == "$TMUX_TOOLS_TEST_STAT_DEST" ]]; then
+  : >"$TMUX_TOOLS_TEST_STAT_CALLED"
+  exit 42
+fi
+exec "$TMUX_TOOLS_TEST_REAL_STAT" "$@"
+MOCK
+chmod +x "$post_commit_stat_bin/stat"
+post_commit_stat_output=$(PATH="$post_commit_stat_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_STAT="$real_stat" \
+  TMUX_TOOLS_TEST_STAT_DEST="$post_commit_stat_dest" \
+  TMUX_TOOLS_TEST_STAT_CALLED="$post_commit_stat_called" \
+  tmux-save-session --dir "$post_commit_stat_dir" \
+  post-commit-stat-session 2>&1)
+post_commit_stat_rc=$?
+_assert_eq "save has no destination identity lookup after the rename commit" \
+  "0" "$post_commit_stat_rc"
+_assert_contains "save reports a commit without a post-rename identity lookup" \
+  "saved: $post_commit_stat_dest" "$post_commit_stat_output"
+if _files_equal "$post_commit_stat_reference" "$post_commit_stat_dest"; then
+  _fail "save installs the new script without a post-rename identity lookup"
+else
+  _pass "save installs the new script without a post-rename identity lookup"
+fi
+if [[ -e "$post_commit_stat_called" ]]; then
+  _fail "save performs no destination identity lookup after the rename commit"
+else
+  _pass "save performs no destination identity lookup after the rename commit"
+fi
+
+signal_dir=$(_tmpdir)
+signal_save="$signal_dir/signal-session.sh"
+signal_reference="$signal_dir/reference"
+signal_bin=$(_tmpdir)
+signal_sibling_path="$signal_dir/sibling-path"
+printf 'known-good-signal-save\n' >"$signal_save"
+cp "$signal_save" "$signal_reference"
+ln -s "$save_bin/tmux" "$signal_bin/tmux"
+real_cat=$(command -v cat)
+cat >"$signal_bin/cat" <<'MOCK'
+#!/usr/bin/env bash
+sibling="$TMUX_TOOLS_TEST_SIGNAL_DIR/.signal-session.sh.tmp.$PPID.unrelated"
+printf 'unrelated\n' >"$sibling"
+printf '%s\n' "$sibling" >"$TMUX_TOOLS_TEST_SIBLING_PATH"
+kill -TERM "$PPID"
+exec "$TMUX_TOOLS_TEST_REAL_CAT" "$@"
+MOCK
+chmod +x "$signal_bin/cat"
+PATH="$signal_bin:$PATH" TMUX_TOOLS_TEST_REAL_CAT="$real_cat" \
+  TMUX_TOOLS_TEST_SIGNAL_DIR="$signal_dir" \
+  TMUX_TOOLS_TEST_SIBLING_PATH="$signal_sibling_path" \
+  tmux-save-session --dir "$signal_dir" signal-session >/dev/null 2>&1
+signal_rc=$?
+_assert_eq "save preserves conventional TERM status during generation" \
+  "143" "$signal_rc"
+_assert_files_eq "save preserves the prior file when signaled during generation" \
+  "$signal_reference" "$signal_save"
+signal_sibling=$(cat "$signal_sibling_path")
+_assert_eq "save never removes an unrelated same-prefix sibling" \
+  "unrelated" "$(cat "$signal_sibling" 2>/dev/null)"
+signal_owned_temps=""
+for signal_candidate in "$signal_dir"/.signal-session.sh.tmp.*; do
+  [[ -e "$signal_candidate" || -L "$signal_candidate" ]] || continue
+  [[ "$signal_candidate" == "$signal_sibling" ]] ||
+    signal_owned_temps+="${signal_owned_temps:+$'\n'}$signal_candidate"
+done
+_assert_eq "save removes its exact temporary file after TERM" "" "$signal_owned_temps"
 
 install_prefix=$(_tmpdir)
 PREFIX="$install_prefix" "$ROOT/install.sh" >/dev/null
