@@ -80,16 +80,38 @@ after the popup closes.
 tmux-clip-paste --path
 tmux-clip-paste
 tmux-clip-paste --file /tmp/selection
+tmux-clip-paste --pane %3
+your-picker | tmux-clip-paste --publish
 ```
 
 Example tmux binding:
 
 ```tmux
-bind P display-popup -E 'your-picker > "$(tmux-clip-paste --path)"' \; run-shell tmux-clip-paste
+bind P display-popup -E 'your-picker | tmux-clip-paste --pane "#{pane_id}" --publish' \; run-shell 'tmux-clip-paste --pane "#{pane_id}"'
 ```
 
 Set `TMUX_TOOLS_CLIP_PASTE_FILE` or pass `--file FILE` to use a custom handoff
-file.
+file. By default, each tmux server and pane uses a different handoff file inside
+a mode `0700` per-user runtime directory. `--publish` reads standard input into
+a restrictive temporary file and atomically publishes the complete payload;
+use it instead of redirecting directly to the path printed by `--path`.
+The binding passes the originating pane ID explicitly so both commands retain
+the same target even if another pane becomes active while the popup is open.
+Each consumer uses and deletes a unique named tmux buffer, so concurrent pastes
+cannot replace one another through tmux's shared unnamed buffer. Atomic
+publication assumes other users cannot rename or replace entries in the
+handoff file's parent directory. The private default directory provides that
+boundary; an intentionally shared override directory does not. Consumers
+atomically claim one payload before loading it, so a newer publication remains
+available for the next invocation. On a load or paste failure, the claimed
+payload always remains at the private path reported in the diagnostic. A
+best-effort hard link also restores the public path when it is still vacant;
+that convenience never removes the private claim or overwrites a newer
+payload. Only non-symlink regular files are accepted as handoffs. Pasting uses
+tmux's delete-after-paste operation, so an interrupted client can distinguish a
+committed paste from a retryable failure by checking its unique buffer. Once a
+paste commits, later local cleanup failures produce warnings without changing
+the successful status or inviting a duplicate retry.
 
 The WezTerm tab helpers `wezterm-switch-tab` and `wezterm-move-tab` moved to
 `termnav`, which owns cross-layer terminal navigation and OSC passthrough

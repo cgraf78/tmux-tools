@@ -6,22 +6,70 @@ tmux-clip-paste \- paste popup-selected text into the current tmux pane
 .RB [ -f
 .IR file | --file
 .IR file ]
+.RB [ -t
+.IR pane | --pane
+.IR pane ]
 .br
 .B tmux-clip-paste
+.RB [ -f
+.IR file | --file
+.IR file ]
+.RB [ -t
+.IR pane | --pane
+.IR pane ]
 .B --path
+.br
+.B tmux-clip-paste
+.RB [ -f
+.IR file | --file
+.IR file ]
+.RB [ -t
+.IR pane | --pane
+.IR pane ]
+.B --publish
 .SH DESCRIPTION
 .B tmux-clip-paste
 loads a handoff file into the tmux paste buffer, pastes it into the current
 pane, and removes the file. It is useful when a tmux popup or picker must write
 its selected text before tmux can paste after the popup closes.
+.PP
+The default path is isolated by tmux server and pane inside a private per-user
+runtime directory. Producers should pipe selected text to
+.B --publish
+so the complete payload replaces the handoff file atomically.
+Consumers load the payload into a unique named tmux buffer and explicitly
+paste it into the resolved pane with tmux's delete-after-paste operation.
 .SH OPTIONS
 .TP
 .BI -f ", --file " file
 Read selected text from
 .IR file .
 .TP
+.BI -t ", --pane " pane
+Use the tmux pane ID
+.I pane
+for path isolation and pasting. If omitted,
+.B TMUX_PANE
+is used when set; otherwise tmux's current pane is resolved once and retained.
+.TP
 .B --path
 Print the default handoff file path and exit.
+.TP
+.B --publish
+Read standard input and atomically publish it as the next handoff payload.
+Atomic publication assumes other users cannot rename or replace entries in the
+handoff file's parent directory. The private default directory provides that
+boundary; an intentionally shared override directory does not.
+Consumers atomically claim one payload before loading it. A newer publication
+therefore remains available for the next invocation. On a load or paste
+failure, the claimed payload always remains at the private path named in the
+diagnostic. A best-effort hard link also restores the public path when it is
+still vacant; that convenience never removes the private claim or overwrites a
+newer payload. Only non-symlink regular files are accepted as handoffs. An
+interrupted client checks whether its unique buffer still exists to distinguish
+a committed paste from a retryable failure. After a committed paste, local
+cleanup failures are reported as warnings without changing the successful
+status.
 .TP
 .BR -h ", " --help
 Show usage.
@@ -29,14 +77,19 @@ Show usage.
 .TP
 .B TMUX_TOOLS_CLIP_PASTE_FILE
 Override the default handoff file path.
+.SH EXAMPLES
+.nf
+bind P display-popup -E 'your-picker | tmux-clip-paste --pane "#{pane_id}" --publish' \\; run-shell 'tmux-clip-paste --pane "#{pane_id}"'
+.fi
 .SH EXIT STATUS
 .TP
 .B 0
-Text was pasted, an empty handoff file was removed, or the handoff path was
-printed.
+Text was pasted, a payload was published, an empty handoff file was removed,
+no handoff file was available, or the handoff path was printed.
 .TP
 .B 1
-tmux failed to load or paste the buffer.
+A runtime operation failed, including tmux identity, buffer, filesystem,
+claim, or publication operations.
 .TP
 .B 2
 Usage error.

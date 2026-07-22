@@ -50,6 +50,19 @@ _assert_eq() {
   fi
 }
 
+_assert_ne() {
+  local name="$1"
+  local first="$2"
+  local second="$3"
+
+  if [[ "$first" != "$second" ]]; then
+    _pass "$name"
+  else
+    _fail "$name"
+    printf '  expected distinct values: %q\n' "$first" >&2
+  fi
+}
+
 _assert_contains() {
   local name="$1"
   local needle="$2"
@@ -113,6 +126,43 @@ _mode() {
   else
     stat -f '%Lp' "$1"
   fi
+}
+
+_wait_for_file() {
+  local name="$1"
+  local path="$2"
+  local attempt
+
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    if [[ -e "$path" ]]; then
+      _pass "$name"
+      return 0
+    fi
+    sleep 0.01
+  done
+  _fail "$name"
+  printf '  timed out waiting for: %s\n' "$path" >&2
+  return 1
+}
+
+_wait_for_content() {
+  local name="$1"
+  local path="$2"
+  local expected="$3"
+  local attempt actual
+
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    actual=""
+    [[ ! -f "$path" ]] || actual=$(cat "$path")
+    if [[ "$actual" == "$expected" ]]; then
+      _pass "$name"
+      return 0
+    fi
+    sleep 0.01
+  done
+  _fail "$name"
+  printf '  timed out waiting for content in: %s\n' "$path" >&2
+  return 1
 }
 
 echo "=== tmux session tools ==="
@@ -744,31 +794,542 @@ clip_bin=$(_tmpdir)
 clip_log="$clip_dir/tmux.log"
 cat >"$clip_bin/tmux" <<'MOCK'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"$TMUX_TOOLS_TEST_TMUX_LOG"
+case "$1" in
+  display-message)
+    target=""
+    while (($#)); do
+      if [[ "$1" == -t ]]; then
+        target="$2"
+        break
+      fi
+      shift
+    done
+    [[ "$target" != %999 ]] || exit 1
+    pane="${target#%}"
+    printf '%s:%%%s\n' "${TMUX_TOOLS_TEST_SERVER_PID:-101}" \
+      "${pane:-${TMUX_TOOLS_TEST_PANE_ID:-1}}"
+    ;;
+  load-buffer | paste-buffer | delete-buffer)
+    printf '%s\n' "$*" >>"$TMUX_TOOLS_TEST_TMUX_LOG"
+    buffer_state="$TMUX_TOOLS_TEST_TMUX_LOG.buffer"
+    if [[ "$1" == load-buffer ]]; then
+      printf '%s\n' "$3" >"$buffer_state"
+    fi
+    if [[ "$1" == load-buffer && -n "${TMUX_TOOLS_TEST_LOAD_READY:-}" ]]; then
+      cat "${!#}" >"$TMUX_TOOLS_TEST_LOADED_PAYLOAD"
+      : >"$TMUX_TOOLS_TEST_LOAD_READY"
+      for ((attempt = 0; attempt < 500; attempt++)); do
+        [[ ! -e "$TMUX_TOOLS_TEST_LOAD_CONTINUE" ]] || break
+        sleep 0.01
+      done
+      [[ -e "$TMUX_TOOLS_TEST_LOAD_CONTINUE" ]] || exit 98
+    fi
+    if [[ "$1" == load-buffer && -n "${TMUX_TOOLS_TEST_FAIL_LOAD:-}" ]]; then
+      exit 1
+    fi
+    if [[ "$1" == paste-buffer && -n "${TMUX_TOOLS_TEST_FAIL_PASTE:-}" ]]; then
+      exit 1
+    fi
+    if [[ "$1" == paste-buffer && -n "${TMUX_TOOLS_TEST_COMMIT_PASTE:-}" ]]; then
+      rm -f "$buffer_state"
+      if [[ -n "${TMUX_TOOLS_TEST_SIGNAL_PASTE:-}" ]]; then
+        kill -TERM "$PPID"
+      fi
+      exit 42
+    fi
+    if [[ "$1" == paste-buffer && "$*" == *' -d'* ]]; then
+      rm -f "$buffer_state"
+    elif [[ "$1" == delete-buffer ]]; then
+      rm -f "$buffer_state"
+    fi
+    ;;
+  list-buffers)
+    printf '%s\n' "$*" >>"$TMUX_TOOLS_TEST_TMUX_LOG"
+    buffer_state="$TMUX_TOOLS_TEST_TMUX_LOG.buffer"
+    [[ ! -e "$buffer_state" ]] || cat "$buffer_state"
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "$*" >&2
+    exit 99
+    ;;
+esac
 MOCK
 chmod +x "$clip_bin/tmux"
 
-result=$(TMPDIR="$clip_dir" tmux-clip-paste --path)
-_assert_eq "clip paste prints default per-user path" \
-  "$clip_dir/.tmux-clip-paste-$(id -u)" "$result"
+path_one=$(
+  env -u TMUX_PANE TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_SERVER_PID=101 \
+    TMUX_TOOLS_TEST_PANE_ID=1 tmux-clip-paste --path
+)
+path_two=$(
+  env -u TMUX_PANE TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_SERVER_PID=101 \
+    TMUX_TOOLS_TEST_PANE_ID=2 tmux-clip-paste --path
+)
+path_other_server=$(
+  env -u TMUX_PANE TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_SERVER_PID=202 \
+    TMUX_TOOLS_TEST_PANE_ID=1 tmux-clip-paste --path
+)
+_assert_eq "clip paste scopes the default path to the server and pane" \
+  "$clip_dir/tmux-tools-$(id -u)/clip-paste/101-1" "$path_one"
+_assert_ne "clip paste isolates panes in the same server" "$path_one" "$path_two"
+_assert_ne "clip paste isolates panes in different servers" "$path_one" "$path_other_server"
+_assert_eq "clip paste creates its per-user directory privately" \
+  "700" "$(_mode "$clip_dir/tmux-tools-$(id -u)/clip-paste")"
+
+explicit_pane_path=$(
+  TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_PANE=%999 \
+    tmux-clip-paste --pane %2 --path
+)
+_assert_eq "clip paste lets an explicit pane override stale TMUX_PANE" \
+  "$clip_dir/tmux-tools-$(id -u)/clip-paste/101-2" "$explicit_pane_path"
+stale_pane_output=$(
+  TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_PANE=%999 \
+    tmux-clip-paste --path 2>&1
+)
+stale_pane_rc=$?
+_assert_eq "clip paste rejects stale TMUX_PANE instead of retargeting" \
+  "1" "$stale_pane_rc"
+_assert_contains "clip paste explains stale pane resolution" \
+  "cannot determine" "$stale_pane_output"
+invalid_pane_output=$(tmux-clip-paste --pane 2 --file "$clip_file" --path 2>&1)
+invalid_pane_rc=$?
+_assert_eq "clip paste rejects malformed explicit pane IDs" "2" "$invalid_pane_rc"
+_assert_contains "clip paste explains malformed explicit pane IDs" \
+  "invalid tmux pane ID" "$invalid_pane_output"
+tmux-clip-paste --file "$clip_file" --path --publish >/dev/null 2>&1
+conflicting_mode_rc=$?
+_assert_eq "clip paste classifies conflicting modes as usage errors" \
+  "2" "$conflicting_mode_rc"
+tmux-clip-paste --not-an-option >/dev/null 2>&1
+unknown_option_rc=$?
+_assert_eq "clip paste classifies unknown options as usage errors" \
+  "2" "$unknown_option_rc"
+
+invalid_runtime_root="$clip_dir/invalid-runtime-root"
+printf 'not a directory\n' >"$invalid_runtime_root"
+env -u TMUX_PANE TMPDIR="$invalid_runtime_root" PATH="$clip_bin:$PATH" \
+  tmux-clip-paste --path >/dev/null 2>&1
+invalid_runtime_rc=$?
+_assert_eq "clip paste classifies private runtime failures as operational" \
+  "1" "$invalid_runtime_rc"
 
 result=$(TMUX_TOOLS_CLIP_PASTE_FILE="$clip_file" tmux-clip-paste --path)
 _assert_eq "clip paste path honors env override" "$clip_file" "$result"
 
-printf 'picked text\n' >"$clip_file"
-PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+dash_file_dir=$(_tmpdir)
+dash_file_log="$dash_file_dir/tmux.log"
+(
+  cd "$dash_file_dir" || exit 99
+  printf 'leading dash publish\n' |
+    tmux-clip-paste --file=-selection --publish
+)
+dash_publish_rc=$?
+_assert_eq "clip publish accepts a leading-dash custom path" \
+  "0" "$dash_publish_rc"
+_assert_eq "clip publish writes the leading-dash custom path" \
+  "leading dash publish" "$(cat "$dash_file_dir/-selection" 2>/dev/null)"
+printf 'leading dash consume\n' >"$dash_file_dir/-selection"
+(
+  cd "$dash_file_dir" || exit 99
+  env -u TMUX_PANE PATH="$clip_bin:$PATH" \
+    TMUX_TOOLS_TEST_TMUX_LOG="$dash_file_log" \
+    tmux-clip-paste --file=-selection
+)
+dash_consume_rc=$?
+_assert_eq "clip paste accepts a leading-dash custom path" \
+  "0" "$dash_consume_rc"
+if [[ -e "$dash_file_dir/-selection" ]]; then
+  _fail "clip paste consumes the leading-dash custom path"
+else
+  _pass "clip paste consumes the leading-dash custom path"
+fi
+
+publication_fifo="$clip_dir/publication.fifo"
+publication_ready="$clip_dir/publication.ready"
+publication_continue="$clip_dir/publication.continue"
+mkfifo "$publication_fifo"
+printf 'previous payload\n' >"$clip_file"
+{
+  printf 'picked '
+  : >"$publication_ready"
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    [[ ! -e "$publication_continue" ]] || break
+    sleep 0.01
+  done
+  [[ -e "$publication_continue" ]] || exit 98
+  printf 'text\n'
+} >"$publication_fifo" &
+publication_writer=$!
+PATH="$clip_bin:$PATH" tmux-clip-paste --file "$clip_file" --publish \
+  <"$publication_fifo" &
+publication_process=$!
+if _wait_for_file "clip publisher reaches its incomplete payload" \
+  "$publication_ready"; then
+  _assert_eq "clip publish hides incomplete payloads" \
+    "previous payload" "$(cat "$clip_file")"
+  : >"$publication_continue"
+  wait "$publication_writer"
+  publication_writer_rc=$?
+  wait "$publication_process"
+  publication_process_rc=$?
+else
+  : >"$publication_continue"
+  kill "$publication_writer" "$publication_process" 2>/dev/null || :
+  wait "$publication_writer" 2>/dev/null || :
+  wait "$publication_process" 2>/dev/null || :
+  publication_writer_rc=98
+  publication_process_rc=98
+fi
+_assert_eq "clip publisher completes its payload" "0" "$publication_writer_rc"
+_assert_eq "clip publish command completes" "0" "$publication_process_rc"
+_assert_eq "clip publish atomically installs complete stdin" \
+  "picked text" "$(cat "$clip_file")"
+_assert_eq "clip publish restricts the handoff file" "600" "$(_mode "$clip_file")"
+publication_temps=$(printf '%s\n' "$clip_dir"/.selection.tmp.*)
+_assert_eq "clip publish removes its temporary file" \
+  "$clip_dir/.selection.tmp.*" "$publication_temps"
+
+publish_stderr_file="$clip_dir/stderr-selection"
+publish_stderr_bin=$(_tmpdir)
+cat >"$publish_stderr_bin/cat" <<'MOCK'
+#!/usr/bin/env bash
+printf 'publish input failed\n' >&2
+exit 42
+MOCK
+chmod +x "$publish_stderr_bin/cat"
+publish_stderr_output=$(printf 'replacement\n' | PATH="$publish_stderr_bin:$PATH" \
+  tmux-clip-paste --file "$publish_stderr_file" --publish 2>&1)
+publish_stderr_rc=$?
+_assert_eq "clip publish classifies a post-create input failure as operational" \
+  "1" "$publish_stderr_rc"
+_assert_contains "clip publish preserves actionable stderr after temporary-file creation" \
+  "publish input failed" "$publish_stderr_output"
+
+publish_directory="$clip_dir/directory-selection"
+mkdir "$publish_directory"
+printf 'directory marker\n' >"$publish_directory/marker"
+printf 'must not publish\n' |
+  tmux-clip-paste --file "$publish_directory" --publish >/dev/null 2>&1
+publish_directory_rc=$?
+_assert_eq "clip publish classifies a destination directory as operational" \
+  "1" "$publish_directory_rc"
+_assert_eq "clip publish preserves a destination directory" \
+  "directory marker" "$(cat "$publish_directory/marker")"
+publish_directory_temps=$(printf '%s\n' "$publish_directory"/.*.tmp.*)
+_assert_eq "clip publish leaves no hidden artifact in a destination directory" \
+  "$publish_directory/.*.tmp.*" "$publish_directory_temps"
+
+publish_symlink_target=$(_tmpdir)
+publish_symlink="$clip_dir/symlink-selection"
+printf 'symlink marker\n' >"$publish_symlink_target/marker"
+ln -s "$publish_symlink_target" "$publish_symlink"
+printf 'must not publish\n' |
+  tmux-clip-paste --file "$publish_symlink" --publish >/dev/null 2>&1
+publish_symlink_rc=$?
+if ((publish_symlink_rc == 0)); then
+  _fail "clip publish rejects a symlink to a destination directory"
+else
+  _pass "clip publish rejects a symlink to a destination directory"
+fi
+_assert_eq "clip publish preserves a symlinked destination directory" \
+  "symlink marker" "$(cat "$publish_symlink_target/marker")"
+publish_symlink_temps=$(printf '%s\n' "$publish_symlink_target"/.*.tmp.*)
+_assert_eq "clip publish leaves no hidden artifact through a destination symlink" \
+  "$publish_symlink_target/.*.tmp.*" "$publish_symlink_temps"
+
+publish_identity_file="$clip_dir/identity-selection"
+publish_identity_bin=$(_tmpdir)
+publish_identity_real_stat=$(command -v stat)
+printf 'known-good-identity-payload\n' >"$publish_identity_file"
+cat >"$publish_identity_bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+if [[ "${!#}" == /dev/fd/3 ]]; then
+  printf 'synthetic-platform-descriptor-identity\n'
+  exit 0
+fi
+exec "$TMUX_TOOLS_TEST_REAL_STAT" "$@"
+MOCK
+chmod +x "$publish_identity_bin/stat"
+printf 'replacement\n' | PATH="$publish_identity_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_STAT="$publish_identity_real_stat" \
+  tmux-clip-paste --file "$publish_identity_file" --publish >/dev/null 2>&1
+publish_identity_rc=$?
+_assert_eq "clip publish ignores nonportable external descriptor identity" \
+  "0" "$publish_identity_rc"
+_assert_eq "clip publish replaces with portable pathname identity" \
+  "replacement" "$(cat "$publish_identity_file")"
+publish_identity_owned_temps=""
+for publish_identity_candidate in "$clip_dir"/.identity-selection.tmp.*; do
+  [[ -e "$publish_identity_candidate" || -L "$publish_identity_candidate" ]] || continue
+  publish_identity_owned_temps+="${publish_identity_owned_temps:+$'\n'}$publish_identity_candidate"
+done
+_assert_eq "clip publish removes its pathname-identified temporary" \
+  "" "$publish_identity_owned_temps"
+
+publish_creation_race_file="$clip_dir/creation-race-selection"
+publish_creation_race_bin=$(_tmpdir)
+publish_creation_race_real_stat=$(command -v stat)
+printf 'known-good-creation-race-payload\n' >"$publish_creation_race_file"
+cat >"$publish_creation_race_bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+target="${!#}"
+if output=$("$TMUX_TOOLS_TEST_REAL_STAT" "$@"); then
+  :
+else
+  exit $?
+fi
+if [[ "$target" == *.tmp.* ]]; then
+  if [[ ! -e "$TMUX_TOOLS_TEST_SEEN" ]]; then
+    : >"$TMUX_TOOLS_TEST_SEEN"
+  elif [[ ! -e "$TMUX_TOOLS_TEST_RACED" ]]; then
+    : >"$TMUX_TOOLS_TEST_RACED"
+    rm -f -- "$target"
+    printf 'unrelated creation replacement\n' >"$target"
+    exec "$TMUX_TOOLS_TEST_REAL_STAT" "$@"
+  fi
+fi
+printf '%s\n' "$output"
+MOCK
+chmod +x "$publish_creation_race_bin/stat"
+printf 'replacement\n' | PATH="$publish_creation_race_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_STAT="$publish_creation_race_real_stat" \
+  TMUX_TOOLS_TEST_SEEN="$clip_dir/creation-race.seen" \
+  TMUX_TOOLS_TEST_RACED="$clip_dir/creation-race.raced" \
+  tmux-clip-paste --file "$publish_creation_race_file" --publish \
+  >/dev/null 2>&1
+publish_creation_race_rc=$?
+_assert_eq "clip publish rejects replacement after its initial pathname identity read" \
+  "1" "$publish_creation_race_rc"
+_assert_eq "clip publish preserves prior payload after creation-time replacement" \
+  "known-good-creation-race-payload" "$(cat "$publish_creation_race_file")"
+publish_creation_race_replacement=$(printf '%s\n' \
+  "$clip_dir"/.creation-race-selection.tmp.*)
+_assert_eq "clip publish does not delete unrelated creation-time replacement" \
+  "unrelated creation replacement" "$(cat "$publish_creation_race_replacement")"
+
+publish_temp_race_file="$clip_dir/temp-race-selection"
+publish_temp_race_bin=$(_tmpdir)
+publish_temp_race_real_chmod=$(command -v chmod)
+printf 'known-good-temp-race-payload\n' >"$publish_temp_race_file"
+cat >"$publish_temp_race_bin/chmod" <<'MOCK'
+#!/usr/bin/env bash
+target="${!#}"
+if [[ "$target" == *.tmp.* ]]; then
+  "$TMUX_TOOLS_TEST_REAL_CHMOD" "$@"
+  rm -f -- "$target"
+  printf 'unrelated replacement\n' >"$target"
+  exit 0
+fi
+exec "$TMUX_TOOLS_TEST_REAL_CHMOD" "$@"
+MOCK
+chmod +x "$publish_temp_race_bin/chmod"
+printf 'replacement\n' | PATH="$publish_temp_race_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_CHMOD="$publish_temp_race_real_chmod" \
+  tmux-clip-paste --file "$publish_temp_race_file" --publish >/dev/null 2>&1
+publish_temp_race_rc=$?
+_assert_eq "clip publish rejects a replaced temporary file" \
+  "1" "$publish_temp_race_rc"
+_assert_eq "clip publish preserves its prior payload after temporary replacement" \
+  "known-good-temp-race-payload" "$(cat "$publish_temp_race_file")"
+publish_temp_race_replacement=$(printf '%s\n' \
+  "$clip_dir"/.temp-race-selection.tmp.*)
+_assert_eq "clip publish does not delete an unrelated temporary replacement" \
+  "unrelated replacement" "$(cat "$publish_temp_race_replacement")"
+_assert_eq "clip publish does not chmod an unrelated temporary replacement" \
+  "644" "$(_mode "$publish_temp_race_replacement")"
+
+publish_race_file="$clip_dir/race-selection"
+publish_race_bin=$(_tmpdir)
+publish_real_mv=$(command -v mv)
+cat >"$publish_race_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+destination="${!#}"
+rm -f "$destination"
+mkdir "$destination"
+printf 'unrelated\n' >"$destination/marker"
+exec "$TMUX_TOOLS_TEST_REAL_MV" "$@"
+MOCK
+chmod +x "$publish_race_bin/mv"
+printf 'replacement\n' | PATH="$publish_race_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_MV="$publish_real_mv" \
+  tmux-clip-paste --file "$publish_race_file" --publish >/dev/null 2>&1
+publish_race_rc=$?
+_assert_eq "clip publish classifies a raced destination as operational" \
+  "1" "$publish_race_rc"
+publish_race_entries=$(printf '%s\n' "$publish_race_file"/*)
+_assert_eq "clip publish removes only its file redirected into a raced directory" \
+  "$publish_race_file/marker" "$publish_race_entries"
+publish_race_hidden=$(printf '%s\n' "$publish_race_file"/.*.tmp.*)
+_assert_eq "clip publish leaves no hidden file redirected into a raced directory" \
+  "$publish_race_file/.*.tmp.*" "$publish_race_hidden"
+
+publish_move_signal_file="$clip_dir/move-signal-selection"
+publish_move_signal_bin=$(_tmpdir)
+cat >"$publish_move_signal_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+destination="${!#}"
+rm -f "$destination"
+mkdir "$destination"
+printf 'unrelated\n' >"$destination/marker"
+"$TMUX_TOOLS_TEST_REAL_MV" "$@"
+kill -TERM "$PPID"
+exit 143
+MOCK
+chmod +x "$publish_move_signal_bin/mv"
+printf 'replacement\n' | PATH="$publish_move_signal_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_MV="$publish_real_mv" \
+  tmux-clip-paste --file "$publish_move_signal_file" --publish >/dev/null 2>&1
+publish_move_signal_rc=$?
+_assert_eq "clip publish preserves conventional TERM status immediately after mv" \
+  "143" "$publish_move_signal_rc"
+publish_move_signal_entries=$(printf '%s\n' "$publish_move_signal_file"/*)
+_assert_eq "clip publish removes its redirected inode when signaled immediately after mv" \
+  "$publish_move_signal_file/marker" "$publish_move_signal_entries"
+publish_move_signal_hidden=$(printf '%s\n' "$publish_move_signal_file"/.*.tmp.*)
+_assert_eq "clip publish leaves no hidden redirected inode after publication TERM" \
+  "$publish_move_signal_file/.*.tmp.*" "$publish_move_signal_hidden"
+
+publish_commit_signal_file="$clip_dir/commit-signal-selection"
+publish_commit_signal_reference="$clip_dir/commit-signal-reference"
+publish_commit_signal_bin=$(_tmpdir)
+printf 'previous payload\n' >"$publish_commit_signal_file"
+cp "$publish_commit_signal_file" "$publish_commit_signal_reference"
+cat >"$publish_commit_signal_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+"$TMUX_TOOLS_TEST_REAL_MV" "$@"
+kill -TERM "$PPID"
+exit 143
+MOCK
+chmod +x "$publish_commit_signal_bin/mv"
+printf 'committed replacement\n' | PATH="$publish_commit_signal_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_MV="$publish_real_mv" \
+  tmux-clip-paste --file "$publish_commit_signal_file" --publish >/dev/null 2>&1
+publish_commit_signal_rc=$?
+_assert_eq "clip publish succeeds when TERM arrives after a completed mv" \
+  "0" "$publish_commit_signal_rc"
+_assert_eq "clip publish keeps the replacement committed after post-mv TERM" \
+  "committed replacement" "$(cat "$publish_commit_signal_file")"
+if _files_equal "$publish_commit_signal_reference" "$publish_commit_signal_file"; then
+  _fail "clip publish replaces the prior payload after post-mv TERM"
+else
+  _pass "clip publish replaces the prior payload after post-mv TERM"
+fi
+_assert_eq "clip publish keeps the replacement private after post-mv TERM" \
+  "600" "$(_mode "$publish_commit_signal_file")"
+publish_commit_signal_residue=""
+for publish_commit_signal_candidate in "$clip_dir"/.commit-signal-selection.tmp.* \
+  "$clip_dir"/.commit-signal-selection.backup.*; do
+  [[ -e "$publish_commit_signal_candidate" || -L "$publish_commit_signal_candidate" ]] ||
+    continue
+  publish_commit_signal_residue+="${publish_commit_signal_residue:+$'\n'}$publish_commit_signal_candidate"
+done
+_assert_eq "clip publish leaves no transaction residue after post-mv TERM" \
+  "" "$publish_commit_signal_residue"
+
+concurrent_publish_file="$clip_dir/concurrent-publish-selection"
+concurrent_publish_ready="$clip_dir/concurrent-publish.ready"
+concurrent_publish_continue="$clip_dir/concurrent-publish.continue"
+concurrent_publish_bin=$(_tmpdir)
+cat >"$concurrent_publish_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+"$TMUX_TOOLS_TEST_REAL_MV" "$@"
+: >"$TMUX_TOOLS_TEST_READY"
+for ((attempt = 0; attempt < 500; attempt++)); do
+  [[ ! -e "$TMUX_TOOLS_TEST_CONTINUE" ]] || exit 0
+  sleep 0.01
+done
+exit 98
+MOCK
+chmod +x "$concurrent_publish_bin/mv"
+printf 'publisher A\n' | PATH="$concurrent_publish_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_MV="$publish_real_mv" \
+  TMUX_TOOLS_TEST_READY="$concurrent_publish_ready" \
+  TMUX_TOOLS_TEST_CONTINUE="$concurrent_publish_continue" \
+  tmux-clip-paste --file "$concurrent_publish_file" --publish \
+  >/dev/null 2>&1 &
+concurrent_publisher_a=$!
+if _wait_for_file "publisher A commits before publisher B replaces it" \
+  "$concurrent_publish_ready"; then
+  printf 'publisher B\n' |
+    tmux-clip-paste --file "$concurrent_publish_file" --publish
+  concurrent_publisher_b_rc=$?
+  : >"$concurrent_publish_continue"
+  wait "$concurrent_publisher_a"
+  concurrent_publisher_a_rc=$?
+else
+  kill "$concurrent_publisher_a" 2>/dev/null || :
+  wait "$concurrent_publisher_a" 2>/dev/null || :
+  concurrent_publisher_a_rc=98
+  concurrent_publisher_b_rc=98
+fi
+_assert_eq "superseded publisher A still reports its completed commit" \
+  "0" "$concurrent_publisher_a_rc"
+_assert_eq "concurrent publisher B reports success" \
+  "0" "$concurrent_publisher_b_rc"
+_assert_eq "concurrent publisher B remains at the public path" \
+  "publisher B" "$(cat "$concurrent_publish_file")"
+
+publish_signal_file="$clip_dir/signal-selection"
+publish_signal_reference="$clip_dir/signal-reference"
+publish_signal_bin=$(_tmpdir)
+publish_signal_sibling_path="$clip_dir/signal-sibling-path"
+publish_signal_input="$clip_dir/signal-input"
+printf 'known-good-payload\n' >"$publish_signal_file"
+printf 'replacement\n' >"$publish_signal_input"
+cp "$publish_signal_file" "$publish_signal_reference"
+publish_real_cat=$(command -v cat)
+cat >"$publish_signal_bin/cat" <<'MOCK'
+#!/usr/bin/env bash
+sibling="$TMUX_TOOLS_TEST_SIGNAL_DIR/.signal-selection.tmp.$PPID.unrelated"
+printf 'unrelated\n' >"$sibling"
+printf '%s\n' "$sibling" >"$TMUX_TOOLS_TEST_SIBLING_PATH"
+kill -TERM "$PPID"
+sleep 0.05
+exec "$TMUX_TOOLS_TEST_REAL_CAT" "$@"
+MOCK
+chmod +x "$publish_signal_bin/cat"
+PATH="$publish_signal_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_CAT="$publish_real_cat" \
+  TMUX_TOOLS_TEST_SIGNAL_DIR="$clip_dir" \
+  TMUX_TOOLS_TEST_SIBLING_PATH="$publish_signal_sibling_path" \
+  tmux-clip-paste --file "$publish_signal_file" --publish \
+  <"$publish_signal_input" >/dev/null 2>&1
+publish_signal_rc=$?
+_assert_eq "clip publish preserves conventional TERM status during generation" \
+  "143" "$publish_signal_rc"
+_assert_eq "clip publish preserves prior payload when signaled during generation" \
+  "known-good-payload" "$(cat "$publish_signal_file")"
+publish_signal_sibling=$(cat "$publish_signal_sibling_path")
+_assert_eq "clip publish never removes an unrelated same-prefix sibling" \
+  "unrelated" "$(cat "$publish_signal_sibling" 2>/dev/null)"
+publish_signal_owned_temps=""
+for publish_signal_candidate in "$clip_dir"/.signal-selection.tmp.*; do
+  [[ -e "$publish_signal_candidate" || -L "$publish_signal_candidate" ]] || continue
+  [[ "$publish_signal_candidate" == "$publish_signal_sibling" ]] ||
+    publish_signal_owned_temps+="${publish_signal_owned_temps:+$'\n'}$publish_signal_candidate"
+done
+_assert_eq "clip publish removes its exact temporary file after TERM" \
+  "" "$publish_signal_owned_temps"
+
+env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  TMUX_TOOLS_TEST_SERVER_PID=101 TMUX_TOOLS_TEST_PANE_ID=1 \
   tmux-clip-paste --file "$clip_file"
-expected="$(printf 'load-buffer %s\npaste-buffer -p' "$clip_file")"
-_assert_eq "clip paste loads and pastes selected file" "$expected" "$(cat "$clip_log")"
+clip_load_line=$(sed -n '1p' "$clip_log")
+clip_load_file="${clip_load_line##* }"
+clip_buffer_name="${clip_load_line#load-buffer -b }"
+clip_buffer_name="${clip_buffer_name% "$clip_load_file"}"
+expected="$(printf 'load-buffer -b %s %s\npaste-buffer -b %s -p -t %%1 -d' \
+  "$clip_buffer_name" "$clip_load_file" "$clip_buffer_name")"
+_assert_eq "clip paste uses and atomically consumes one named buffer" \
+  "$expected" "$(cat "$clip_log")"
 if [[ -e "$clip_file" ]]; then
   _fail "clip paste removes selected file"
 else
   _pass "clip paste removes selected file"
 fi
 
-: >"$clip_file"
+: | PATH="$clip_bin:$PATH" tmux-clip-paste --file "$clip_file" --publish
 rm -f "$clip_log"
-PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
   tmux-clip-paste --file "$clip_file"
 if [[ -e "$clip_log" ]]; then
   _fail "clip paste ignores empty selection"
@@ -780,6 +1341,511 @@ if [[ -e "$clip_file" ]]; then
 else
   _pass "clip paste removes empty selection file"
 fi
+
+load_failure_file="$clip_dir/load-failure-selection"
+load_failure_output="$clip_dir/load-failure.output"
+printf 'retry after load failure\n' >"$load_failure_file"
+rm -f "$clip_log"
+env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  TMUX_TOOLS_TEST_FAIL_LOAD=1 tmux-clip-paste --file "$load_failure_file" \
+  >"$load_failure_output" 2>&1
+load_failure_rc=$?
+_assert_eq "clip paste classifies load-buffer failure as operational" \
+  "1" "$load_failure_rc"
+load_failure_claim=$(printf '%s\n' "$clip_dir"/.load-failure-selection.consume.*/payload)
+_assert_eq "clip paste retains a private claim after load-buffer failure" \
+  "retry after load failure" "$(cat "$load_failure_claim")"
+_assert_contains "clip paste reports the exact retained load-failure claim" \
+  "$load_failure_claim" "$(cat "$load_failure_output")"
+_assert_contains "clip paste uses a named buffer before load-buffer failure" \
+  "load-buffer -b tmux-tools-clip-101-1-" "$(cat "$clip_log")"
+_assert_contains "clip paste deletes the named buffer after load-buffer failure" \
+  "delete-buffer -b tmux-tools-clip-101-1-" "$(cat "$clip_log")"
+
+paste_failure_file="$clip_dir/paste-failure-selection"
+paste_failure_output="$clip_dir/paste-failure.output"
+printf 'retry after paste failure\n' >"$paste_failure_file"
+rm -f "$clip_log"
+env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  TMUX_TOOLS_TEST_FAIL_PASTE=1 tmux-clip-paste --file "$paste_failure_file" \
+  >"$paste_failure_output" 2>&1
+paste_failure_rc=$?
+_assert_eq "clip paste classifies paste-buffer failure as operational" \
+  "1" "$paste_failure_rc"
+paste_failure_claim=$(printf '%s\n' "$clip_dir"/.paste-failure-selection.consume.*/payload)
+_assert_eq "clip paste retains a private claim after paste-buffer failure" \
+  "retry after paste failure" "$(cat "$paste_failure_claim")"
+_assert_contains "clip paste reports the exact retained paste-failure claim" \
+  "$paste_failure_claim" "$(cat "$paste_failure_output")"
+_assert_contains "clip paste deletes the named buffer after paste-buffer failure" \
+  "delete-buffer -b tmux-tools-clip-101-1-" "$(cat "$clip_log")"
+
+paste_commit_file="$clip_dir/paste-commit-selection"
+paste_commit_output="$clip_dir/paste-commit.output"
+printf 'committed paste payload\n' >"$paste_commit_file"
+rm -f "$clip_log" "$clip_log.buffer"
+env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  TMUX_TOOLS_TEST_COMMIT_PASTE=1 \
+  tmux-clip-paste --file "$paste_commit_file" >"$paste_commit_output" 2>&1
+paste_commit_rc=$?
+_assert_eq "clip paste reports success after an ambiguous committed paste" \
+  "0" "$paste_commit_rc"
+paste_commit_claims=$(printf '%s\n' "$clip_dir"/.paste-commit-selection.consume.*)
+_assert_eq "clip paste removes its claim after an ambiguous committed paste" \
+  "$clip_dir/.paste-commit-selection.consume.*" "$paste_commit_claims"
+
+paste_signal_file="$clip_dir/paste-signal-selection"
+printf 'signaled committed paste payload\n' >"$paste_signal_file"
+rm -f "$clip_log" "$clip_log.buffer"
+env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  TMUX_TOOLS_TEST_COMMIT_PASTE=1 TMUX_TOOLS_TEST_SIGNAL_PASTE=1 \
+  tmux-clip-paste --file "$paste_signal_file" >/dev/null 2>&1
+paste_signal_rc=$?
+_assert_eq "clip paste reports success when TERM follows a committed paste" \
+  "0" "$paste_signal_rc"
+paste_signal_claims=$(printf '%s\n' "$clip_dir"/.paste-signal-selection.consume.*)
+_assert_eq "clip paste removes its claim after post-commit TERM" \
+  "$clip_dir/.paste-signal-selection.consume.*" "$paste_signal_claims"
+
+paste_cleanup_file="$clip_dir/paste-cleanup-selection"
+paste_cleanup_output="$clip_dir/paste-cleanup.output"
+paste_cleanup_bin=$(_tmpdir)
+paste_cleanup_real_rm=$(command -v rm)
+ln -s "$clip_bin/tmux" "$paste_cleanup_bin/tmux"
+cat >"$paste_cleanup_bin/rm" <<'MOCK'
+#!/usr/bin/env bash
+target="${!#}"
+if [[ "$target" == */payload ]]; then
+  exit 42
+fi
+exec "$TMUX_TOOLS_TEST_REAL_RM" "$@"
+MOCK
+chmod +x "$paste_cleanup_bin/rm"
+printf 'post-commit cleanup payload\n' >"$paste_cleanup_file"
+PATH="$paste_cleanup_bin:$PATH" TMUX_TOOLS_TEST_REAL_RM="$paste_cleanup_real_rm" \
+  TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  tmux-clip-paste --file "$paste_cleanup_file" >"$paste_cleanup_output" 2>&1
+paste_cleanup_rc=$?
+_assert_eq "clip paste keeps success after committed-claim cleanup failure" \
+  "0" "$paste_cleanup_rc"
+paste_cleanup_claim=$(printf '%s\n' "$clip_dir"/.paste-cleanup-selection.consume.*/payload)
+_assert_eq "clip paste preserves the consumed claim when cleanup fails" \
+  "post-commit cleanup payload" "$(cat "$paste_cleanup_claim")"
+_assert_contains "clip paste warns about post-commit claim cleanup failure" \
+  "$paste_cleanup_claim" "$(cat "$paste_cleanup_output")"
+
+nonregular_dir="$clip_dir/nonregular-directory"
+mkdir "$nonregular_dir"
+printf 'directory marker\n' >"$nonregular_dir/marker"
+tmux-clip-paste --file "$nonregular_dir" >/dev/null 2>&1
+nonregular_dir_rc=$?
+_assert_eq "clip paste rejects a directory as an operational error" \
+  "1" "$nonregular_dir_rc"
+_assert_eq "clip paste leaves a rejected directory in place" \
+  "directory marker" "$(cat "$nonregular_dir/marker")"
+
+nonregular_target="$clip_dir/nonregular-target"
+nonregular_link="$clip_dir/nonregular-link"
+printf 'symlink target\n' >"$nonregular_target"
+chmod 0644 "$nonregular_target"
+ln -s "$nonregular_target" "$nonregular_link"
+tmux-clip-paste --file "$nonregular_link" >/dev/null 2>&1
+nonregular_link_rc=$?
+_assert_eq "clip paste rejects a symlink as an operational error" \
+  "1" "$nonregular_link_rc"
+_assert_symlink "clip paste leaves a rejected symlink in place" "$nonregular_link"
+_assert_eq "clip paste never chmods a rejected symlink target" \
+  "644" "$(_mode "$nonregular_target")"
+
+nonregular_race_file="$clip_dir/nonregular-race-selection"
+nonregular_race_target="$clip_dir/nonregular-race-target"
+nonregular_race_output="$clip_dir/nonregular-race.output"
+nonregular_race_bin=$(_tmpdir)
+nonregular_race_real_mv=$(command -v mv)
+ln -s "$clip_bin/tmux" "$nonregular_race_bin/tmux"
+printf 'ordinary payload\n' >"$nonregular_race_file"
+printf 'raced symlink target\n' >"$nonregular_race_target"
+chmod 0644 "$nonregular_race_target"
+cat >"$nonregular_race_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+source="$1"
+destination="${!#}"
+[[ "$source" != -- ]] || source="$2"
+if [[ "$destination" == */payload ]]; then
+  rm -f "$source"
+  ln -s "$TMUX_TOOLS_TEST_SYMLINK_TARGET" "$source"
+fi
+exec "$TMUX_TOOLS_TEST_REAL_MV" "$@"
+MOCK
+chmod +x "$nonregular_race_bin/mv"
+PATH="$nonregular_race_bin:$PATH" \
+  TMUX_TOOLS_TEST_REAL_MV="$nonregular_race_real_mv" \
+  TMUX_TOOLS_TEST_SYMLINK_TARGET="$nonregular_race_target" \
+  TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  tmux-clip-paste --file "$nonregular_race_file" \
+  >"$nonregular_race_output" 2>&1
+nonregular_race_rc=$?
+_assert_eq "clip paste rejects a symlink raced into the private claim" \
+  "1" "$nonregular_race_rc"
+nonregular_race_claim=$(printf '%s\n' \
+  "$clip_dir"/.nonregular-race-selection.consume.*/payload)
+_assert_symlink "clip paste retains a raced symlink at the reported claim" \
+  "$nonregular_race_claim"
+_assert_eq "clip paste never chmods a raced symlink target" \
+  "644" "$(_mode "$nonregular_race_target")"
+_assert_contains "clip paste reports the raced nonregular claim path" \
+  "$nonregular_race_claim" "$(cat "$nonregular_race_output")"
+
+claim_move_file="$clip_dir/claim-move-selection"
+claim_move_output="$clip_dir/claim-move.output"
+claim_move_bin=$(_tmpdir)
+claim_real_mv=$(command -v mv)
+ln -s "$clip_bin/tmux" "$claim_move_bin/tmux"
+cat >"$claim_move_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+"$TMUX_TOOLS_TEST_REAL_MV" "$@"
+destination="${!#}"
+if [[ "$destination" == */payload ]]; then
+  exit 42
+fi
+MOCK
+chmod +x "$claim_move_bin/mv"
+printf 'claim move payload\n' >"$claim_move_file"
+PATH="$claim_move_bin:$PATH" TMUX_TOOLS_TEST_REAL_MV="$claim_real_mv" \
+  TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  tmux-clip-paste --file "$claim_move_file" >"$claim_move_output" 2>&1
+claim_move_rc=$?
+_assert_eq "clip paste classifies a post-move claim failure as operational" \
+  "1" "$claim_move_rc"
+claim_move_claim=$(printf '%s\n' "$clip_dir"/.claim-move-selection.consume.*/payload)
+_assert_eq "clip paste retains a moved payload after claim command failure" \
+  "claim move payload" "$(cat "$claim_move_claim")"
+_assert_eq "clip paste secures a moved payload after claim command failure" \
+  "600" "$(_mode "$claim_move_claim")"
+_assert_contains "clip paste reports exact claim after claim command failure" \
+  "$claim_move_claim" "$(cat "$claim_move_output")"
+
+printf 'pane one\n' | env -u TMUX_PANE TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" \
+  TMUX_TOOLS_TEST_SERVER_PID=101 TMUX_TOOLS_TEST_PANE_ID=1 \
+  tmux-clip-paste --publish
+printf 'pane two\n' | env -u TMUX_PANE TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" \
+  TMUX_TOOLS_TEST_SERVER_PID=101 TMUX_TOOLS_TEST_PANE_ID=2 \
+  tmux-clip-paste --publish
+_assert_eq "clip publish restricts default handoff files" "600" "$(_mode "$path_two")"
+rm -f "$clip_log"
+env -u TMUX_PANE TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  TMUX_TOOLS_TEST_SERVER_PID=101 TMUX_TOOLS_TEST_PANE_ID=1 tmux-clip-paste
+if [[ -e "$path_one" ]]; then
+  _fail "clip paste removes only the consumed pane payload"
+else
+  _pass "clip paste removes only the consumed pane payload"
+fi
+_assert_eq "clip paste leaves another pane payload untouched" \
+  "pane two" "$(cat "$path_two")"
+
+replacement_file="$clip_dir/replacement-selection"
+replacement_ready="$clip_dir/replacement.ready"
+replacement_continue="$clip_dir/replacement.continue"
+replacement_loaded="$clip_dir/replacement.loaded"
+printf 'payload A\n' | tmux-clip-paste --file "$replacement_file" --publish
+rm -f "$clip_log"
+env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  TMUX_TOOLS_TEST_LOAD_READY="$replacement_ready" \
+  TMUX_TOOLS_TEST_LOAD_CONTINUE="$replacement_continue" \
+  TMUX_TOOLS_TEST_LOADED_PAYLOAD="$replacement_loaded" \
+  tmux-clip-paste --file "$replacement_file" >/dev/null 2>&1 &
+replacement_consumer=$!
+if _wait_for_file "clip consumer loads payload A before replacement" "$replacement_ready"; then
+  printf 'payload B\n' | tmux-clip-paste --file "$replacement_file" --publish
+  : >"$replacement_continue"
+  wait "$replacement_consumer"
+  replacement_rc=$?
+else
+  kill "$replacement_consumer" 2>/dev/null || :
+  wait "$replacement_consumer" 2>/dev/null || :
+  replacement_rc=98
+fi
+_assert_eq "clip consumer succeeds after a concurrent replacement" "0" "$replacement_rc"
+_assert_eq "clip consumer pastes its claimed payload A" \
+  "payload A" "$(cat "$replacement_loaded")"
+_assert_eq "clip consumer leaves newer payload B for the next consumer" \
+  "payload B" "$(cat "$replacement_file" 2>/dev/null)"
+_assert_contains "clip consumer loads from its unique claimed path" \
+  ".replacement-selection.consume." "$(cat "$clip_log")"
+
+failure_replacement_file="$clip_dir/failure-replacement-selection"
+failure_replacement_ready="$clip_dir/failure-replacement.ready"
+failure_replacement_continue="$clip_dir/failure-replacement.continue"
+failure_replacement_loaded="$clip_dir/failure-replacement.loaded"
+failure_replacement_output="$clip_dir/failure-replacement.output"
+printf 'failed payload A\n' |
+  tmux-clip-paste --file "$failure_replacement_file" --publish
+rm -f "$clip_log"
+env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
+  TMUX_TOOLS_TEST_LOAD_READY="$failure_replacement_ready" \
+  TMUX_TOOLS_TEST_LOAD_CONTINUE="$failure_replacement_continue" \
+  TMUX_TOOLS_TEST_LOADED_PAYLOAD="$failure_replacement_loaded" \
+  TMUX_TOOLS_TEST_FAIL_LOAD=1 \
+  tmux-clip-paste --file "$failure_replacement_file" \
+  >"$failure_replacement_output" 2>&1 &
+failure_replacement_consumer=$!
+if _wait_for_file "failing clip consumer claims payload A before replacement" \
+  "$failure_replacement_ready"; then
+  printf 'newer payload B\n' |
+    tmux-clip-paste --file "$failure_replacement_file" --publish
+  : >"$failure_replacement_continue"
+  wait "$failure_replacement_consumer"
+  failure_replacement_rc=$?
+else
+  kill "$failure_replacement_consumer" 2>/dev/null || :
+  wait "$failure_replacement_consumer" 2>/dev/null || :
+  failure_replacement_rc=98
+fi
+if ((failure_replacement_rc == 0)); then
+  _fail "failing clip consumer reports load failure after a concurrent replacement"
+else
+  _pass "failing clip consumer reports load failure after a concurrent replacement"
+fi
+_assert_eq "failing clip consumer does not overwrite newer payload B" \
+  "newer payload B" "$(cat "$failure_replacement_file")"
+failure_replacement_claim=$(printf '%s\n' \
+  "$clip_dir"/.failure-replacement-selection.consume.*/payload)
+_assert_eq "failing clip consumer retains its claimed payload A separately" \
+  "failed payload A" "$(cat "$failure_replacement_claim")"
+_assert_eq "failing clip consumer keeps its claim directory private" \
+  "700" "$(_mode "$(dirname "$failure_replacement_claim")")"
+_assert_eq "failing clip consumer keeps its retained payload private" \
+  "600" "$(_mode "$failure_replacement_claim")"
+_assert_contains "failing clip consumer reports the retained claim path" \
+  "$failure_replacement_claim" "$(cat "$failure_replacement_output")"
+
+retain_race_file="$clip_dir/retain-race-selection"
+retain_race_ready="$clip_dir/retain-race.ready"
+retain_race_continue="$clip_dir/retain-race.continue"
+retain_race_output="$clip_dir/retain-race.output"
+retain_race_bin=$(_tmpdir)
+retain_real_ln=$(command -v ln)
+ln -s "$clip_bin/tmux" "$retain_race_bin/tmux"
+cat >"$retain_race_bin/ln" <<'MOCK'
+#!/usr/bin/env bash
+"$TMUX_TOOLS_TEST_REAL_LN" "$@"
+: >"$TMUX_TOOLS_TEST_READY"
+for ((attempt = 0; attempt < 500; attempt++)); do
+  [[ ! -e "$TMUX_TOOLS_TEST_CONTINUE" ]] || exit 0
+  sleep 0.01
+done
+exit 98
+MOCK
+chmod +x "$retain_race_bin/ln"
+printf 'retain-race payload A\n' >"$retain_race_file"
+PATH="$retain_race_bin:$PATH" TMUX_TOOLS_TEST_REAL_LN="$retain_real_ln" \
+  TMUX_TOOLS_TEST_READY="$retain_race_ready" \
+  TMUX_TOOLS_TEST_CONTINUE="$retain_race_continue" \
+  TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" TMUX_TOOLS_TEST_FAIL_LOAD=1 \
+  tmux-clip-paste --file "$retain_race_file" >"$retain_race_output" 2>&1 &
+retain_race_consumer=$!
+if _wait_for_file "failing clip consumer pauses after restoring its public link" \
+  "$retain_race_ready"; then
+  printf 'retain-race payload B\n' |
+    tmux-clip-paste --file "$retain_race_file" --publish
+  : >"$retain_race_continue"
+  wait "$retain_race_consumer"
+  retain_race_rc=$?
+else
+  : >"$retain_race_continue"
+  kill "$retain_race_consumer" 2>/dev/null || :
+  wait "$retain_race_consumer" 2>/dev/null || :
+  retain_race_rc=98
+fi
+_assert_eq "failing clip consumer classifies the retain race as operational" \
+  "1" "$retain_race_rc"
+_assert_eq "failing clip consumer preserves producer B at the public path" \
+  "retain-race payload B" "$(cat "$retain_race_file")"
+retain_race_claim=$(printf '%s\n' "$clip_dir"/.retain-race-selection.consume.*/payload)
+_assert_eq "failing clip consumer preserves claim A after public replacement" \
+  "retain-race payload A" "$(cat "$retain_race_claim")"
+_assert_eq "failing clip consumer keeps race claim directory private" \
+  "700" "$(_mode "$(dirname "$retain_race_claim")")"
+_assert_eq "failing clip consumer keeps race claim payload private" \
+  "600" "$(_mode "$retain_race_claim")"
+_assert_contains "failing clip consumer reports exact claim after public replacement" \
+  "$retain_race_claim" "$(cat "$retain_race_output")"
+
+empty_race_file="$clip_dir/empty-race-selection"
+empty_race_ready="$clip_dir/empty-race.ready"
+empty_race_continue="$clip_dir/empty-race.continue"
+empty_race_bin=$(_tmpdir)
+empty_real_mv=$(command -v mv)
+empty_real_rm=$(command -v rm)
+: >"$empty_race_file"
+cat >"$empty_race_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+"$TMUX_TOOLS_TEST_REAL_MV" "$@"
+destination="${!#}"
+if [[ "$destination" == *.empty-race-selection.consume.* ]]; then
+  : >"$TMUX_TOOLS_TEST_READY"
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    [[ ! -e "$TMUX_TOOLS_TEST_CONTINUE" ]] || exit 0
+    sleep 0.01
+  done
+  exit 98
+fi
+MOCK
+cat >"$empty_race_bin/rm" <<'MOCK'
+#!/usr/bin/env bash
+target="${!#}"
+if [[ "$target" == "$TMUX_TOOLS_TEST_SHARED_FILE" ]]; then
+  : >"$TMUX_TOOLS_TEST_READY"
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    [[ ! -e "$TMUX_TOOLS_TEST_CONTINUE" ]] || break
+    sleep 0.01
+  done
+  [[ -e "$TMUX_TOOLS_TEST_CONTINUE" ]] || exit 98
+fi
+exec "$TMUX_TOOLS_TEST_REAL_RM" "$@"
+MOCK
+chmod +x "$empty_race_bin/mv" "$empty_race_bin/rm"
+PATH="$empty_race_bin:$PATH" TMUX_TOOLS_TEST_REAL_MV="$empty_real_mv" \
+  TMUX_TOOLS_TEST_REAL_RM="$empty_real_rm" \
+  TMUX_TOOLS_TEST_SHARED_FILE="$empty_race_file" \
+  TMUX_TOOLS_TEST_READY="$empty_race_ready" \
+  TMUX_TOOLS_TEST_CONTINUE="$empty_race_continue" \
+  tmux-clip-paste --file "$empty_race_file" >/dev/null 2>&1 &
+empty_race_consumer=$!
+if _wait_for_file "empty clip consumer pauses after claiming its payload" "$empty_race_ready"; then
+  printf 'new nonempty payload\n' | tmux-clip-paste --file "$empty_race_file" --publish
+  : >"$empty_race_continue"
+  wait "$empty_race_consumer"
+  empty_race_rc=$?
+else
+  : >"$empty_race_continue"
+  kill "$empty_race_consumer" 2>/dev/null || :
+  wait "$empty_race_consumer" 2>/dev/null || :
+  empty_race_rc=98
+fi
+_assert_eq "empty clip consumer succeeds after a concurrent replacement" \
+  "0" "$empty_race_rc"
+_assert_eq "empty clip consumer leaves the newer nonempty payload" \
+  "new nonempty payload" "$(cat "$empty_race_file" 2>/dev/null)"
+
+barrier_dir=$(_tmpdir)
+barrier_bin=$(_tmpdir)
+barrier_a="$barrier_dir/a.payload"
+barrier_b="$barrier_dir/b.payload"
+printf 'payload A\n' >"$barrier_a"
+printf 'payload B\n' >"$barrier_b"
+cat >"$barrier_bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+set -u
+
+_wait() {
+  local path="$1" attempt
+  for ((attempt = 0; attempt < 500; attempt++)); do
+    [[ -e "$path" ]] && return 0
+    sleep 0.01
+  done
+  exit 98
+}
+
+command="$1"
+shift
+case "$command" in
+  display-message)
+    if [[ "$TMUX_TOOLS_TEST_ROLE" == A ]]; then
+      printf '303:%%1\n'
+    else
+      printf '303:%%2\n'
+    fi
+    ;;
+  load-buffer)
+    buffer="unnamed"
+    file=""
+    while (($#)); do
+      case "$1" in
+        -b) buffer="$2"; shift 2 ;;
+        *) file="$1"; shift ;;
+      esac
+    done
+    safe_buffer="${buffer//[^A-Za-z0-9_.%-]/_}"
+    cp "$file" "$TMUX_TOOLS_TEST_BARRIER/buffer-$safe_buffer"
+    if [[ "$TMUX_TOOLS_TEST_ROLE" == A ]]; then
+      : >"$TMUX_TOOLS_TEST_BARRIER/a-loaded"
+      _wait "$TMUX_TOOLS_TEST_BARRIER/b-loaded"
+    else
+      : >"$TMUX_TOOLS_TEST_BARRIER/b-loaded"
+      _wait "$TMUX_TOOLS_TEST_BARRIER/a-pasted"
+    fi
+    ;;
+  paste-buffer)
+    buffer="unnamed"
+    target=""
+    delete=0
+    while (($#)); do
+      case "$1" in
+        -b) buffer="$2"; shift 2 ;;
+        -t) target="$2"; shift 2 ;;
+        -d) delete=1; shift ;;
+        *) shift ;;
+      esac
+    done
+    safe_buffer="${buffer//[^A-Za-z0-9_.%-]/_}"
+    cat "$TMUX_TOOLS_TEST_BARRIER/buffer-$safe_buffer" \
+      >"$TMUX_TOOLS_TEST_BARRIER/pasted-$TMUX_TOOLS_TEST_ROLE"
+    printf '%s\n' "$target" >"$TMUX_TOOLS_TEST_BARRIER/target-$TMUX_TOOLS_TEST_ROLE"
+    if [[ "$TMUX_TOOLS_TEST_ROLE" == A ]]; then
+      : >"$TMUX_TOOLS_TEST_BARRIER/a-pasted"
+    fi
+    if ((delete)); then
+      rm -f "$TMUX_TOOLS_TEST_BARRIER/buffer-$safe_buffer"
+    fi
+    ;;
+  delete-buffer)
+    buffer=""
+    while (($#)); do
+      case "$1" in
+        -b) buffer="$2"; shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    safe_buffer="${buffer//[^A-Za-z0-9_.%-]/_}"
+    rm -f "$TMUX_TOOLS_TEST_BARRIER/buffer-$safe_buffer"
+    ;;
+  *)
+    exit 99
+    ;;
+esac
+MOCK
+chmod +x "$barrier_bin/tmux"
+env -u TMUX_PANE PATH="$barrier_bin:$PATH" TMUX_TOOLS_TEST_BARRIER="$barrier_dir" \
+  TMUX_TOOLS_TEST_ROLE=A tmux-clip-paste --file "$barrier_a" >/dev/null 2>&1 &
+barrier_a_pid=$!
+if _wait_for_file "clip race reaches the first completed load" "$barrier_dir/a-loaded"; then
+  env -u TMUX_PANE PATH="$barrier_bin:$PATH" TMUX_TOOLS_TEST_BARRIER="$barrier_dir" \
+    TMUX_TOOLS_TEST_ROLE=B tmux-clip-paste --file "$barrier_b" >/dev/null 2>&1 &
+  barrier_b_pid=$!
+  wait "$barrier_a_pid"
+  barrier_a_rc=$?
+  wait "$barrier_b_pid"
+  barrier_b_rc=$?
+else
+  kill "$barrier_a_pid" 2>/dev/null || :
+  wait "$barrier_a_pid" 2>/dev/null || :
+  barrier_a_rc=98
+  barrier_b_rc=98
+fi
+_assert_eq "clip race consumer A succeeds" "0" "$barrier_a_rc"
+_assert_eq "clip race consumer B succeeds" "0" "$barrier_b_rc"
+_assert_eq "clip race pastes A's own named buffer" \
+  "payload A" "$(cat "$barrier_dir/pasted-A")"
+_assert_eq "clip race pastes B's own named buffer" \
+  "payload B" "$(cat "$barrier_dir/pasted-B")"
+_assert_eq "clip race retains A's resolved target" \
+  "%1" "$(cat "$barrier_dir/target-A")"
+_assert_eq "clip race retains B's resolved target" \
+  "%2" "$(cat "$barrier_dir/target-B")"
+barrier_buffers=$(printf '%s\n' "$barrier_dir"/buffer-*)
+_assert_eq "clip race deletes all named buffers" \
+  "$barrier_dir/buffer-*" "$barrier_buffers"
 
 if command -v tmux >/dev/null 2>&1; then
   real_tmux=$(command -v tmux)
@@ -795,6 +1861,32 @@ if command -v tmux >/dev/null 2>&1; then
 exec "$real_tmux" -S "$socket" "\$@"
 MOCK
   chmod +x "$tool_bin/tmux"
+
+  real_clip_dir=$(_tmpdir)
+  real_clip_a="$real_clip_dir/a.payload"
+  real_clip_b="$real_clip_dir/b.payload"
+  real_output_a="$real_clip_dir/a.output"
+  real_output_b="$real_clip_dir/b.output"
+  printf 'real pane A\n' >"$real_clip_a"
+  printf 'real pane B\n' >"$real_clip_b"
+  "$real_tmux" -S "$socket" -f /dev/null new-session -d -s clip-target \
+    "cat >'$real_output_a'"
+  real_pane_a=$(
+    "$real_tmux" -S "$socket" display-message -p -t clip-target '#{pane_id}'
+  )
+  real_pane_b=$(
+    "$real_tmux" -S "$socket" split-window -d -P -F '#{pane_id}' -t clip-target \
+      "cat >'$real_output_b'"
+  )
+  "$real_tmux" -S "$socket" run-shell -t "$real_pane_a" \
+    "env -u TMUX_PANE PATH='$tool_bin:$ROOT/bin:$PATH' tmux-clip-paste --pane '$real_pane_a' --file '$real_clip_a'"
+  "$real_tmux" -S "$socket" run-shell -t "$real_pane_b" \
+    "env TMUX_PANE=%999 PATH='$tool_bin:$ROOT/bin:$PATH' tmux-clip-paste --pane '$real_pane_b' --file '$real_clip_b'"
+  _wait_for_content "real tmux run-shell pastes with TMUX_PANE unset" \
+    "$real_output_a" "real pane A"
+  _wait_for_content "real tmux run-shell overrides stale TMUX_PANE" \
+    "$real_output_b" "real pane B"
+  "$real_tmux" -S "$socket" kill-session -t clip-target
 
   "$real_tmux" -S "$socket" -f /dev/null new-session -d -s tmux-tools-test -n dup \
     -c "$project_dir" 'sleep 60'
