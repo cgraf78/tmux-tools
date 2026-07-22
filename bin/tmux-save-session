@@ -28,7 +28,7 @@ Arguments:
 Options:
   -d, --dir DIR      Directory for saved restore scripts.
                     Defaults to $TMUX_TOOLS_SESSION_DIR, then
-                    $XDG_DATA_HOME/tmux/sessions, then
+                    an absolute $XDG_DATA_HOME/tmux/sessions, then
                     ~/.local/share/tmux/sessions.
   -h, --help         Show this help.
 EOF
@@ -51,7 +51,8 @@ _validate_session_name() {
   fi
 }
 
-save_dir="$(tmux_tools_default_session_dir)"
+save_dir=""
+save_dir_set=0
 session=""
 
 while (($#)); do
@@ -60,11 +61,13 @@ while (($#)); do
       shift
       (($#)) || _die "--dir requires a value"
       save_dir="$1"
+      save_dir_set=1
       shift
       ;;
     --dir=*)
       save_dir="${1#--dir=}"
       [[ -n "$save_dir" ]] || _die "--dir requires a value"
+      save_dir_set=1
       shift
       ;;
     -h | --help)
@@ -88,6 +91,11 @@ while (($#)); do
   esac
 done
 
+if ((save_dir_set == 0)); then
+  tmux_tools_resolve_session_dir ||
+    _die "HOME is not set and XDG_DATA_HOME is not absolute"
+  save_dir="$REPLY"
+fi
 [[ -n "$save_dir" ]] || _die "save directory is empty"
 
 if [[ -z "$session" ]]; then

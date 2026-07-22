@@ -45,11 +45,19 @@ current client when run inside tmux. Use `--no-attach` for scripts and tests.
 
 ## Session Directory
 
-Saved restore scripts live in:
+Saved restore scripts use the first available path in this order:
 
-```sh
-${TMUX_TOOLS_SESSION_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/tmux/sessions}
+```text
+$TMUX_TOOLS_SESSION_DIR
+$XDG_DATA_HOME/tmux/sessions
+$HOME/.local/share/tmux/sessions
 ```
+
+An explicitly set `TMUX_TOOLS_SESSION_DIR` is used unchanged. Otherwise, the
+tools use `XDG_DATA_HOME` only when it is absolute and fall back to
+`$HOME/.local/share`; they report an error instead of inventing a root when
+neither is available. Empty and relative `XDG_DATA_HOME` values are ignored as
+required by the XDG base-directory specification.
 
 Use `--dir DIR` on either command to read or write a different directory.
 
