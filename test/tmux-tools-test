@@ -110,7 +110,8 @@ tmux_tools_resolve_session_dir
 _assert_eq "session helper preserves override trailing newlines" "$helper_override" "$REPLY"
 export TMUX_TOOLS_SESSION_DIR=""
 tmux_tools_resolve_session_dir
-_assert_eq "session helper preserves an explicitly empty override" "" "$REPLY"
+_assert_eq "session helper treats an empty override as unset" \
+  "$helper_dir/xdg/tmux/sessions" "$REPLY"
 unset TMUX_TOOLS_SESSION_DIR XDG_DATA_HOME HOME
 REPLY="stale"
 if tmux_tools_resolve_session_dir; then

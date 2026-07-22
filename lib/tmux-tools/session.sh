@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 tmux_tools_resolve_session_dir() {
-  if [[ "${TMUX_TOOLS_SESSION_DIR+x}" == x ]]; then
+  if [[ -n "${TMUX_TOOLS_SESSION_DIR:-}" ]]; then
     REPLY="$TMUX_TOOLS_SESSION_DIR"
     return 0
   fi

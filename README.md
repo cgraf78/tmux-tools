@@ -53,8 +53,8 @@ $XDG_DATA_HOME/tmux/sessions
 $HOME/.local/share/tmux/sessions
 ```
 
-An explicitly set `TMUX_TOOLS_SESSION_DIR` is used unchanged. Otherwise, the
-tools use `XDG_DATA_HOME` only when it is absolute and fall back to
+An explicitly set, non-empty `TMUX_TOOLS_SESSION_DIR` is used unchanged.
+Otherwise, the tools use `XDG_DATA_HOME` only when it is absolute and fall back to
 `$HOME/.local/share`; they report an error instead of inventing a root when
 neither is available. Empty and relative `XDG_DATA_HOME` values are ignored as
 required by the XDG base-directory specification.
