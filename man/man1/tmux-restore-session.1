@@ -44,7 +44,12 @@ Show usage.
 .TP
 .B TMUX_TOOLS_SESSION_DIR
 Default session directory. If unset, the default is
-.IR ${XDG_DATA_HOME:-$HOME/.local/share}/tmux/sessions .
+an absolute
+.IR $XDG_DATA_HOME/tmux/sessions ,
+then
+.IR $HOME/.local/share/tmux/sessions .
+Empty and relative XDG data paths are ignored. If neither base directory is
+available, the command reports an error.
 .SH EXIT STATUS
 .TP
 .B 0

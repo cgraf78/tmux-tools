@@ -78,6 +78,7 @@ _assert_symlink() {
 
 echo "=== tmux session tools ==="
 
+test_home="$HOME"
 helper_dir=$(_tmpdir)
 mkdir -p "$helper_dir"
 : >"$helper_dir/beta.sh"
@@ -86,16 +87,40 @@ helper_sessions=$(tmux_tools_saved_sessions "$helper_dir")
 _assert_eq "session helper lists saved sessions sorted" "$(printf 'alpha\nbeta')" "$helper_sessions"
 _assert_eq "session helper builds restore script path" \
   "$helper_dir/alpha.sh" "$(tmux_tools_session_file "$helper_dir" alpha)"
-helper_default=$(
-  HOME="$helper_dir/home" XDG_DATA_HOME='' TMUX_TOOLS_SESSION_DIR='' \
-    tmux_tools_default_session_dir
-)
+unset TMUX_TOOLS_SESSION_DIR
+HOME="$helper_dir/home" XDG_DATA_HOME=''
+tmux_tools_resolve_session_dir
+helper_default="$REPLY"
 _assert_eq "session helper default dir follows XDG data fallback" \
   "$helper_dir/home/.local/share/tmux/sessions" "$helper_default"
-helper_override=$(
-  TMUX_TOOLS_SESSION_DIR="$helper_dir/custom" tmux_tools_default_session_dir
-)
-_assert_eq "session helper default dir honors env override" "$helper_dir/custom" "$helper_override"
+_assert_eq "session helper keeps the compatibility output API" \
+  "$helper_default" "$(tmux_tools_default_session_dir)"
+XDG_DATA_HOME="relative/data"
+tmux_tools_resolve_session_dir
+_assert_eq "session helper rejects relative XDG data roots" \
+  "$helper_dir/home/.local/share/tmux/sessions" "$REPLY"
+export XDG_DATA_HOME="$helper_dir/xdg"
+unset HOME
+tmux_tools_resolve_session_dir
+_assert_eq "session helper accepts absolute XDG data roots without HOME" \
+  "$helper_dir/xdg/tmux/sessions" "$REPLY"
+helper_override="$helper_dir/custom"$'\n'
+TMUX_TOOLS_SESSION_DIR="$helper_override"
+tmux_tools_resolve_session_dir
+_assert_eq "session helper preserves override trailing newlines" "$helper_override" "$REPLY"
+export TMUX_TOOLS_SESSION_DIR=""
+tmux_tools_resolve_session_dir
+_assert_eq "session helper treats an empty override as unset" \
+  "$helper_dir/xdg/tmux/sessions" "$REPLY"
+unset TMUX_TOOLS_SESSION_DIR XDG_DATA_HOME HOME
+REPLY="stale"
+if tmux_tools_resolve_session_dir; then
+  _fail "session helper fails closed without XDG data or HOME"
+else
+  _pass "session helper fails closed without XDG data or HOME"
+fi
+_assert_eq "session helper clears stale output when roots are unavailable" "" "$REPLY"
+export HOME="$test_home"
 
 save_help=$(tmux-save-session --help 2>&1)
 _assert_contains "tmux-save-session help documents --dir" "--dir DIR" "$save_help"
@@ -103,6 +128,17 @@ restore_help=$(tmux-restore-session --help 2>&1)
 _assert_contains "tmux-restore-session help documents --no-attach" "--no-attach" "$restore_help"
 clip_help=$(tmux-clip-paste --help 2>&1)
 _assert_contains "tmux-clip-paste help documents --path" "--path" "$clip_help"
+
+missing_root_output=$(env -u HOME -u XDG_DATA_HOME -u TMUX_TOOLS_SESSION_DIR \
+  tmux-restore-session --list 2>&1)
+missing_root_rc=$?
+_assert_eq "restore reports a usage error when no default root exists" "2" "$missing_root_rc"
+_assert_contains "restore explains the missing default root" \
+  "HOME is not set and XDG_DATA_HOME is not absolute" "$missing_root_output"
+explicit_no_home=$(_tmpdir)
+env -u HOME -u XDG_DATA_HOME -u TMUX_TOOLS_SESSION_DIR \
+  tmux-restore-session --dir "$explicit_no_home" --list >/dev/null
+_assert_eq "restore explicit --dir works without default roots" "0" "$?"
 
 list_dir=$(_tmpdir)
 mkdir -p "$list_dir"

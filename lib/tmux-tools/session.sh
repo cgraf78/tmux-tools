@@ -1,11 +1,31 @@
 #!/usr/bin/env bash
 
-tmux_tools_default_session_dir() {
+tmux_tools_resolve_session_dir() {
   if [[ -n "${TMUX_TOOLS_SESSION_DIR:-}" ]]; then
-    printf '%s\n' "$TMUX_TOOLS_SESSION_DIR"
-  else
-    printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/tmux/sessions"
+    REPLY="$TMUX_TOOLS_SESSION_DIR"
+    return 0
   fi
+
+  case "${XDG_DATA_HOME:-}" in
+    /*)
+      REPLY="$XDG_DATA_HOME/tmux/sessions"
+      ;;
+    *)
+      if [[ -n "${HOME:-}" ]]; then
+        REPLY="$HOME/.local/share/tmux/sessions"
+      else
+        REPLY=""
+        return 1
+      fi
+      ;;
+  esac
+}
+
+# Compatibility output API for existing sourced consumers. New shell callers
+# that need byte-exact paths should use tmux_tools_resolve_session_dir and REPLY.
+tmux_tools_default_session_dir() {
+  tmux_tools_resolve_session_dir || return 1
+  printf '%s\n' "$REPLY"
 }
 
 tmux_tools_session_file() {
