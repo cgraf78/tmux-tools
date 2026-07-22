@@ -60,6 +60,15 @@ neither is available. Empty and relative `XDG_DATA_HOME` values are ignored as
 required by the XDG base-directory specification.
 
 Use `--dir DIR` on either command to read or write a different directory.
+New session directories are created with mode `0700`, and restore scripts are
+published with mode `0700` only after the complete script passes a syntax
+check. Saving replaces an earlier script atomically, so a failed save leaves
+the previous version intact. The permissions of an existing directory passed
+with `--dir` are preserved; use a private directory when session contents must
+not be shared with other users who can access that directory. Same-directory
+atomic replacement assumes other users cannot rename or replace entries in the
+save directory; an intentionally shared `--dir` does not provide that trust
+boundary.
 
 ### `tmux-clip-paste`
 

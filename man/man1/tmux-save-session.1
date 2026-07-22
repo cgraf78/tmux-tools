@@ -12,6 +12,16 @@ tmux-save-session \- save a tmux session layout as a restore script
 captures a tmux session's window names, pane layouts, pane working
 directories, and active window into an executable restore script. When no
 session name is supplied, the current tmux session is saved.
+.PP
+New session directories and restore scripts are created with mode 0700. The
+complete restore script is written to a restrictive temporary file, checked
+for valid shell syntax, and atomically installed. A failed save therefore
+leaves any previous restore script intact. When
+.B --dir
+names an existing directory, that directory's permissions are preserved.
+Same-directory atomic replacement assumes other users cannot rename or replace
+entries in the save directory; an intentionally shared directory does not
+provide that trust boundary.
 .SH OPTIONS
 .TP
 .BI -d ", --dir " dir
