@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+probe_parent=$(mktemp -d "${TMPDIR:-/tmp}/tmux-tools-harness-test.XXXXXXXX") || exit 1
+failures=0
+
+cleanup() {
+  rm -rf "$probe_parent"
+}
+trap cleanup EXIT
+
+fail() {
+  printf 'not ok - %s\n' "$1" >&2
+  failures=$((failures + 1))
+}
+
+run_probe() {
+  local action="$1"
+  local expected_status="$2"
+  local output status probe_root probe_child probe_mode probe_tmpdir probe_socket
+
+  output=$(
+    umask 000
+    TMPDIR="$probe_parent" \
+      "$ROOT/test/tmux-tools-test" --harness-probe "$action"
+  )
+  status=$?
+  probe_root=$(printf '%s\n' "$output" | sed -n '1p')
+  probe_child=$(printf '%s\n' "$output" | sed -n '2p')
+  probe_mode=$(printf '%s\n' "$output" | sed -n '3p')
+  probe_tmpdir=$(printf '%s\n' "$output" | sed -n '4p')
+  probe_socket=$(printf '%s\n' "$output" | sed -n '5p')
+
+  if [[ "$status" != "$expected_status" ]]; then
+    fail "harness $action probe preserves status $expected_status"
+  elif [[ "$probe_root" != "$probe_parent"/tmt.* ]]; then
+    fail "harness $action probe creates its root below TMPDIR"
+  elif [[ "$probe_child" != "$probe_root"/c.* ]]; then
+    fail "harness $action probe creates case directories below its root"
+  elif [[ "$probe_mode" != "700" ]]; then
+    fail "harness $action probe keeps its root private under umask 000"
+  elif [[ "$probe_tmpdir" != "$probe_parent" ]]; then
+    fail "harness $action probe preserves TMPDIR"
+  elif [[ "$probe_socket" != "$probe_root/t" ]]; then
+    fail "harness $action probe keeps the tmux socket path short"
+  elif [[ -e "$probe_root" || -L "$probe_root" ]]; then
+    fail "harness $action probe removes its suite root"
+  else
+    printf 'ok - harness %s cleanup\n' "$action"
+  fi
+}
+
+run_probe normal 0
+run_probe failure 17
+run_probe int 130
+run_probe term 143
+
+if ((failures > 0)); then
+  printf '%s failure(s)\n' "$failures" >&2
+  exit 1
+fi
+
+printf 'all harness tests passed\n'

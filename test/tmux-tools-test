@@ -10,22 +10,36 @@ export NO_COLOR=1
 . "$ROOT/lib/tmux-tools/session.sh"
 
 _failures=0
-_temps=()
+_suite_tmp_parent=${TMPDIR:-/tmp}
+_suite_tmp_root=$(
+  umask 077
+  mktemp -d "$_suite_tmp_parent/tmt.XXXXXXXX"
+) || {
+  printf 'failed to create test temporary directory below %s\n' \
+    "$_suite_tmp_parent" >&2
+  exit 1
+}
+# macOS has a shorter AF_UNIX path limit, so keep the tmux socket near the root.
+_suite_tmux_socket=$_suite_tmp_root/t
 
 _tmpdir() {
-  local dir
-  dir=$(mktemp -d)
-  _temps+=("$dir")
-  printf '%s\n' "$dir"
+  mktemp -d "$_suite_tmp_root/c.XXXXXXXX"
 }
 
 _cleanup() {
-  local dir
-  for dir in "${_temps[@]}"; do
-    rm -rf "$dir"
-  done
+  local root=${_suite_tmp_root:-}
+  [[ -z "$root" ]] || rm -rf "$root"
+  _suite_tmp_root=""
+}
+
+_signal_exit() {
+  local status="$1"
+  _cleanup
+  exit "$status"
 }
 trap _cleanup EXIT
+trap '_signal_exit 130' INT
+trap '_signal_exit 143' TERM
 
 _pass() {
   printf 'ok - %s\n' "$1"
@@ -127,6 +141,23 @@ _mode() {
     stat -f '%Lp' "$1"
   fi
 }
+
+# Exercise harness teardown without recursively running the integration suite.
+if [[ "${1:-}" == "--harness-probe" ]]; then
+  probe_action=${2:-}
+  probe_child=$(_tmpdir) || exit 1
+  printf '%s\n%s\n%s\n%s\n%s\n' \
+    "$_suite_tmp_root" "$probe_child" "$(_mode "$_suite_tmp_root")" \
+    "${TMPDIR:-}" "$_suite_tmux_socket"
+  case "$probe_action" in
+    normal) exit 0 ;;
+    failure) exit 17 ;;
+    int) kill -INT "$$" ;;
+    term) kill -TERM "$$" ;;
+    *) exit 2 ;;
+  esac
+  exit 99
+fi
 
 _wait_for_file() {
   local name="$1"
@@ -1849,8 +1880,7 @@ _assert_eq "clip race deletes all named buffers" \
 
 if command -v tmux >/dev/null 2>&1; then
   real_tmux=$(command -v tmux)
-  socket_dir=$(_tmpdir)
-  socket="$socket_dir/tmux-tools.sock"
+  socket=$_suite_tmux_socket
   tool_bin=$(_tmpdir)
   session_dir=$(_tmpdir)
   project_dir=$(_tmpdir)
