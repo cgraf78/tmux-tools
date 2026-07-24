@@ -147,12 +147,25 @@ _publish() {
   }
   # shellcheck disable=SC2317,SC2329 # Invoked indirectly by signal traps.
   _record_publish_signal() {
-    pending_signal="$1"
+    if ((pending_signal == 0)); then
+      pending_signal="$1"
+    fi
+  }
+  _publish_creation_error() {
+    # Close the check-to-error window while retaining the first recorded signal.
+    trap '_record_publish_signal 129; exit "$pending_signal"' HUP
+    trap '_record_publish_signal 130; exit "$pending_signal"' INT
+    trap '_record_publish_signal 143; exit "$pending_signal"' TERM
+    if ((pending_signal)); then
+      exit "$pending_signal"
+    fi
+    _fail "$@"
   }
   trap _publish_cleanup EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  # Cleanup cannot safely unlink the temporary path until its inode is recorded.
+  trap '_record_publish_signal 129' HUP
+  trap '_record_publish_signal 130' INT
+  trap '_record_publish_signal 143' TERM
   [[ ! -o noclobber ]] || had_noclobber=1
   for ((attempt = 0; attempt < 100; attempt++)); do
     tmpfile="$tmp_prefix.$RANDOM.$RANDOM"
@@ -163,11 +176,13 @@ _publish() {
       ((had_noclobber)) || set +o noclobber
       umask "$old_umask"
       [[ -f "$tmpfile" && ! -L "$tmpfile" ]] ||
-        _fail "temporary handoff changed during creation: $tmpfile"
-      _file_identity "$tmpfile" || _fail "cannot identify temporary handoff: $tmpfile"
+        _publish_creation_error "temporary handoff changed during creation: $tmpfile"
+      if ! _file_identity "$tmpfile"; then
+        _publish_creation_error "cannot identify temporary handoff: $tmpfile"
+      fi
       tmp_identity="$REPLY"
       if ! _owns_temporary_path "$tmpfile"; then
-        _fail "temporary handoff changed during creation: $tmpfile"
+        _publish_creation_error "temporary handoff changed during creation: $tmpfile"
       fi
       break
     fi
@@ -176,7 +191,13 @@ _publish() {
   done
   if [[ -z "$tmp_identity" ]]; then
     tmpfile=""
-    _fail "cannot create an exclusive temporary handoff in: $dir"
+    _publish_creation_error "cannot create an exclusive temporary handoff in: $dir"
+  fi
+  trap '_record_publish_signal 129; exit "$pending_signal"' HUP
+  trap '_record_publish_signal 130; exit "$pending_signal"' INT
+  trap '_record_publish_signal 143; exit "$pending_signal"' TERM
+  if ((pending_signal)); then
+    exit "$pending_signal"
   fi
 
   cat >&3 || _fail "cannot read handoff payload from standard input"
