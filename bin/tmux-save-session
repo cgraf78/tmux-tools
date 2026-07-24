@@ -142,6 +142,17 @@ _owns_temporary_path() {
   _file_identity "$path" && [[ "$REPLY" == "$tmp_identity" ]]
 }
 
+_creation_error() {
+  # Close the check-to-error window while retaining the first recorded signal.
+  trap '_record_signal 129; exit "$pending_signal"' HUP
+  trap '_record_signal 130; exit "$pending_signal"' INT
+  trap '_record_signal 143; exit "$pending_signal"' TERM
+  if ((pending_signal)); then
+    exit "$pending_signal"
+  fi
+  _die "$@"
+}
+
 _create_tmpfile() {
   local attempt old_umask had_noclobber=0
 
@@ -156,11 +167,13 @@ _create_tmpfile() {
       ((had_noclobber)) || set +o noclobber
       umask "$old_umask"
       [[ -f "$tmpfile" && ! -L "$tmpfile" ]] ||
-        _die "temporary save changed during creation: $tmpfile"
-      _file_identity "$tmpfile" || _die "cannot identify temporary save: $tmpfile"
+        _creation_error "temporary save changed during creation: $tmpfile"
+      if ! _file_identity "$tmpfile"; then
+        _creation_error "cannot identify temporary save: $tmpfile"
+      fi
       tmp_identity="$REPLY"
       if ! _owns_temporary_path "$tmpfile"; then
-        _die "temporary save changed during creation: $tmpfile"
+        _creation_error "temporary save changed during creation: $tmpfile"
       fi
       return 0
     fi
@@ -168,7 +181,7 @@ _create_tmpfile() {
     umask "$old_umask"
   done
   tmpfile=""
-  _die "cannot create an exclusive temporary save in: $save_dir"
+  _creation_error "cannot create an exclusive temporary save in: $save_dir"
 }
 
 # shellcheck disable=SC2317,SC2329 # Invoked indirectly by the EXIT trap.
@@ -185,14 +198,23 @@ _cleanup() {
 
 # shellcheck disable=SC2317,SC2329 # Invoked indirectly by signal traps.
 _record_signal() {
-  pending_signal="$1"
+  if ((pending_signal == 0)); then
+    pending_signal="$1"
+  fi
 }
 
 trap _cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# Cleanup cannot safely unlink the temporary path until its inode is recorded.
+trap '_record_signal 129' HUP
+trap '_record_signal 130' INT
+trap '_record_signal 143' TERM
 _create_tmpfile
+trap '_record_signal 129; exit "$pending_signal"' HUP
+trap '_record_signal 130; exit "$pending_signal"' INT
+trap '_record_signal 143; exit "$pending_signal"' TERM
+if ((pending_signal)); then
+  exit "$pending_signal"
+fi
 
 active_window_index=$(tmux display-message -p -t "$session" '#{window_index}')
 

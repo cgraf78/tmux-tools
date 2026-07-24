@@ -159,6 +159,143 @@ if [[ "${1:-}" == "--harness-probe" ]]; then
   exit 99
 fi
 
+_write_initial_identity_signal_stat() {
+  local path="$1"
+
+  cat >"$path" <<'MOCK'
+#!/usr/bin/env bash
+target="${!#}"
+state=""
+[[ ! -e "$TMUX_TOOLS_TEST_SIGNAL_STATE" ]] ||
+  state=$(cat "$TMUX_TOOLS_TEST_SIGNAL_STATE")
+if [[ "$target" == *.tmp.* && -z "$state" ]]; then
+  publisher_suffix=${target##*.tmp.}
+  publisher_pid=${publisher_suffix%%.*}
+  random_suffix=${publisher_suffix#*.}
+  random_one=${random_suffix%%.*}
+  random_two=${random_suffix#*.}
+  if [[ -z "$publisher_pid" || "$publisher_pid" == *[!0-9]* || \
+    ( "$publisher_pid" != [2-9] && "$publisher_pid" != [1-9][0-9]* ) || \
+    -z "$random_one" || "$random_one" == *[!0-9]* || \
+    -z "$random_two" || "$random_two" == *[!0-9]* || \
+    "$publisher_suffix" != "$publisher_pid.$random_one.$random_two" ]]; then
+    printf 'invalid publisher PID in temporary path: %s\n' "$target" >&2
+    exit 98
+  fi
+  if [[ "$TMUX_TOOLS_TEST_SIGNAL_MODE" == fail-initial-hup-term ]]; then
+    printf 'initial-failed-once\n' >"$TMUX_TOOLS_TEST_SIGNAL_STATE"
+  else
+    output=$("$TMUX_TOOLS_TEST_REAL_STAT" "$@")
+    status=$?
+    ((status == 0)) || exit "$status"
+    printf 'identified\n' >"$TMUX_TOOLS_TEST_SIGNAL_STATE"
+  fi
+  if [[ "$TMUX_TOOLS_TEST_SIGNAL_MODE" == hup-term || \
+    "$TMUX_TOOLS_TEST_SIGNAL_MODE" == fail-initial-hup-term ]]; then
+    kill -HUP "$publisher_pid"
+    sleep 0.05
+  fi
+  kill -TERM "$publisher_pid"
+  sleep 0.05
+  if [[ "$TMUX_TOOLS_TEST_SIGNAL_MODE" == replace ]]; then
+    rm -f -- "$target"
+    printf 'unrelated identity replacement\n' >"$target"
+  fi
+  [[ "$TMUX_TOOLS_TEST_SIGNAL_MODE" != fail-initial-hup-term ]] || exit 1
+  printf '%s\n' "$output"
+  exit 0
+fi
+if [[ "$target" == *.tmp.* && \
+  "$TMUX_TOOLS_TEST_SIGNAL_MODE" == fail-initial-hup-term && \
+  "$state" == initial-failed-once ]]; then
+  printf 'initial-failed-twice\n' >"$TMUX_TOOLS_TEST_SIGNAL_STATE"
+  exit 1
+fi
+if [[ "$target" == *.tmp.* && \
+  "$TMUX_TOOLS_TEST_SIGNAL_MODE" == fail-recheck ]]; then
+  case "$state" in
+    identified)
+      printf 'failed-once\n' >"$TMUX_TOOLS_TEST_SIGNAL_STATE"
+      exit 1
+      ;;
+    failed-once)
+      printf 'failed-twice\n' >"$TMUX_TOOLS_TEST_SIGNAL_STATE"
+      exit 1
+      ;;
+  esac
+fi
+exec "$TMUX_TOOLS_TEST_REAL_STAT" "$@"
+MOCK
+  chmod +x "$path"
+}
+
+_check_initial_identity_signal_pid() {
+  local stat_script="$1" real_stat="$2" pid="$3" expected_rc="$4"
+  local expected_kill="$5" dir="$6" target state kill_log rc actual_kill=""
+
+  target="$dir/.pid-check.tmp.$pid.1.2"
+  state="$dir/state-$pid"
+  kill_log="$dir/kill-$pid"
+  : >"$target"
+  (
+    # shellcheck disable=SC2317,SC2329 # Called by the sourced stat wrapper.
+    kill() {
+      printf '%s\n' "$*" >"$kill_log"
+    }
+    if "$real_stat" -L -c '%d:%i' "$target" >/dev/null 2>&1; then
+      set -- -L -c '%d:%i' "$target"
+    else
+      set -- -L -f '%d:%i' "$target"
+    fi
+    # shellcheck disable=SC1090 # The generated wrapper path is this test's input.
+    TMUX_TOOLS_TEST_REAL_STAT="$real_stat" \
+      TMUX_TOOLS_TEST_SIGNAL_STATE="$state" \
+      TMUX_TOOLS_TEST_SIGNAL_MODE=term . "$stat_script"
+  ) >/dev/null 2>&1
+  rc=$?
+  [[ ! -e "$kill_log" ]] || actual_kill=$(cat "$kill_log")
+  _assert_eq "initial identity signal parser status for PID $pid" \
+    "$expected_rc" "$rc"
+  _assert_eq "initial identity signal parser kill for PID $pid" \
+    "$expected_kill" "$actual_kill"
+}
+
+_write_creation_signal_debug_env() {
+  local path="$1"
+
+  cat >"$path" <<'MOCK'
+_tmux_tools_creation_debug() {
+  case "$TMUX_TOOLS_TEST_CREATION_MODE" in
+    replace-shape)
+      [[ "$BASH_COMMAND" == '[[ -f "$tmpfile"'* ]] || return 0
+      trap - DEBUG
+      rm -f -- "$tmpfile"
+      mkdir -- "$tmpfile"
+      printf '%s\n' "$tmpfile" >"$TMUX_TOOLS_TEST_REPLACEMENT_PATH"
+      printf 'unrelated creation sibling\n' >"$tmpfile.unrelated"
+      printf '%s\n' "$tmpfile.unrelated" >"$TMUX_TOOLS_TEST_SIBLING_PATH"
+      ;;
+    exhaust)
+      [[ "$BASH_COMMAND" == 'tmpfile="$tmp_prefix.$RANDOM.$RANDOM"' ]] ||
+        return 0
+      trap - DEBUG
+      : >"$TMUX_TOOLS_TEST_CREATION_TRIGGERED"
+      ;;
+    error-boundary)
+      [[ "$BASH_COMMAND" == '_die "$@"' || \
+        "$BASH_COMMAND" == '_fail "$@"' ]] || return 0
+      trap - DEBUG
+      : >"$TMUX_TOOLS_TEST_CREATION_TRIGGERED"
+      ;;
+    *) return 0 ;;
+  esac
+  kill -HUP "$$"
+  kill -TERM "$$"
+}
+set -T
+trap _tmux_tools_creation_debug DEBUG
+MOCK
+}
 _wait_for_file() {
   local name="$1"
   local path="$2"
@@ -514,6 +651,204 @@ for identity_candidate in "$identity_dir"/.identity-session.sh.tmp.*; do
 done
 _assert_eq "save removes its pathname-identified temporary" \
   "" "$identity_owned_temps"
+
+creation_signal_debug_dir=$(_tmpdir)
+creation_signal_debug_env="$creation_signal_debug_dir/debug-env"
+_write_creation_signal_debug_env "$creation_signal_debug_env"
+shape_signal_dir=$(_tmpdir)
+shape_signal_save="$shape_signal_dir/shape-signal-session.sh"
+shape_signal_replacement_path="$shape_signal_dir/replacement-path"
+shape_signal_sibling_path="$shape_signal_dir/sibling-path"
+printf 'known-good-shape-signal-save\n' >"$shape_signal_save"
+BASH_ENV="$creation_signal_debug_env" \
+  TMUX_TOOLS_TEST_CREATION_MODE=replace-shape \
+  TMUX_TOOLS_TEST_REPLACEMENT_PATH="$shape_signal_replacement_path" \
+  TMUX_TOOLS_TEST_SIBLING_PATH="$shape_signal_sibling_path" \
+  PATH="$save_bin:$PATH" \
+  tmux-save-session --dir "$shape_signal_dir" shape-signal-session \
+  >/dev/null 2>&1
+shape_signal_rc=$?
+_assert_eq "save preserves HUP after a pre-identity nonregular replacement" \
+  "129" "$shape_signal_rc"
+_assert_eq "save preserves its prior file after pre-identity replacement" \
+  "known-good-shape-signal-save" "$(cat "$shape_signal_save")"
+shape_signal_replacement=$(cat "$shape_signal_replacement_path")
+shape_signal_sibling=$(cat "$shape_signal_sibling_path")
+if [[ -d "$shape_signal_replacement" ]]; then
+  _pass "save retains a pre-identity nonregular replacement"
+else
+  _fail "save retains a pre-identity nonregular replacement"
+fi
+_assert_eq "save preserves unrelated sibling after pre-identity replacement" \
+  "unrelated creation sibling" "$(cat "$shape_signal_sibling")"
+
+printf -v exhausted_session '%240s' ''
+exhausted_session=${exhausted_session// /x}
+exhausted_save_dir=$(_tmpdir)
+exhausted_save="$exhausted_save_dir/$exhausted_session.sh"
+exhausted_save_unrelated="$exhausted_save_dir/unrelated"
+exhausted_save_triggered="$exhausted_save_dir/triggered"
+printf 'known-good-exhausted-save\n' >"$exhausted_save"
+printf 'unrelated exhausted save\n' >"$exhausted_save_unrelated"
+BASH_ENV="$creation_signal_debug_env" \
+  TMUX_TOOLS_TEST_CREATION_MODE=exhaust \
+  TMUX_TOOLS_TEST_CREATION_TRIGGERED="$exhausted_save_triggered" \
+  PATH="$save_bin:$PATH" \
+  tmux-save-session --dir "$exhausted_save_dir" "$exhausted_session" \
+  >/dev/null 2>&1
+exhausted_save_rc=$?
+_assert_eq "save preserves HUP after exhausting exclusive creation" \
+  "129" "$exhausted_save_rc"
+_assert_eq "save creation exhaustion hook runs" "" "$(cat "$exhausted_save_triggered")"
+_assert_eq "save preserves prior file after creation exhaustion" \
+  "known-good-exhausted-save" "$(cat "$exhausted_save")"
+_assert_eq "save preserves unrelated file after creation exhaustion" \
+  "unrelated exhausted save" "$(cat "$exhausted_save_unrelated")"
+
+boundary_save_dir=$(_tmpdir)
+boundary_save="$boundary_save_dir/$exhausted_session.sh"
+boundary_save_unrelated="$boundary_save_dir/unrelated"
+boundary_save_triggered="$boundary_save_dir/triggered"
+printf 'known-good-boundary-save\n' >"$boundary_save"
+printf 'unrelated boundary save\n' >"$boundary_save_unrelated"
+BASH_ENV="$creation_signal_debug_env" \
+  TMUX_TOOLS_TEST_CREATION_MODE=error-boundary \
+  TMUX_TOOLS_TEST_CREATION_TRIGGERED="$boundary_save_triggered" \
+  PATH="$save_bin:$PATH" \
+  tmux-save-session --dir "$boundary_save_dir" "$exhausted_session" \
+  >/dev/null 2>&1
+boundary_save_rc=$?
+_assert_eq "save preserves HUP at the creation-error boundary" \
+  "129" "$boundary_save_rc"
+_assert_eq "save creation-error boundary hook runs" \
+  "" "$(cat "$boundary_save_triggered")"
+_assert_eq "save preserves prior file at creation-error boundary" \
+  "known-good-boundary-save" "$(cat "$boundary_save")"
+_assert_eq "save preserves unrelated file at creation-error boundary" \
+  "unrelated boundary save" "$(cat "$boundary_save_unrelated")"
+
+identity_signal_dir=$(_tmpdir)
+identity_signal_save="$identity_signal_dir/identity-signal-session.sh"
+identity_signal_bin=$(_tmpdir)
+identity_signal_real_stat=$(command -v stat)
+printf 'known-good-identity-signal-save\n' >"$identity_signal_save"
+ln -s "$save_bin/tmux" "$identity_signal_bin/tmux"
+_write_initial_identity_signal_stat "$identity_signal_bin/stat"
+identity_signal_parser_dir=$(_tmpdir)
+_check_initial_identity_signal_pid "$identity_signal_bin/stat" \
+  "$identity_signal_real_stat" 0 98 "" "$identity_signal_parser_dir"
+_check_initial_identity_signal_pid "$identity_signal_bin/stat" \
+  "$identity_signal_real_stat" 00 98 "" "$identity_signal_parser_dir"
+_check_initial_identity_signal_pid "$identity_signal_bin/stat" \
+  "$identity_signal_real_stat" 1 98 "" "$identity_signal_parser_dir"
+_check_initial_identity_signal_pid "$identity_signal_bin/stat" \
+  "$identity_signal_real_stat" 2 0 "-TERM 2" "$identity_signal_parser_dir"
+_run_save_identity_signal() {
+  local state="$1" mode="$2" dir="$3" session="$4"
+
+  PATH="$identity_signal_bin:$PATH" \
+    TMUX_TOOLS_TEST_REAL_STAT="$identity_signal_real_stat" \
+    TMUX_TOOLS_TEST_SIGNAL_STATE="$state" \
+    TMUX_TOOLS_TEST_SIGNAL_MODE="$mode" \
+    tmux-save-session --dir "$dir" "$session" >/dev/null 2>&1
+  REPLY=$?
+}
+_run_save_identity_signal "$identity_signal_dir/state" term \
+  "$identity_signal_dir" identity-signal-session
+identity_signal_rc=$REPLY
+_assert_eq "save preserves TERM status during initial temporary identity lookup" \
+  "143" "$identity_signal_rc"
+_assert_eq "save preserves its prior file after initial identity TERM" \
+  "known-good-identity-signal-save" "$(cat "$identity_signal_save")"
+identity_signal_temps=$(printf '%s\n' \
+  "$identity_signal_dir"/.identity-signal-session.sh.tmp.*)
+_assert_eq "save removes its temporary file after initial identity TERM" \
+  "$identity_signal_dir/.identity-signal-session.sh.tmp.*" \
+  "$identity_signal_temps"
+
+identity_initial_failure_dir=$(_tmpdir)
+identity_initial_failure_save="$identity_initial_failure_dir/identity-initial-failure-session.sh"
+identity_initial_failure_sibling="$identity_initial_failure_dir/.identity-initial-failure-session.sh.tmp.unrelated"
+printf 'known-good-identity-initial-failure-save\n' \
+  >"$identity_initial_failure_save"
+printf 'unrelated initial identity sibling\n' >"$identity_initial_failure_sibling"
+_run_save_identity_signal "$identity_initial_failure_dir/state" \
+  fail-initial-hup-term "$identity_initial_failure_dir" \
+  identity-initial-failure-session
+identity_initial_failure_rc=$REPLY
+_assert_eq "save preserves HUP when initial identity probes fail" \
+  "129" "$identity_initial_failure_rc"
+_assert_eq "save preserves its prior file after initial identity failure" \
+  "known-good-identity-initial-failure-save" \
+  "$(cat "$identity_initial_failure_save")"
+_assert_eq "save preserves an unrelated sibling after initial identity failure" \
+  "unrelated initial identity sibling" \
+  "$(cat "$identity_initial_failure_sibling")"
+identity_initial_failure_temp=""
+for identity_initial_failure_candidate in \
+  "$identity_initial_failure_dir"/.identity-initial-failure-session.sh.tmp.*; do
+  [[ "$identity_initial_failure_candidate" != "$identity_initial_failure_sibling" ]] ||
+    continue
+  [[ -e "$identity_initial_failure_candidate" ||
+    -L "$identity_initial_failure_candidate" ]] || continue
+  identity_initial_failure_temp="$identity_initial_failure_candidate"
+done
+if [[ -f "$identity_initial_failure_temp" &&
+  ! -L "$identity_initial_failure_temp" ]]; then
+  _pass "save retains its unverified temporary after initial identity failure"
+else
+  _fail "save retains its unverified temporary after initial identity failure"
+fi
+
+identity_multi_signal_dir=$(_tmpdir)
+identity_multi_signal_save="$identity_multi_signal_dir/identity-multi-signal-session.sh"
+printf 'known-good-identity-multi-signal-save\n' >"$identity_multi_signal_save"
+_run_save_identity_signal "$identity_multi_signal_dir/state" hup-term \
+  "$identity_multi_signal_dir" identity-multi-signal-session
+identity_multi_signal_rc=$REPLY
+_assert_eq "save preserves the first handled signal during initial identity" \
+  "129" "$identity_multi_signal_rc"
+_assert_eq "save preserves its prior file after initial HUP and TERM" \
+  "known-good-identity-multi-signal-save" \
+  "$(cat "$identity_multi_signal_save")"
+identity_multi_signal_temps=$(printf '%s\n' \
+  "$identity_multi_signal_dir"/.identity-multi-signal-session.sh.tmp.*)
+_assert_eq "save removes its temporary file after initial HUP and TERM" \
+  "$identity_multi_signal_dir/.identity-multi-signal-session.sh.tmp.*" \
+  "$identity_multi_signal_temps"
+
+identity_stat_failure_dir=$(_tmpdir)
+identity_stat_failure_save="$identity_stat_failure_dir/identity-stat-failure-session.sh"
+printf 'known-good-identity-stat-failure-save\n' >"$identity_stat_failure_save"
+_run_save_identity_signal "$identity_stat_failure_dir/state" fail-recheck \
+  "$identity_stat_failure_dir" identity-stat-failure-session
+identity_stat_failure_rc=$REPLY
+_assert_eq "save preserves TERM when the identity recheck probes fail" \
+  "143" "$identity_stat_failure_rc"
+_assert_eq "save preserves its prior file after identity recheck failure" \
+  "known-good-identity-stat-failure-save" \
+  "$(cat "$identity_stat_failure_save")"
+identity_stat_failure_temps=$(printf '%s\n' \
+  "$identity_stat_failure_dir"/.identity-stat-failure-session.sh.tmp.*)
+_assert_eq "save cleans its inode after transient identity recheck failure" \
+  "$identity_stat_failure_dir/.identity-stat-failure-session.sh.tmp.*" \
+  "$identity_stat_failure_temps"
+
+identity_replacement_dir=$(_tmpdir)
+identity_replacement_save="$identity_replacement_dir/identity-replacement-session.sh"
+printf 'known-good-identity-replacement-save\n' >"$identity_replacement_save"
+_run_save_identity_signal "$identity_replacement_dir/state" replace \
+  "$identity_replacement_dir" identity-replacement-session
+identity_replacement_rc=$REPLY
+_assert_eq "save preserves TERM after its identified temporary is replaced" \
+  "143" "$identity_replacement_rc"
+_assert_eq "save preserves its prior file after signaled temporary replacement" \
+  "known-good-identity-replacement-save" \
+  "$(cat "$identity_replacement_save")"
+identity_replacement_temp=$(printf '%s\n' \
+  "$identity_replacement_dir"/.identity-replacement-session.sh.tmp.*)
+_assert_eq "save retains an unrelated replacement after initial identity TERM" \
+  "unrelated identity replacement" "$(cat "$identity_replacement_temp")"
 
 creation_race_dir=$(_tmpdir)
 creation_race_save="$creation_race_dir/creation-race-session.sh"
@@ -1095,6 +1430,185 @@ for publish_identity_candidate in "$clip_dir"/.identity-selection.tmp.*; do
 done
 _assert_eq "clip publish removes its pathname-identified temporary" \
   "" "$publish_identity_owned_temps"
+
+publish_shape_signal_file="$clip_dir/shape-signal-selection"
+publish_shape_signal_replacement_path="$clip_dir/shape-signal-replacement-path"
+publish_shape_signal_sibling_path="$clip_dir/shape-signal-sibling-path"
+printf 'known-good-shape-signal-payload\n' >"$publish_shape_signal_file"
+printf 'replacement\n' | BASH_ENV="$creation_signal_debug_env" \
+  TMUX_TOOLS_TEST_CREATION_MODE=replace-shape \
+  TMUX_TOOLS_TEST_REPLACEMENT_PATH="$publish_shape_signal_replacement_path" \
+  TMUX_TOOLS_TEST_SIBLING_PATH="$publish_shape_signal_sibling_path" \
+  tmux-clip-paste --file "$publish_shape_signal_file" --publish \
+  >/dev/null 2>&1
+publish_shape_signal_rc=$?
+_assert_eq "clip publish preserves HUP after pre-identity nonregular replacement" \
+  "129" "$publish_shape_signal_rc"
+_assert_eq "clip publish preserves payload after pre-identity replacement" \
+  "known-good-shape-signal-payload" "$(cat "$publish_shape_signal_file")"
+publish_shape_signal_replacement=$(cat "$publish_shape_signal_replacement_path")
+publish_shape_signal_sibling=$(cat "$publish_shape_signal_sibling_path")
+if [[ -d "$publish_shape_signal_replacement" ]]; then
+  _pass "clip publish retains pre-identity nonregular replacement"
+else
+  _fail "clip publish retains pre-identity nonregular replacement"
+fi
+_assert_eq "clip publish preserves unrelated sibling after pre-identity replacement" \
+  "unrelated creation sibling" "$(cat "$publish_shape_signal_sibling")"
+
+printf -v exhausted_publish_base '%240s' ''
+exhausted_publish_base=${exhausted_publish_base// /x}
+exhausted_publish_file="$clip_dir/$exhausted_publish_base"
+exhausted_publish_unrelated="$clip_dir/exhausted-unrelated"
+exhausted_publish_triggered="$clip_dir/exhausted-triggered"
+printf 'known-good-exhausted-payload\n' >"$exhausted_publish_file"
+printf 'unrelated exhausted publish\n' >"$exhausted_publish_unrelated"
+printf 'replacement\n' | BASH_ENV="$creation_signal_debug_env" \
+  TMUX_TOOLS_TEST_CREATION_MODE=exhaust \
+  TMUX_TOOLS_TEST_CREATION_TRIGGERED="$exhausted_publish_triggered" \
+  tmux-clip-paste --file "$exhausted_publish_file" --publish \
+  >/dev/null 2>&1
+exhausted_publish_rc=$?
+_assert_eq "clip publish preserves HUP after exhausting exclusive creation" \
+  "129" "$exhausted_publish_rc"
+_assert_eq "clip publish creation exhaustion hook runs" \
+  "" "$(cat "$exhausted_publish_triggered")"
+_assert_eq "clip publish preserves payload after creation exhaustion" \
+  "known-good-exhausted-payload" "$(cat "$exhausted_publish_file")"
+_assert_eq "clip publish preserves unrelated file after creation exhaustion" \
+  "unrelated exhausted publish" "$(cat "$exhausted_publish_unrelated")"
+
+boundary_publish_file="$clip_dir/boundary-$exhausted_publish_base"
+boundary_publish_unrelated="$clip_dir/boundary-unrelated"
+boundary_publish_triggered="$clip_dir/boundary-triggered"
+printf 'known-good-boundary-payload\n' >"$boundary_publish_file"
+printf 'unrelated boundary publish\n' >"$boundary_publish_unrelated"
+printf 'replacement\n' | BASH_ENV="$creation_signal_debug_env" \
+  TMUX_TOOLS_TEST_CREATION_MODE=error-boundary \
+  TMUX_TOOLS_TEST_CREATION_TRIGGERED="$boundary_publish_triggered" \
+  tmux-clip-paste --file "$boundary_publish_file" --publish \
+  >/dev/null 2>&1
+boundary_publish_rc=$?
+_assert_eq "clip publish preserves HUP at creation-error boundary" \
+  "129" "$boundary_publish_rc"
+_assert_eq "clip publish creation-error boundary hook runs" \
+  "" "$(cat "$boundary_publish_triggered")"
+_assert_eq "clip publish preserves payload at creation-error boundary" \
+  "known-good-boundary-payload" "$(cat "$boundary_publish_file")"
+_assert_eq "clip publish preserves unrelated file at creation-error boundary" \
+  "unrelated boundary publish" "$(cat "$boundary_publish_unrelated")"
+
+publish_identity_signal_file="$clip_dir/identity-signal-selection"
+publish_identity_signal_bin=$(_tmpdir)
+publish_identity_signal_real_stat=$(command -v stat)
+printf 'known-good-identity-signal-payload\n' >"$publish_identity_signal_file"
+_write_initial_identity_signal_stat "$publish_identity_signal_bin/stat"
+_run_publish_identity_signal() {
+  local state="$1" mode="$2" handoff="$3"
+
+  printf 'replacement\n' | PATH="$publish_identity_signal_bin:$PATH" \
+    TMUX_TOOLS_TEST_REAL_STAT="$publish_identity_signal_real_stat" \
+    TMUX_TOOLS_TEST_SIGNAL_STATE="$state" \
+    TMUX_TOOLS_TEST_SIGNAL_MODE="$mode" \
+    tmux-clip-paste --file "$handoff" --publish >/dev/null 2>&1
+  REPLY=$?
+}
+_run_publish_identity_signal "$clip_dir/identity-signal.state" term \
+  "$publish_identity_signal_file"
+publish_identity_signal_rc=$REPLY
+_assert_eq "clip publish preserves TERM status during initial temporary identity lookup" \
+  "143" "$publish_identity_signal_rc"
+_assert_eq "clip publish preserves prior payload after initial identity TERM" \
+  "known-good-identity-signal-payload" \
+  "$(cat "$publish_identity_signal_file")"
+publish_identity_signal_temps=$(printf '%s\n' \
+  "$clip_dir"/.identity-signal-selection.tmp.*)
+_assert_eq "clip publish removes its temporary file after initial identity TERM" \
+  "$clip_dir/.identity-signal-selection.tmp.*" \
+  "$publish_identity_signal_temps"
+
+publish_identity_initial_failure_file="$clip_dir/identity-initial-failure-selection"
+publish_identity_initial_failure_sibling="$clip_dir/.identity-initial-failure-selection.tmp.unrelated"
+printf 'known-good-identity-initial-failure-payload\n' \
+  >"$publish_identity_initial_failure_file"
+printf 'unrelated initial identity sibling\n' \
+  >"$publish_identity_initial_failure_sibling"
+_run_publish_identity_signal "$clip_dir/identity-initial-failure.state" \
+  fail-initial-hup-term "$publish_identity_initial_failure_file"
+publish_identity_initial_failure_rc=$REPLY
+_assert_eq "clip publish preserves HUP when initial identity probes fail" \
+  "129" "$publish_identity_initial_failure_rc"
+_assert_eq "clip publish preserves prior payload after initial identity failure" \
+  "known-good-identity-initial-failure-payload" \
+  "$(cat "$publish_identity_initial_failure_file")"
+_assert_eq "clip publish preserves unrelated sibling after initial identity failure" \
+  "unrelated initial identity sibling" \
+  "$(cat "$publish_identity_initial_failure_sibling")"
+publish_identity_initial_failure_temp=""
+for publish_identity_initial_failure_candidate in \
+  "$clip_dir"/.identity-initial-failure-selection.tmp.*; do
+  [[ "$publish_identity_initial_failure_candidate" != "$publish_identity_initial_failure_sibling" ]] || continue
+  [[ -e "$publish_identity_initial_failure_candidate" ||
+    -L "$publish_identity_initial_failure_candidate" ]] || continue
+  publish_identity_initial_failure_temp="$publish_identity_initial_failure_candidate"
+done
+if [[ -f "$publish_identity_initial_failure_temp" &&
+  ! -L "$publish_identity_initial_failure_temp" ]]; then
+  _pass "clip publish retains unverified temporary after initial identity failure"
+else
+  _fail "clip publish retains unverified temporary after initial identity failure"
+fi
+
+publish_identity_multi_signal_file="$clip_dir/identity-multi-signal-selection"
+printf 'known-good-identity-multi-signal-payload\n' \
+  >"$publish_identity_multi_signal_file"
+_run_publish_identity_signal "$clip_dir/identity-multi-signal.state" hup-term \
+  "$publish_identity_multi_signal_file"
+publish_identity_multi_signal_rc=$REPLY
+_assert_eq "clip publish preserves the first handled signal during initial identity" \
+  "129" "$publish_identity_multi_signal_rc"
+_assert_eq "clip publish preserves prior payload after initial HUP and TERM" \
+  "known-good-identity-multi-signal-payload" \
+  "$(cat "$publish_identity_multi_signal_file")"
+publish_identity_multi_signal_temps=$(printf '%s\n' \
+  "$clip_dir"/.identity-multi-signal-selection.tmp.*)
+_assert_eq "clip publish removes its temporary after initial HUP and TERM" \
+  "$clip_dir/.identity-multi-signal-selection.tmp.*" \
+  "$publish_identity_multi_signal_temps"
+
+publish_identity_stat_failure_file="$clip_dir/identity-stat-failure-selection"
+printf 'known-good-identity-stat-failure-payload\n' \
+  >"$publish_identity_stat_failure_file"
+_run_publish_identity_signal "$clip_dir/identity-stat-failure.state" fail-recheck \
+  "$publish_identity_stat_failure_file"
+publish_identity_stat_failure_rc=$REPLY
+_assert_eq "clip publish preserves TERM when identity recheck probes fail" \
+  "143" "$publish_identity_stat_failure_rc"
+_assert_eq "clip publish preserves prior payload after identity recheck failure" \
+  "known-good-identity-stat-failure-payload" \
+  "$(cat "$publish_identity_stat_failure_file")"
+publish_identity_stat_failure_temps=$(printf '%s\n' \
+  "$clip_dir"/.identity-stat-failure-selection.tmp.*)
+_assert_eq "clip publish cleans its inode after transient identity recheck failure" \
+  "$clip_dir/.identity-stat-failure-selection.tmp.*" \
+  "$publish_identity_stat_failure_temps"
+
+publish_identity_replacement_file="$clip_dir/identity-replacement-selection"
+printf 'known-good-identity-replacement-payload\n' \
+  >"$publish_identity_replacement_file"
+_run_publish_identity_signal "$clip_dir/identity-replacement.state" replace \
+  "$publish_identity_replacement_file"
+publish_identity_replacement_rc=$REPLY
+_assert_eq "clip publish preserves TERM after its identified temporary is replaced" \
+  "143" "$publish_identity_replacement_rc"
+_assert_eq "clip publish preserves prior payload after signaled temporary replacement" \
+  "known-good-identity-replacement-payload" \
+  "$(cat "$publish_identity_replacement_file")"
+publish_identity_replacement_temp=$(printf '%s\n' \
+  "$clip_dir"/.identity-replacement-selection.tmp.*)
+_assert_eq "clip publish retains unrelated replacement after initial identity TERM" \
+  "unrelated identity replacement" \
+  "$(cat "$publish_identity_replacement_temp")"
 
 publish_creation_race_file="$clip_dir/creation-race-selection"
 publish_creation_race_bin=$(_tmpdir)
