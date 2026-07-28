@@ -493,6 +493,25 @@ _assert_not_contains "restore avoids Bash 4 mapfile" "mapfile" "$restore_source"
 save_bin=$(_tmpdir)
 cat >"$save_bin/tmux" <<'MOCK'
 #!/usr/bin/env bash
+_emit_field() {
+  local LC_ALL=C value="$1"
+  printf '%s:%s' "${#value}" "$value"
+}
+
+_emit_record() {
+  local field
+  if [[ "$*" == *'#{n:window_id}'* ]]; then
+    shift
+    for field in "$@"; do
+      _emit_field "$field"
+    done
+    printf '.\n'
+  else
+    shift
+    printf '%s\034%s\034%s\034%s\034%s\034%s\034%s\034%s\n' "$@"
+  fi
+}
+
 case "$1:$*" in
   has-session:*)
     exit 0
@@ -514,10 +533,15 @@ case "$1:$*" in
     printf '0\n'
     ;;
   list-panes:*)
+    if [[ -n "${TMUX_TOOLS_TEST_FAIL_ACTIVE:-}" ]]; then
+      printf 'active window lookup failed\n' >&2
+      exit 42
+    fi
     if [[ -n "${TMUX_TOOLS_TEST_FAIL_PANES:-}" ]]; then
       exit 42
     fi
-    printf '%s\n' "$HOME"
+    _emit_record "$*" @0 0 "${TMUX_TOOLS_TEST_WINDOW_NAME:-main}" \
+      layout-token 1 0 1 "$HOME"
     ;;
   *)
     printf 'unexpected tmux command: %s\n' "$*" >&2
@@ -526,6 +550,171 @@ case "$1:$*" in
 esac
 MOCK
 chmod +x "$save_bin/tmux"
+
+save_scale_bin=$(_tmpdir)
+save_scale_log=$(_tmpdir)/tmux.log
+cat >"$save_scale_bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMUX_TOOLS_TEST_TMUX_LOG"
+length_framed=0
+[[ "$*" != *'#{n:window_id}'* ]] || length_framed=1
+
+_emit_field() {
+  local LC_ALL=C value="$1"
+  printf '%s:%s' "${#value}" "$value"
+}
+
+_emit_record() {
+  local field
+  if ((length_framed)); then
+    for field in "$@"; do
+      _emit_field "$field"
+    done
+    printf '.\n'
+  else
+    printf '%s\034%s\034%s\034%s\034%s\034%s\034%s\034%s\n' "$@"
+  fi
+}
+
+case "$1:$*" in
+  has-session:*)
+    exit 0
+    ;;
+  display-message:*'#{window_index}')
+    printf '0\n'
+    ;;
+  display-message:*'#{window_layout}')
+    target="${*#*-t }"
+    target="${target%% *}"
+    printf 'layout-%s\n' "${target##*:}"
+    ;;
+  display-message:*'#{window_name}')
+    target="${*#*-t }"
+    target="${target%% *}"
+    printf 'window-%s\n' "${target##*:}"
+    ;;
+  list-windows:*)
+    index=0
+    while ((index < TMUX_TOOLS_TEST_WINDOW_COUNT)); do
+      printf '%s\n' "$index"
+      index=$((index + 1))
+    done
+    ;;
+  list-panes:*' -s '* | list-panes:*' -s')
+    if [[ "${TMUX_TOOLS_TEST_LINKED_WINDOW:-0}" == 1 ]]; then
+      _emit_record @0 0 linked layout-linked 0 0 1 "$HOME"
+      _emit_record @0 5 linked layout-linked 1 0 1 "$HOME"
+      exit 0
+    fi
+    index=0
+    while ((index < TMUX_TOOLS_TEST_WINDOW_COUNT)); do
+      active=0
+      ((index != 0)) || active=1
+      window_name="${TMUX_TOOLS_TEST_WINDOW_NAME:-window-$index}"
+      pane_dir="${TMUX_TOOLS_TEST_PANE_DIR:-$HOME}"
+      pane=0
+      while ((pane < ${TMUX_TOOLS_TEST_PANE_COUNT:-1})); do
+        pane_active=0
+        ((pane != 0)) || pane_active=1
+        _emit_record "@$index" "$index" "$window_name" "layout-$index" \
+          "$active" "$pane" "$pane_active" "$pane_dir"
+        pane=$((pane + 1))
+      done
+      index=$((index + 1))
+    done
+    ;;
+  list-panes:*)
+    printf '%s\n' "$HOME"
+    ;;
+  *)
+    printf 'unexpected tmux command: %s\n' "$*" >&2
+    exit 99
+    ;;
+esac
+MOCK
+chmod +x "$save_scale_bin/tmux"
+
+save_scale_one=$(_tmpdir)
+: >"$save_scale_log"
+PATH="$save_scale_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$save_scale_log" \
+  TMUX_TOOLS_TEST_WINDOW_COUNT=1 \
+  tmux-save-session --dir "$save_scale_one" scale-one >/dev/null
+save_scale_one_queries=$(grep -Ec '^(display-message|list-windows|list-panes)' "$save_scale_log")
+
+save_scale_many=$(_tmpdir)
+: >"$save_scale_log"
+PATH="$save_scale_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$save_scale_log" \
+  TMUX_TOOLS_TEST_WINDOW_COUNT=100 \
+  tmux-save-session --dir "$save_scale_many" scale-many >/dev/null
+save_scale_many_queries=$(grep -Ec '^(display-message|list-windows|list-panes)' "$save_scale_log")
+_assert_eq "save uses one tmux data query for one window" \
+  "1" "$save_scale_one_queries"
+_assert_eq "save keeps one tmux data query across 100 windows" \
+  "1" "$save_scale_many_queries"
+
+save_scale_linked=$(_tmpdir)
+: >"$save_scale_log"
+linked_output=$(PATH="$save_scale_bin:$PATH" \
+  TMUX_TOOLS_TEST_TMUX_LOG="$save_scale_log" \
+  TMUX_TOOLS_TEST_WINDOW_COUNT=1 TMUX_TOOLS_TEST_LINKED_WINDOW=1 \
+  tmux-save-session --dir "$save_scale_linked" scale-linked 2>&1)
+linked_rc=$?
+_assert_eq "save accepts two winlinks to the same tmux window" "0" "$linked_rc"
+if ((linked_rc != 0)); then
+  printf '  save output: %s\n' "$linked_output" >&2
+fi
+linked_script=$(cat "$save_scale_linked/scale-linked.sh" 2>/dev/null || true)
+linked_window_count=$(grep -Ec '^window_id=\$\(_new_(session_)?window ' \
+  <<<"$linked_script" || true)
+_assert_eq "save emits both winlinks that share a window ID" \
+  "2" "$linked_window_count"
+_assert_contains "save preserves the active linked window index" \
+  "ACTIVE_WINDOW_INDEX=5" "$linked_script"
+
+save_scale_framing=$(_tmpdir)
+framing_name=$'name\034with\na newline-\303\251'
+framing_dir="$save_scale_framing/pane"$'\034with\na newline-\303\251'
+mkdir "$framing_dir"
+: >"$save_scale_log"
+framing_output=$(PATH="$save_scale_bin:$PATH" \
+  TMUX_TOOLS_TEST_TMUX_LOG="$save_scale_log" \
+  TMUX_TOOLS_TEST_WINDOW_COUNT=1 TMUX_TOOLS_TEST_WINDOW_NAME="$framing_name" \
+  TMUX_TOOLS_TEST_PANE_DIR="$framing_dir" \
+  tmux-save-session --dir "$save_scale_framing" scale-framing 2>&1)
+framing_rc=$?
+_assert_eq "save accepts delimiters and newlines in tmux text fields" \
+  "0" "$framing_rc"
+if ((framing_rc != 0)); then
+  printf '  save output: %s\n' "$framing_output" >&2
+fi
+framing_script=$(cat "$save_scale_framing/scale-framing.sh" 2>/dev/null || true)
+_assert_contains "save preserves a delimiter and newline in the window name" \
+  "$(printf '%q' "$framing_name")" "$framing_script"
+_assert_contains "save preserves a delimiter and newline in the pane directory" \
+  "$(printf '%q' "$framing_dir")" "$framing_script"
+
+save_scale_active=$(_tmpdir)
+save_scale_pane_dir="$save_scale_active/pane dir"
+mkdir "$save_scale_pane_dir"
+: >"$save_scale_log"
+# shellcheck disable=SC2016 # Literal dollar sign exercises generated quoting.
+PATH="$save_scale_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$save_scale_log" \
+  TMUX_TOOLS_TEST_WINDOW_COUNT=1 TMUX_TOOLS_TEST_PANE_COUNT=2 \
+  TMUX_TOOLS_TEST_WINDOW_NAME='name with $value' \
+  TMUX_TOOLS_TEST_PANE_DIR="$save_scale_pane_dir" \
+  tmux-save-session --dir "$save_scale_active" scale-active >/dev/null
+save_scale_active_script=$(cat "$save_scale_active/scale-active.sh")
+# shellcheck disable=SC2016 # Expected literal in the generated restore script.
+_assert_contains "save preserves a non-final active pane" \
+  '_select_pane_position "$window_id" 0' "$save_scale_active_script"
+# shellcheck disable=SC2016 # Expected literals in the generated restore script.
+_assert_contains "save preserves and quotes window names" \
+  '_new_session_window name\ with\ \$value ' "$save_scale_active_script"
+_assert_contains "save preserves and quotes pane directories" \
+  "$(printf '%q' "$save_scale_pane_dir")" "$save_scale_active_script"
+# shellcheck disable=SC2016 # Expected literal in the generated restore script.
+_assert_contains "save preserves window layouts" \
+  'tmux select-layout -t "$window_id" layout-0' "$save_scale_active_script"
 
 private_home=$(_tmpdir)
 (
@@ -2441,6 +2630,11 @@ MOCK
   second_window=$("$real_tmux" -S "$socket" display-message -p -t tmux-tools-test '#{window_index}')
   "$real_tmux" -S "$socket" split-window -t "tmux-tools-test:$second_window" \
     -c "$project_dir" 'sleep 60'
+  saved_active_pane=$(
+    "$real_tmux" -S "$socket" list-panes -t "tmux-tools-test:$second_window" \
+      -F '#{pane_id}' | sed -n '1p'
+  )
+  "$real_tmux" -S "$socket" select-pane -t "$saved_active_pane"
   "$real_tmux" -S "$socket" new-window -t tmux-tools-test -n stale \
     -c "$stale_dir" 'sleep 60'
   "$real_tmux" -S "$socket" select-window -t "tmux-tools-test:$second_window"
@@ -2468,6 +2662,11 @@ MOCK
   second_panes=$("$real_tmux" -S "$socket" list-panes -t "tmux-tools-test:$second_index" | wc -l | tr -d ' ')
   _assert_eq "restore handles duplicate first window name" "1" "$first_panes"
   _assert_eq "restore handles duplicate second window name" "2" "$second_panes"
+  restored_active_dir=$(
+    "$real_tmux" -S "$socket" display-message -p \
+      -t "tmux-tools-test:$second_index" '#{pane_current_path}'
+  )
+  _assert_eq "restore preserves the active pane" "$HOME" "$restored_active_dir"
 
   restored_dir=$("$real_tmux" -S "$socket" display-message -p -t "tmux-tools-test:$third_index.0" '#{pane_current_path}')
   _assert_eq "restore falls back to HOME for missing cwd" "$HOME" "$restored_dir"
