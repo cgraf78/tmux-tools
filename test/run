@@ -4,15 +4,24 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
-if command -v shellcheck >/dev/null 2>&1; then
-  shellcheck -x -P "$ROOT" "$ROOT/bin/tmux-save-session" \
-    "$ROOT/bin/tmux-restore-session" \
-    "$ROOT/bin/tmux-clip-paste" \
-    "$ROOT/lib/tmux-tools/session.sh" \
-    "$ROOT/install.sh" \
-    "$ROOT/test/tmux-tools-harness-test" \
-    "$ROOT/test/tmux-tools-test" \
-    "$ROOT/test/run"
+# Shared CI owns one required inventory lint; local runs still lint by default.
+if [[ "${TMUX_TOOLS_SKIP_SHELLCHECK:-0}" != 1 ]] &&
+  command -v shellcheck >/dev/null 2>&1; then
+  shell_files=()
+  while IFS=$'\t' read -r record_type path ||
+    [[ -n "$record_type$path" ]]; do
+    if [[ "$record_type" == program ]]; then
+      shell_files+=("$ROOT/$path")
+    fi
+  done <"$ROOT/.github/shellcheck-files.txt"
+  ((${#shell_files[@]} > 0)) || {
+    printf 'test/run: ShellCheck inventory has no programs\n' >&2
+    exit 1
+  }
+  (
+    cd "$ROOT"
+    shellcheck -x -P SCRIPTDIR "${shell_files[@]}"
+  )
 fi
 
 "$ROOT/test/tmux-tools-harness-test"
