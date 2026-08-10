@@ -1,10 +1,10 @@
 # type<TAB>repository-relative path
 # `fixture` records are discovered but intentionally excluded from ShellCheck.
 program	bin/tmux-clip-paste
-program	bin/tmux-restore-session
-program	bin/tmux-save-session
+program	bin/tmux-continuum-default-server
+program	bin/tmux-continuum-save-gate
 program	install.sh
-program	lib/tmux-tools/session.sh
 program	test/run
+program	test/tmux-continuum-test
 program	test/tmux-tools-harness-test
 program	test/tmux-tools-test

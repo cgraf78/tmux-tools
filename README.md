@@ -9,66 +9,67 @@ Small reusable tmux workflow tools.
 
 ## Commands
 
-### `tmux-save-session`
+### `tmux-continuum-default-server`
 
-Saves a tmux session layout as an executable restore script. The saved layout
-includes window names, pane layouts, pane working directories, and the active
-window.
+Keeps tmux-continuum and tmux-resurrect ownership on the conventional default
+tmux server when multiple socket-isolated servers are running. The command is
+intended for `run-shell` after tmux plugins and their options have loaded:
 
-```sh
-tmux-save-session
-tmux-save-session work
-tmux-save-session --dir /tmp/tmux-sessions work
+```tmux
+# Disable the plugin's per-server scheduler first. The provider re-enables it
+# only for the conventional default socket.
+set -g @continuum-save-interval 0
+set -g @tmux-tools-continuum-save-interval 5
+run-shell 'tmux-continuum-default-server'
 ```
 
-When no session name is passed, the current tmux session is saved.
+The conventional socket is
+`${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/default`. Both the active socket and the
+expected socket are canonicalized through their parent directories, so a
+symlinked `TMUX_TMPDIR` still identifies the same server. A socket merely named
+`default` elsewhere is not treated as the owner.
 
-### `tmux-restore-session`
+On non-default servers, the command replaces Continuum's native status
+interpolation with a disabled gate. That keeps frequent status refreshes cheap
+without granting those servers save or restore ownership. On the default
+server, it:
 
-Restores a session saved by `tmux-save-session`.
+- restores the configured Continuum interval;
+- publishes `@tmux-tools-resurrect-auto-restore=on` for consumers that need to
+  coordinate with automatic restore;
+- injects a gated save interpolation if Continuum did not install one; and
+- starts tmux-resurrect once for a newly created server, after plugin loading
+  has settled.
 
-```sh
-tmux-restore-session
-tmux-restore-session work
-tmux-restore-session --list
-tmux-restore-session --no-attach work
-```
+`@tmux-tools-resurrect-restore-started-at` records the server start time that
+has already launched restore. This makes repeated config reloads idempotent
+without keeping a process or lock alive. The marker belongs to this provider;
+downstream tools should observe `@tmux-tools-resurrect-auto-restore` instead.
 
-When no session name is passed, restore behaves as follows:
+The default interval is five minutes when
+`@tmux-tools-continuum-save-interval` is absent or malformed. A
+`$HOME/tmux_no_auto_restore` file suppresses the fallback restore while leaving
+automatic saving repaired. Restore also stays suppressed once the server is
+older than Continuum's `@continuum-restore-max-delay` window.
 
-- no saved sessions: print an error
-- one saved session: restore it directly
-- multiple saved sessions: open an `fzf` picker
+The command deliberately fails quietly when the plugins, tmux state, or socket
+identity are unavailable. It is an activation helper: a partial tmux config
+must remain usable even when optional persistence plugins are missing.
 
-After restoring, the command attaches when run outside tmux and switches the
-current client when run inside tmux. Use `--no-attach` for scripts and tests.
+### `tmux-continuum-save-gate`
 
-## Session Directory
+Avoids running Continuum's save script on every `status-right` refresh. It is a
+companion implementation detail of `tmux-continuum-default-server`, installed
+as a separate command because tmux executes status interpolations independently.
 
-Saved restore scripts use the first available path in this order:
-
-```text
-$TMUX_TOOLS_SESSION_DIR
-$XDG_DATA_HOME/tmux/sessions
-$HOME/.local/share/tmux/sessions
-```
-
-An explicitly set, non-empty `TMUX_TOOLS_SESSION_DIR` is used unchanged.
-Otherwise, the tools use `XDG_DATA_HOME` only when it is absolute and fall back to
-`$HOME/.local/share`; they report an error instead of inventing a root when
-neither is available. Empty and relative `XDG_DATA_HOME` values are ignored as
-required by the XDG base-directory specification.
-
-Use `--dir DIR` on either command to read or write a different directory.
-New session directories are created with mode `0700`, and restore scripts are
-published with mode `0700` only after the complete script passes a syntax
-check. Saving replaces an earlier script atomically, so a failed save leaves
-the previous version intact. The permissions of an existing directory passed
-with `--dir` are preserved; use a private directory when session contents must
-not be shared with other users who can access that directory. Same-directory
-atomic replacement assumes other users cannot rename or replace entries in the
-save directory; an intentionally shared `--dir` does not provide that trust
-boundary.
+The gate receives tmux's escaped last-save timestamp, the effective save
+interval, and Continuum's native save script. It exits immediately when the
+interval is zero or the next save is not due. When a save is due it `exec`s the
+native script, preserving Continuum as the authority for the actual save.
+Missing or malformed state fails open to that script rather than silently
+disabling backups. Callers should use the exact interpolation emitted by the
+default-server command; the leading `x` arguments preserve empty tmux options
+as distinct shell arguments.
 
 ### `tmux-clip-paste`
 
@@ -119,9 +120,9 @@ helpers.
 
 ## Requirements
 
-- Bash
+- Bash 3.2 or newer
 - tmux
-- `fzf` for interactive restore when multiple saved sessions exist
+- tmux-continuum and tmux-resurrect for the Continuum provider commands
 
 ## Install
 
@@ -135,6 +136,9 @@ For a simple local install:
 ```
 
 Set `PREFIX`, `BIN_DIR`, or `MAN_DIR` to choose another destination.
+On upgrade, the installer removes retired session-command links only when they
+still point into the same tmux-tools checkout. User-managed files and links to
+other providers are left untouched.
 
 ## Test
 
@@ -148,6 +152,7 @@ Or run the focused command test directly:
 
 ```sh
 test/tmux-tools-test
+test/tmux-continuum-test
 ```
 
 If `tmux` is not installed, the test suite skips tmux server integration cases.

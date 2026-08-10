@@ -25,4 +25,5 @@ if [[ "${TMUX_TOOLS_SKIP_SHELLCHECK:-0}" != 1 ]] &&
 fi
 
 "$ROOT/test/tmux-tools-harness-test"
+"$ROOT/test/tmux-continuum-test"
 "$ROOT/test/tmux-tools-test"
