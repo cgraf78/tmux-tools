@@ -1,0 +1,89 @@
+.TH TMUX-CONTINUUM-DEFAULT-SERVER 1 "2026-08-10" "tmux-tools" "User Commands"
+.SH NAME
+tmux-continuum-default-server \- keep persistence ownership on tmux's default server
+.SH SYNOPSIS
+.B tmux-continuum-default-server
+.SH DESCRIPTION
+.B tmux-continuum-default-server
+coordinates tmux-continuum and tmux-resurrect when multiple tmux servers use
+different sockets. It is intended to run from
+.B run-shell
+after plugins and their options have loaded.
+.PP
+The command compares the active server socket with
+.IR ${TMUX_TMPDIR:-/tmp}/tmux-UID/default .
+It canonicalizes both parent directories before comparison, so a symlinked
+.B TMUX_TMPDIR
+does not prevent the actual default server from being recognized. A socket
+with the basename
+.I default
+in another directory remains isolated.
+.PP
+For a non-default server, the command replaces tmux-continuum's native
+.B status-right
+save interpolation with
+.BR tmux-continuum-save-gate (1)
+using an interval of zero. Status refreshes therefore avoid unnecessary save
+work, and that server receives no save or restore ownership.
+.PP
+For the default server, the command restores Continuum's configured save
+interval, publishes a generic automatic-restore signal, repairs the gated save
+interpolation, and launches tmux-resurrect once when the server is still new.
+The last-save timestamp is initialized before the save interpolation becomes
+active, preventing the first status render from racing the restore.
+.PP
+Missing plugins and unavailable tmux state are treated as advisory activation
+failures. The command exits quietly so optional persistence support cannot make
+the rest of a tmux configuration unusable.
+.SH TMUX OPTIONS
+.TP
+.B @tmux-tools-continuum-save-interval
+Positive save interval, in minutes, to apply on the default server. Missing or
+invalid values use 5.
+.TP
+.B @tmux-tools-resurrect-auto-restore
+Published as
+.B on
+when the default server owns automatic restore. This is the stable signal for
+downstream consumers that must coordinate with tmux-resurrect.
+.TP
+.B @tmux-tools-resurrect-restore-started-at
+Internal deduplication marker containing the server start time whose restore
+has already been launched. Consumers should not use this option as policy.
+.TP
+.B @continuum-restore-max-delay
+Maximum server age, in seconds, during which fallback restore may start.
+Malformed values use 10.
+.SH ENVIRONMENT
+.TP
+.B TMUX
+Provides the active socket path when present. If absent, the command asks tmux
+for
+.BR #{socket_path} .
+.TP
+.B TMUX_TMPDIR
+Overrides the parent of tmux's conventional per-user socket directory.
+.TP
+.B TMUX_PLUGIN_MANAGER_PATH
+Root containing the tmux-continuum and tmux-resurrect checkouts. The default is
+.IR $HOME/.local/share/tmux-plugins .
+.TP
+.B HOME
+Used for the default plugin root and the restore halt file.
+.SH FILES
+.TP
+.I $HOME/tmux_no_auto_restore
+When present, suppresses fallback restore without disabling automatic saving.
+.SH EXIT STATUS
+.TP
+.B 0
+Activation completed, was unnecessary, or could not safely proceed.
+.SH EXAMPLE
+.nf
+set -g @continuum-save-interval 0
+set -g @tmux-tools-continuum-save-interval 5
+run-shell 'tmux-continuum-default-server'
+.fi
+.SH SEE ALSO
+.BR tmux (1),
+.BR tmux-continuum-save-gate (1)
