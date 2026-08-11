@@ -4,6 +4,8 @@ program	bin/tmux-clip-paste
 program	bin/tmux-continuum-default-server
 program	bin/tmux-continuum-save-gate
 program	install.sh
+program	scripts/checkout-installer.conf
+program	support/install-checkout.sh
 program	test/run
 program	test/tmux-continuum-test
 program	test/tmux-tools-harness-test

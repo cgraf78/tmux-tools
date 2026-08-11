@@ -129,7 +129,15 @@ helpers.
 Put `bin/` on `PATH`, or link the command files into a directory on `PATH`.
 Manual pages live in `man/man1/`.
 
-For a simple local install:
+For the simplest checkout-backed install:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cgraf78/tmux-tools/main/install.sh | bash
+```
+
+This keeps a durable managed checkout under `$XDG_DATA_HOME` when that path is
+absolute, or under `$HOME/.local/share` otherwise. To manage the checkout path
+yourself, run the installer from a stable checkout:
 
 ```sh
 ./install.sh
