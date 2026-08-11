@@ -112,6 +112,19 @@ _assert_missing() {
   fi
 }
 
+_assert_regular_file_content() {
+  local name="$1"
+  local expected="$2"
+  local path="$3"
+
+  if [[ -f "$path" && ! -L "$path" && "$(cat "$path")" == "$expected" ]]; then
+    _pass "$name"
+  else
+    _fail "$name"
+    printf '  expected preserved regular file: %s\n' "$path" >&2
+  fi
+}
+
 _files_equal() {
   [[ "$(od -An -tx1 -v <"$1")" == "$(od -An -tx1 -v <"$2")" ]]
 }
@@ -290,11 +303,26 @@ _assert_symlink "install links default-server command" \
   "$install_prefix/bin/tmux-continuum-default-server"
 _assert_symlink "install links save-gate command" \
   "$install_prefix/bin/tmux-continuum-save-gate"
+_assert_symlink "install links clip command" \
+  "$install_prefix/bin/tmux-clip-paste"
 _assert_symlink "install links default-server manpage" \
   "$install_prefix/share/man/man1/tmux-continuum-default-server.1"
 _assert_symlink "install links save-gate manpage" \
   "$install_prefix/share/man/man1/tmux-continuum-save-gate.1"
 _assert_symlink "install links clip manpage" "$install_prefix/share/man/man1/tmux-clip-paste.1"
+for command in tmux-continuum-default-server tmux-continuum-save-gate \
+  tmux-clip-paste; do
+  _assert_eq "install links $command command from this checkout" \
+    "$ROOT/bin/$command" "$(readlink "$install_prefix/bin/$command")"
+  _assert_eq "install links $command manpage from this checkout" \
+    "$ROOT/man/man1/$command.1" \
+    "$(readlink "$install_prefix/share/man/man1/$command.1")"
+done
+
+PREFIX="$install_prefix" "$ROOT/install.sh" >/dev/null
+_assert_eq "install is idempotent" \
+  "$ROOT/bin/tmux-clip-paste" \
+  "$(readlink "$install_prefix/bin/tmux-clip-paste")"
 
 upgrade_prefix=$(_tmpdir)
 mkdir -p "$upgrade_prefix/bin" "$upgrade_prefix/share/man/man1"
@@ -332,10 +360,98 @@ _assert_symlink "custom BIN_DIR receives default-server command" \
   "$custom_install_bin/tmux-continuum-default-server"
 _assert_symlink "custom BIN_DIR receives save-gate command" \
   "$custom_install_bin/tmux-continuum-save-gate"
+_assert_symlink "custom BIN_DIR receives clip command" \
+  "$custom_install_bin/tmux-clip-paste"
 _assert_symlink "custom MAN_DIR receives default-server manpage" \
   "$custom_install_man/tmux-continuum-default-server.1"
 _assert_symlink "custom MAN_DIR receives save-gate manpage" \
   "$custom_install_man/tmux-continuum-save-gate.1"
+_assert_symlink "custom MAN_DIR receives clip manpage" \
+  "$custom_install_man/tmux-clip-paste.1"
+for command in tmux-continuum-default-server tmux-continuum-save-gate \
+  tmux-clip-paste; do
+  _assert_eq "custom install links $command command from this checkout" \
+    "$ROOT/bin/$command" "$(readlink "$custom_install_bin/$command")"
+  _assert_eq "custom install links $command manpage from this checkout" \
+    "$ROOT/man/man1/$command.1" \
+    "$(readlink "$custom_install_man/$command.1")"
+done
+
+blocked_prefix=$(_tmpdir)
+blocked_man="$blocked_prefix/share/man/man1/tmux-clip-paste.1"
+mkdir -p "$(dirname "$blocked_man")"
+printf 'owned elsewhere\n' >"$blocked_man"
+blocked_status=0
+blocked_output=$(PREFIX="$blocked_prefix" "$ROOT/install.sh" 2>&1) ||
+  blocked_status=$?
+_assert_eq "install refuses a non-symlink destination" "1" "$blocked_status"
+_assert_regular_file_content "install preserves a non-symlink destination" \
+  "owned elsewhere" "$blocked_man"
+_assert_missing "destination preflight prevents a partial install" \
+  "$blocked_prefix/bin/tmux-continuum-default-server"
+_assert_contains "destination refusal is actionable" \
+  "refusing to replace non-symlink" "$blocked_output"
+
+missing_root=$(_tmpdir)
+missing_prefix=$(_tmpdir)
+cp "$ROOT/install.sh" "$missing_root/install.sh"
+missing_status=0
+missing_output=$(PREFIX="$missing_prefix" "$missing_root/install.sh" 2>&1) ||
+  missing_status=$?
+_assert_eq "install rejects an incomplete source tree" "1" "$missing_status"
+_assert_missing "source preflight publishes no command" \
+  "$missing_prefix/bin/tmux-continuum-default-server"
+_assert_contains "missing source is actionable" \
+  "source is not executable" "$missing_output"
+
+rollback_prefix=$(_tmpdir)
+rollback_bin=$(_tmpdir)
+rollback_prior_target=--help
+mkdir -p "$rollback_prefix/bin" "$rollback_prefix/share/man/man1"
+ln -s -- "$rollback_prior_target" \
+  "$rollback_prefix/bin/tmux-continuum-default-server"
+ln -s "$ROOT/bin/tmux-save-session" \
+  "$rollback_prefix/bin/tmux-save-session"
+cat >"$rollback_bin/ln" <<'SH'
+#!/usr/bin/env bash
+ln_args=("$@")
+ln_operand_count=${#ln_args[@]}
+ln_source_operand=${ln_args[$((ln_operand_count - 2))]}
+ln_target_operand=${ln_args[$((ln_operand_count - 1))]}
+"$TMUX_TOOLS_TEST_REAL_LN" "$@" || exit $?
+if [[ $ln_source_operand == "$TMUX_TOOLS_TEST_LN_FAIL_SOURCE" &&
+  $ln_target_operand == "$TMUX_TOOLS_TEST_LN_FAIL_TARGET" ]]; then
+  printf 'injected late ln failure\n' >&2
+  exit 73
+fi
+SH
+chmod +x "$rollback_bin/ln"
+rollback_status=0
+rollback_output=$(
+  PATH="$rollback_bin:$PATH" \
+    TMUX_TOOLS_TEST_REAL_LN="$(command -v ln)" \
+    TMUX_TOOLS_TEST_LN_FAIL_SOURCE="$ROOT/man/man1/tmux-clip-paste.1" \
+    TMUX_TOOLS_TEST_LN_FAIL_TARGET="$rollback_prefix/share/man/man1/tmux-clip-paste.1" \
+    PREFIX="$rollback_prefix" "$ROOT/install.sh" 2>&1
+) || rollback_status=$?
+_assert_eq "late link failure preserves its status" "73" "$rollback_status"
+_assert_contains "late link failure preserves its diagnostic" \
+  "injected late ln failure" "$rollback_output"
+_assert_eq "rollback restores an option-like command target" \
+  "$rollback_prior_target" \
+  "$(readlink "$rollback_prefix/bin/tmux-continuum-default-server")"
+for command in tmux-continuum-save-gate tmux-clip-paste; do
+  _assert_missing "rollback removes new $command command link" \
+    "$rollback_prefix/bin/$command"
+done
+for command in tmux-continuum-default-server tmux-continuum-save-gate \
+  tmux-clip-paste; do
+  _assert_missing "rollback removes new $command manpage link" \
+    "$rollback_prefix/share/man/man1/$command.1"
+done
+_assert_eq "failed publication does not retire an owned legacy link" \
+  "$ROOT/bin/tmux-save-session" \
+  "$(readlink "$rollback_prefix/bin/tmux-save-session")"
 
 creation_signal_debug_dir=$(_tmpdir)
 creation_signal_debug_env="$creation_signal_debug_dir/debug-env"
