@@ -275,6 +275,10 @@ _retain_claim() {
 
   ((claim_active)) || return 0
 
+  # An uncommitted paste must not silently discard picker output. Restore the
+  # public handoff name only when it is free and the private claim still has the
+  # inode originally claimed. Whether or not that link succeeds, retain the
+  # private claim as the recovery copy.
   if [[ ! -e "$claim_file" && ! -L "$claim_file" ]]; then
     rmdir "$claim_dir" 2>/dev/null || :
     claim_active=0
@@ -293,6 +297,9 @@ _retain_claim() {
 _claim_payload() {
   local dir base prefix attempt old_umask
 
+  # Moving the handoff into a unique private directory is the single-consumer
+  # ownership claim. The public name disappears before tmux reads the payload,
+  # so concurrent invocations cannot paste the same selection twice.
   [[ -e "$file" || -L "$file" ]] || return 1
   [[ -f "$file" && ! -L "$file" ]] ||
     _fail "handoff payload is not a non-symlink regular file: $file"
@@ -453,6 +460,13 @@ tmux load-buffer -b "$buffer_name" "$claim_file" ||
 trap '_record_paste_signal 129' HUP
 trap '_record_paste_signal 130' INT
 trap '_record_paste_signal 143' TERM
+# `paste-buffer -d` removes this invocation's unique buffer after tmux sends it.
+# A signal or transport error can make the command return nonzero after that
+# side effect, so a successful query finding the buffer absent proves tmux
+# committed the paste. If the buffer remains or its state cannot be queried, the
+# EXIT path retains the recovery copy. That preserves the payload, but a caller
+# may need to resolve whether an unobservable paste reached the pane before a
+# retry.
 paste_status=0
 tmux paste-buffer -b "$buffer_name" -p -t "$target_pane" -d || paste_status=$?
 paste_committed=0
