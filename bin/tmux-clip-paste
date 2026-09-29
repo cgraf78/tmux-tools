@@ -20,7 +20,7 @@ Options:
                     then a private server-and-pane-specific runtime path.
   -t, --pane PANE    Target tmux pane ID, such as %3. Defaults to $TMUX_PANE,
                     then tmux's current pane when $TMUX_PANE is unset.
-  --path             Print the default file path and exit.
+  --path             Print the resolved file path and exit.
   --publish          Atomically replace the handoff file with standard input.
   -h, --help         Show this help.
 EOF

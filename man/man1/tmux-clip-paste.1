@@ -53,7 +53,11 @@ for path isolation and pasting. If omitted,
 is used when set; otherwise tmux's current pane is resolved once and retained.
 .TP
 .B --path
-Print the default handoff file path and exit.
+Print the resolved handoff file path and exit: the
+.B --file
+argument when given, otherwise
+.BR TMUX_TOOLS_CLIP_PASTE_FILE ,
+otherwise the default runtime path.
 .TP
 .B --publish
 Read standard input and atomically publish it as the next handoff payload.
