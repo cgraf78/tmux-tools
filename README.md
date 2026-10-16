@@ -7,11 +7,12 @@
 
 Two small fixes for tmux setups that outgrow the defaults:
 
-- **`tmux-continuum-default-server`**: if you run more than one tmux server
-  (`tmux -L work`, test sockets, nested tmux), tmux-continuum saves and
-  auto-restores from every one of them, and their snapshots clobber each
-  other. This keeps save and restore on the default server only and turns the
-  others into cheap no-ops.
+- **`tmux-continuum-default-server`**: tmux-continuum saves and restores
+  only on a server that is the only tmux server running when it loads. If a
+  scratch server (`tmux -L scratch`, a test socket, nested tmux) happened to
+  start first, it owns persistence and your default server is never saved or
+  restored. This pins save and restore to the default server, whatever order
+  the servers start in, and makes the other servers cheap no-ops.
 - **`tmux-clip-paste`**: a `display-popup` picker cannot paste into the pane
   behind it. This hands the selection off and pastes it once the popup closes.
 
@@ -37,9 +38,9 @@ Set `PREFIX`, `BIN_DIR`, or `MAN_DIR` to choose another destination.
 To manage the checkout path yourself, run `./install.sh` from a stable
 checkout, or put `bin/` on `PATH` and `man/` on `MANPATH`.
 
-On upgrade, the installer removes retired session-command links only when they
-still point into the same tmux-tools checkout. User-managed files and links to
-other providers are left untouched.
+On upgrade, the installer removes links to retired commands only when they
+still point into the same tmux-tools checkout. Your own files and links that
+point elsewhere are left untouched.
 
 ## Commands
 
@@ -50,6 +51,9 @@ other providers are left untouched.
 # only on the default socket.
 set -g @continuum-save-interval 0
 set -g @tmux-tools-continuum-save-interval 5
+# The command starts tmux-resurrect's restore itself; turn off Continuum's own
+# so a new server is not restored twice.
+set -g @continuum-restore 'off'
 run-shell 'tmux-continuum-default-server'
 ```
 
