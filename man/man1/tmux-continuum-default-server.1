@@ -79,10 +79,19 @@ When present, suppresses fallback restore without disabling automatic saving.
 .B 0
 Activation completed, was unnecessary, or could not safely proceed.
 .SH EXAMPLE
+Set the options before the plugin manager loads tmux-continuum, and run the
+command after it.
+Continuum reads
+.B @continuum-restore
+when it loads; leave it at its default of
+.B off
+so a new server is not restored twice.
+.PP
 .nf
 set -g @continuum-save-interval 0
 set -g @tmux-tools-continuum-save-interval 5
 set -g @continuum-restore 'off'
+run '~/.tmux/plugins/tpm/tpm'
 run-shell 'tmux-continuum-default-server'
 .fi
 .SH SEE ALSO

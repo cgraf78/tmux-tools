@@ -8,11 +8,12 @@
 Two small fixes for tmux setups that outgrow the defaults:
 
 - **`tmux-continuum-default-server`**: tmux-continuum saves and restores
-  only on a server that is the only tmux server running when it loads. If a
-  scratch server (`tmux -L scratch`, a test socket, nested tmux) happened to
-  start first, it owns persistence and your default server is never saved or
-  restored. This pins save and restore to the default server, whatever order
-  the servers start in, and makes the other servers cheap no-ops.
+  only on a server that is the only tmux server running when it loads. If any
+  other server is already up when your default server starts
+  (`tmux -L scratch`, a test socket, nested tmux), your default server is not
+  saved or restored. This pins save and restore to the default server,
+  whatever order the servers start in, and makes the other servers cheap
+  no-ops.
 - **`tmux-clip-paste`**: a `display-popup` picker cannot paste into the pane
   behind it. This hands the selection off and pastes it once the popup closes.
 
@@ -47,17 +48,24 @@ point elsewhere are left untouched.
 ### `tmux-continuum-default-server`
 
 ```tmux
-# Disable the plugin's per-server scheduler first. The command re-enables it
-# only on the default socket.
+# Before your plugin manager loads the plugins:
+# Turn off Continuum's per-server scheduler; the command re-enables it only on
+# the default socket.
 set -g @continuum-save-interval 0
 set -g @tmux-tools-continuum-save-interval 5
-# The command starts tmux-resurrect's restore itself; turn off Continuum's own
-# so a new server is not restored twice.
+# The command starts tmux-resurrect's restore itself. Continuum reads this
+# when it loads, so leave it at its default of 'off' (or set it here) to
+# avoid restoring a new server twice.
 set -g @continuum-restore 'off'
+
+run '~/.tmux/plugins/tpm/tpm'   # or your plugin manager's load line
+
+# After the plugins have loaded:
 run-shell 'tmux-continuum-default-server'
 ```
 
-Run it from `run-shell` after your tmux plugins and their options have loaded.
+The order matters: the options go before the plugins load, and the command
+runs after.
 
 How it works:
 
