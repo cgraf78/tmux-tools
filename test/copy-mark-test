@@ -1,0 +1,685 @@
+#!/usr/bin/env bash
+# Behavioral tests for terminal command-block helpers.
+
+set -o pipefail
+export NO_COLOR=1
+
+TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+ROOT="$(cd -- "$TEST_DIR/.." && pwd -P)"
+
+# shellcheck source=copy-mark-helpers.sh
+. "$TEST_DIR/copy-mark-helpers.sh"
+
+echo "=== tmux-copy-last-output ==="
+
+tmp=$(_tmpdir)
+mock_bin="$tmp/bin"
+mkdir -p "$mock_bin"
+# Pane lookups read the controlling terminal from /proc on Linux. Point that at
+# a missing root so the ps mock below decides, except where a test supplies
+# its own stat file.
+export TERM_PANE_MARK_PROC_ROOT="$tmp/no-proc"
+
+cat >"$mock_bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${TMUX_CALL_LOG:-}" ]]; then
+  printf '%s\n' "$*" >>"$TMUX_CALL_LOG"
+fi
+case "$1" in
+  capture-pane)
+    cat "$TMUX_CAPTURE_FILE"
+    ;;
+  display-message)
+    if [[ "${2:-}" == "-p" && "${3:-}" == "#{client_tty}" ]]; then
+      printf '%s\n' "${TMUX_CLIENT_TTY:-}"
+    else
+      printf '%s\n' "$*" >>"$TMUX_MESSAGE_LOG"
+    fi
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+cat >"$mock_bin/pbcopy" <<'EOF'
+#!/usr/bin/env bash
+if [[ -n "${PBCOPY_CALL_LOG:-}" ]]; then
+  printf 'pbcopy\n' >>"$PBCOPY_CALL_LOG"
+fi
+cat >"$PBCOPY_OUT"
+EOF
+chmod +x "$mock_bin/tmux" "$mock_bin/pbcopy"
+
+cat >"$tmp/pane.txt" <<'EOF'
+user@test:/repo (main)
+$ echo one
+one output
+user@test:/repo (main)
+$ echo two
+two output
+user@test:/repo (main)
+$
+EOF
+
+TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+  TMUX_MESSAGE_LOG="$tmp/messages.log" \
+  PBCOPY_OUT="$tmp/copied-one.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output"
+_assert_file_content "copy last output: copies command and output" \
+  '$ echo two
+two output' "$tmp/copied-one.txt"
+_assert_contains "copy last output: reports single block" \
+  "Copied last command + output to clipboard" "$(cat "$tmp/messages.log")"
+
+# A 10,000-line window: long output keeps its own prompt in range, while the
+# payload stays bounded.
+TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+  TMUX_MESSAGE_LOG="$tmp/messages-history.log" \
+  TMUX_CALL_LOG="$tmp/history-calls.log" \
+  PBCOPY_OUT="$tmp/copied-history.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output"
+_assert_eq "copy last output: captures the last 10,000 lines" \
+  "capture-pane -p -S -10000" "$(grep '^capture-pane' "$tmp/history-calls.log")"
+
+TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+  TMUX_MESSAGE_LOG="$tmp/messages-one.log" \
+  PBCOPY_OUT="$tmp/copied-explicit-one.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" 1
+_assert_file_content "copy explicit one: copies one command and output" \
+  '$ echo two
+two output' "$tmp/copied-explicit-one.txt"
+_assert_contains "copy explicit one: reports single block" \
+  "Copied last command + output to clipboard" "$(cat "$tmp/messages-one.log")"
+
+TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+  TMUX_MESSAGE_LOG="$tmp/messages-two.log" \
+  PBCOPY_OUT="$tmp/copied-two.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" 2
+_assert_file_content "copy two outputs: preserves block separator" \
+  '$ echo one
+one output
+
+$ echo two
+two output' "$tmp/copied-two.txt"
+_assert_contains "copy two outputs: reports requested count" \
+  "Copied last 2 commands + output to clipboard" "$(cat "$tmp/messages-two.log")"
+
+TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+  TMUX_MESSAGE_LOG="$tmp/messages-leading-zero.log" \
+  PBCOPY_OUT="$tmp/copied-leading-zero.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" 0002
+_assert_file_content "copy leading-zero count: preserves selected blocks" \
+  '$ echo one
+one output
+
+$ echo two
+two output' "$tmp/copied-leading-zero.txt"
+_assert_contains "copy leading-zero count: reports normalized count" \
+  "Copied last 2 commands + output to clipboard" \
+  "$(cat "$tmp/messages-leading-zero.log")"
+
+huge_count=999999999999999999999999999999999999999999999999999999999999
+TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+  TMUX_MESSAGE_LOG="$tmp/messages-huge.log" \
+  PBCOPY_OUT="$tmp/copied-huge.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" "$huge_count"
+_assert_file_content "copy huge count: clamps to available blocks" \
+  '$ echo one
+one output
+
+$ echo two
+two output' "$tmp/copied-huge.txt"
+_assert_contains "copy huge count: avoids arithmetic overflow" \
+  "Copied last $huge_count commands + output to clipboard" \
+  "$(cat "$tmp/messages-huge.log")"
+
+invalid_index=0
+assert_invalid_count() {
+  local description="$1"
+  shift
+  invalid_index=$((invalid_index + 1))
+
+  local tmux_log="$tmp/invalid-$invalid_index-tmux.log"
+  local pbcopy_log="$tmp/invalid-$invalid_index-pbcopy.log"
+  local output rc
+  output=$(TMUX_CALL_LOG="$tmux_log" \
+    PBCOPY_CALL_LOG="$pbcopy_log" \
+    TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+    TMUX_MESSAGE_LOG="$tmp/invalid-$invalid_index-message.log" \
+    PBCOPY_OUT="$tmp/invalid-$invalid_index-copy.txt" \
+    PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/tmux-copy-last-output" "$@" 2>&1)
+  rc=$?
+
+  _assert_exit "$description: exits with usage status" 64 "$rc"
+  _assert_eq "$description: prints concise usage" \
+    "usage: tmux-copy-last-output [--print] [positive-count]" "$output"
+  _assert_file_missing "$description: does not invoke tmux" "$tmux_log"
+  _assert_file_missing "$description: does not invoke clipboard" "$pbcopy_log"
+}
+
+assert_invalid_count "copy zero count" 0
+assert_invalid_count "copy negative count" -1
+assert_invalid_count "copy nonnumeric count" two
+assert_invalid_count "copy empty count" ""
+assert_invalid_count "copy extra arguments" 1 2
+assert_invalid_count "print zero count" --print 0
+assert_invalid_count "print extra arguments" --print 1 2
+assert_invalid_count "print flag after count" 1 --print
+assert_invalid_count "print flag repeated" --print --print
+
+cat >"$tmp/no-command.txt" <<'EOF'
+plain output only
+EOF
+TMUX_CAPTURE_FILE="$tmp/no-command.txt" \
+  TMUX_MESSAGE_LOG="$tmp/no-command-message.log" \
+  PBCOPY_OUT="$tmp/no-command-copy.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output"
+_assert_file_missing "copy no output: does not write clipboard" "$tmp/no-command-copy.txt"
+_assert_contains "copy no output: reports missing block" \
+  "No command output found" "$(cat "$tmp/no-command-message.log")"
+
+# --print hands the blocks to the caller instead of the clipboard.
+printed=$(TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+  TMUX_MESSAGE_LOG="$tmp/print-message.log" \
+  PBCOPY_CALL_LOG="$tmp/print-pbcopy.log" \
+  PBCOPY_OUT="$tmp/print-copy.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" --print)
+_assert_exit "print: succeeds" 0 "$?"
+_assert_eq "print: writes the last block to stdout" \
+  '$ echo two
+two output' "$printed"
+_assert_file_missing "print: does not invoke the clipboard" "$tmp/print-pbcopy.log"
+_assert_file_missing "print: reports nothing through tmux" "$tmp/print-message.log"
+
+printed=$(TMUX_CAPTURE_FILE="$tmp/pane.txt" \
+  TMUX_MESSAGE_LOG="$tmp/print-two-message.log" \
+  PBCOPY_OUT="$tmp/print-two-copy.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" --print 2)
+_assert_eq "print count: writes the requested blocks" \
+  '$ echo one
+one output
+
+$ echo two
+two output' "$printed"
+
+# An empty result fails so a pipeline routes nothing, and is still reported.
+printed=$(TMUX_CAPTURE_FILE="$tmp/no-command.txt" \
+  TMUX_MESSAGE_LOG="$tmp/print-empty-message.log" \
+  PBCOPY_OUT="$tmp/print-empty-copy.txt" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" --print)
+_assert_exit "print no output: exits with its own status" 3 "$?"
+_assert_eq "print no output: writes nothing" "" "$printed"
+_assert_contains "print no output: reports missing block" \
+  "No command output found" "$(cat "$tmp/print-empty-message.log")"
+
+echo
+echo "=== term-notify-sound ==="
+
+notify_home="$tmp/notify-home"
+direct_vscode_tty="$tmp/direct-vscode.tty"
+env -u TMUX -u XDG_STATE_HOME HOME="$notify_home" TERM_PROGRAM=xterm.js \
+  TERM_NOTIFY_TTY="$direct_vscode_tty" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/term-notify-sound" >/dev/null
+_assert_file_content "notify: direct VS Code emits one BEL" \
+  $'\a' "$direct_vscode_tty"
+_assert_file_missing "notify: direct VS Code uses no state-file transport" \
+  "$notify_home/.local/state/term-notify/signal"
+
+vscode_no_home_err="$tmp/vscode-no-home.err"
+vscode_no_home_tty="$tmp/vscode-no-home.tty"
+env -u HOME -u TMUX -u XDG_STATE_HOME TERM_PROGRAM=xterm.js \
+  TERM_NOTIFY_TTY="$vscode_no_home_tty" \
+  PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/term-notify-sound" >/dev/null 2>"$vscode_no_home_err"
+_assert_exit "notify: direct VS Code needs no filesystem state root" "0" "$?"
+_assert_eq "notify: direct VS Code reports no state-path error" \
+  "" "$(cat "$vscode_no_home_err")"
+_assert_file_content "notify: HOME-less VS Code still emits one BEL" \
+  $'\a' "$vscode_no_home_tty"
+
+for terminal in WezTerm unknown-terminal; do
+  terminal_tty="$tmp/direct-$terminal.tty"
+  env -u HOME -u TMUX -u XDG_STATE_HOME TERM_PROGRAM="$terminal" \
+    TERM_NOTIFY_TTY="$terminal_tty" \
+    PATH="$mock_bin:$PATH" "$ROOT/bin/term-notify-sound" \
+    >/dev/null 2>"$tmp/notify-$terminal.err"
+  _assert_exit "notify: $terminal transport does not require a state root" "0" "$?"
+  _assert_eq "notify: $terminal transport does not report a state-path error" \
+    "" "$(cat "$tmp/notify-$terminal.err")"
+  _assert_file_content "notify: direct $terminal emits one BEL" \
+    $'\a' "$terminal_tty"
+done
+
+cat >"$mock_bin/tmux" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  display-message)
+    if [[ "${2:-}" == "-p" && "${3:-}" == "#{client_termtype}" ]]; then
+      printf '%s\n' "$TMUX_CLIENT_TERMTYPE"
+    elif [[ "${2:-}" == "-t" && "${4:-}" == "-p" && "${5:-}" == "#{pane_tty}" ]]; then
+      printf '%s\n' "$TMUX_PANE_TTY"
+    fi
+    ;;
+  set-option)
+    [[ -z ${TMUX_SET_LOG:-} ]] || printf '%s\n' "$*" >>"$TMUX_SET_LOG"
+    [[ ${TMUX_SET_FAIL:-0} != 1 ]] || exit 1
+    ;;
+  list-panes)
+    [[ -z ${TMUX_LIST_LOG:-} ]] || printf '%s\n' "$*" >>"$TMUX_LIST_LOG"
+    [[ -n ${TMUX_PANES:-} ]] || exit 1
+    printf '%s\n' "$TMUX_PANES"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+# Reports the controlling terminal the notifier asks for, as ps -o tty= does
+# (with its column padding), or fails when the test gives it none.
+cat >"$mock_bin/ps" <<'EOF'
+#!/usr/bin/env bash
+# A foreground query (pgid, tpgid, tty) answers from PS_STATE.
+if [[ "$*" == *pgid=* ]]; then
+  [[ -n ${PS_STATE+x} ]] || exit 1
+  printf '%s\n' "$PS_STATE"
+  exit 0
+fi
+[[ -n ${PS_TTY+x} ]] || exit 1
+printf '%s\n' "$PS_TTY"
+EOF
+chmod +x "$mock_bin/tmux" "$mock_bin/ps"
+for terminal in WezTerm xterm.js unknown-terminal; do
+  tmux_notify_tty="$tmp/tmux-$terminal.tty"
+  HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%1 \
+    TMUX_CLIENT_TERMTYPE="$terminal" TMUX_PANE_TTY="$tmux_notify_tty" \
+    TERM_NOTIFY_TTY="$tmp/missing/tty" \
+    PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-notify-sound"
+  _assert_file_content "notify: tmux $terminal emits one BEL" \
+    $'\a' "$tmux_notify_tty"
+done
+_assert_file_missing "notify: tmux VS Code uses no state-file transport" \
+  "$tmp/tmux-notify-home/.local/state/term-notify/signal"
+
+# tmux only knows which window rang, so the notifier marks its own pane for
+# the tmux config to render. The mark accompanies both delivery routes.
+direct_set_log="$tmp/tmux-direct-set.log"
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%7 TERM_PROGRAM=tmux \
+  TERM_NOTIFY_TTY="$tmp/tmux-direct.tty" TMUX_SET_LOG="$direct_set_log" \
+  PATH="$mock_bin:$PATH" "$ROOT/bin/term-notify-sound"
+_assert_file_content "notify: tmux direct delivery still emits one BEL" \
+  $'\a' "$tmp/tmux-direct.tty"
+_assert_file_content "notify: tmux direct delivery marks the notifying pane" \
+  'set-option -p -t %7 @term_notify_pending 1' "$direct_set_log"
+
+# The pane-tty fallback delivers to the pane itself, so it marks the pane
+# whatever terminal program the caller reports.
+fallback_set_log="$tmp/tmux-fallback-set.log"
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%8 TERM_PROGRAM=vscode \
+  TMUX_PANE_TTY="$tmp/tmux-fallback.tty" TERM_NOTIFY_TTY="$tmp/missing/tty" \
+  TMUX_SET_LOG="$fallback_set_log" \
+  PATH="$mock_bin:$PATH" "$ROOT/bin/term-notify-sound"
+_assert_file_content "notify: tmux pane fallback marks the notifying pane" \
+  'set-option -p -t %8 @term_notify_pending 1' "$fallback_set_log"
+
+# An editor launched from a tmux shell inherits TMUX and TMUX_PANE, but its
+# own terminal replaces TERM_PROGRAM; ringing that terminal must not mark the
+# tmux pane that launched the editor.
+for leaked_program in vscode WezTerm ''; do
+  leaked_log="$tmp/tmux-leaked-${leaked_program:-unset}.log"
+  HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%11 \
+    TERM_PROGRAM="$leaked_program" \
+    TERM_NOTIFY_TTY="$tmp/tmux-leaked-${leaked_program:-unset}.tty" \
+    TMUX_SET_LOG="$leaked_log" \
+    PATH="$mock_bin:$PATH" "$ROOT/bin/term-notify-sound"
+  _assert_file_content "notify: leaked tmux env in ${leaked_program:-an unnamed terminal} still rings" \
+    $'\a' "$tmp/tmux-leaked-${leaked_program:-unset}.tty"
+  _assert_file_missing "notify: leaked tmux env in ${leaked_program:-an unnamed terminal} marks no pane" \
+    "$leaked_log"
+done
+
+failed_mark_err="$tmp/tmux-mark-fail.err"
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%9 TERM_PROGRAM=tmux \
+  TERM_NOTIFY_TTY="$tmp/tmux-mark-fail.tty" TMUX_SET_FAIL=1 \
+  PATH="$mock_bin:$PATH" "$ROOT/bin/term-notify-sound" \
+  2>"$failed_mark_err"
+_assert_exit "notify: a failed pane mark does not fail the notification" "0" "$?"
+_assert_eq "notify: a failed pane mark stays silent" "" "$(cat "$failed_mark_err")"
+_assert_file_content "notify: a failed pane mark still emits one BEL" \
+  $'\a' "$tmp/tmux-mark-fail.tty"
+
+for missing in TMUX TMUX_PANE; do
+  unmarked_log="$tmp/tmux-no-$missing.log"
+  env HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%10 TERM_PROGRAM=tmux \
+    TERM_NOTIFY_TTY="$tmp/tmux-no-$missing.tty" TMUX_SET_LOG="$unmarked_log" \
+    PATH="$mock_bin:$PATH" \
+    env -u "$missing" "$ROOT/bin/term-notify-sound"
+  _assert_file_missing "notify: without $missing no pane is marked" "$unmarked_log"
+done
+
+# Hooks that run with the tmux variables stripped (muse) still share the
+# pane's terminal: the pane whose pty is the controlling terminal is marked.
+panes=$'/dev/pts/50 %50\n/dev/pts/5 %5\n/dev/pts/7 %7'
+stripped_log="$tmp/tmux-stripped.log"
+env -u TMUX -u TMUX_PANE -u TERM_PROGRAM HOME="$tmp/tmux-notify-home" \
+  TERM_NOTIFY_TTY="$tmp/tmux-stripped.tty" TMUX_SET_LOG="$stripped_log" \
+  PS_TTY='pts/5   ' TMUX_PANES="$panes" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/term-notify-sound"
+_assert_file_content "notify: stripped tmux env still emits one BEL" \
+  $'\a' "$tmp/tmux-stripped.tty"
+_assert_file_content "notify: stripped tmux env marks the pane owning its terminal" \
+  'set-option -p -t %5 @term_notify_pending 1' "$stripped_log"
+
+# Outside every pane (a terminal that is not tmux), or with no controlling
+# terminal at all, nothing is marked; the bell still rings.
+unmatched_index=0
+for case in 'pts/9:a terminal no pane owns' '?:no controlling terminal' \
+  ':an empty ps answer'; do
+  unmatched_index=$((unmatched_index + 1))
+  case_log="$tmp/tmux-unmatched-$unmatched_index.log"
+  env -u TMUX -u TMUX_PANE -u TERM_PROGRAM HOME="$tmp/tmux-notify-home" \
+    TERM_NOTIFY_TTY="$tmp/tmux-unmatched.tty" TMUX_SET_LOG="$case_log" \
+    PS_TTY="${case%%:*}" TMUX_PANES="$panes" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-notify-sound"
+  _assert_file_missing "notify: ${case#*:} marks no pane" "$case_log"
+done
+
+# A failing ps (busybox without -o tty, a sandbox) or no tmux server keeps
+# the old behavior: ring, mark nothing, report nothing.
+for missing in PS_TTY TMUX_PANES; do
+  case_log="$tmp/tmux-unavailable-$missing.log"
+  case_err="$tmp/tmux-unavailable-$missing.err"
+  env HOME="$tmp/tmux-notify-home" TERM_NOTIFY_TTY="$tmp/tmux-unavailable.tty" \
+    TMUX_SET_LOG="$case_log" PS_TTY=pts/5 TMUX_PANES="$panes" \
+    PATH="$mock_bin:$PATH" \
+    env -u TMUX -u TMUX_PANE -u TERM_PROGRAM -u "$missing" \
+    "$ROOT/bin/term-notify-sound" 2>"$case_err"
+  _assert_exit "notify: without $missing the notification still succeeds" "0" "$?"
+  _assert_file_missing "notify: without $missing no pane is marked" "$case_log"
+  _assert_eq "notify: without $missing nothing is reported" "" "$(cat "$case_err")"
+done
+
+# With TMUX_PANE present the variables decide, as before: a leaked pane is
+# never second-guessed by a terminal lookup.
+list_log="$tmp/tmux-env-list.log"
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%11 TERM_PROGRAM=vscode \
+  TERM_NOTIFY_TTY="$tmp/tmux-env-list.tty" TMUX_LIST_LOG="$list_log" \
+  PS_TTY=pts/5 TMUX_PANES="$panes" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/term-notify-sound"
+_assert_file_missing "notify: tmux variables skip the terminal lookup" "$list_log"
+
+# The notifier prefers the term-pane-mark beside it, so a checkout or link set
+# stays on one revision, falls back to the one on PATH, and with neither still
+# rings and succeeds, marking nothing.
+marker_dir="$tmp/notifier-pair"
+path_marker_dir="$tmp/path-marker"
+mkdir -p "$marker_dir" "$path_marker_dir"
+cp "$ROOT/bin/term-notify-sound" "$marker_dir/"
+# Each fake marker logs the name of the directory it was found in.
+for dir in "$marker_dir" "$path_marker_dir"; do
+  cat >"$dir/term-pane-mark" <<'EOF'
+#!/usr/bin/env bash
+dir=${BASH_SOURCE[0]%/*}
+printf '%s %s\n' "${dir##*/}" "$*" >>"$MARKER_LOG"
+EOF
+  chmod +x "$dir/term-pane-mark"
+done
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%13 TERM_PROGRAM=tmux \
+  TERM_NOTIFY_TTY="$tmp/notifier-pair.tty" MARKER_LOG="$tmp/notifier-pair.log" \
+  PATH="$path_marker_dir:$mock_bin:$PATH" "$marker_dir/term-notify-sound"
+_assert_file_content "notify: the term-pane-mark beside it wins over PATH" \
+  'notifier-pair set pending' "$tmp/notifier-pair.log"
+cp "$ROOT/bin/term-notify-sound" "$tmp/"
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%13 TERM_PROGRAM=tmux \
+  TERM_NOTIFY_TTY="$tmp/notifier-path.tty" MARKER_LOG="$tmp/notifier-path.log" \
+  PATH="$path_marker_dir:$mock_bin:/usr/bin:/bin" "$tmp/term-notify-sound"
+_assert_file_content "notify: without one beside it, PATH's term-pane-mark marks" \
+  'path-marker set pending' "$tmp/notifier-path.log"
+
+# --owner reaches the pending mark on both delivery routes, so a program an
+# agent launched (no terminal, inherited pane) cannot mark the agent's pane.
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%13 TERM_PROGRAM=tmux \
+  TERM_NOTIFY_TTY="$tmp/notifier-owner.tty" MARKER_LOG="$tmp/notifier-owner.log" \
+  PATH="$mock_bin:$PATH" "$marker_dir/term-notify-sound" --owner 4242
+_assert_file_content "notify: --owner reaches a direct-delivery mark" \
+  'notifier-pair set pending --owner 4242' "$tmp/notifier-owner.log"
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%14 TERM_PROGRAM=vscode \
+  TMUX_PANE_TTY="$tmp/notifier-owner-fallback.tty" TERM_NOTIFY_TTY="$tmp/missing/tty" \
+  MARKER_LOG="$tmp/notifier-owner-fallback.log" \
+  PATH="$mock_bin:$PATH" "$marker_dir/term-notify-sound" --owner 4242
+_assert_file_content "notify: --owner reaches a pane-fallback mark" \
+  'notifier-pair set pending --pane %14 --owner 4242' "$tmp/notifier-owner-fallback.log"
+_assert_file_content "notify: --owner still rings through the pane fallback" \
+  $'\a' "$tmp/notifier-owner-fallback.tty"
+for bad_args in '--owner' '--owner ""' '--pane %1' '--owner 1 extra'; do
+  eval "set -- $bad_args"
+  output=$(TERM_NOTIFY_TTY="$tmp/notifier-bad.tty" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-notify-sound" "$@" 2>&1)
+  _assert_exit "notify: arguments $bad_args are a usage error" 64 "$?"
+  _assert_eq "notify: arguments $bad_args print usage" \
+    'usage: term-notify-sound [--owner PID]' "$output"
+done
+_assert_file_missing "notify: a usage error rings nothing" "$tmp/notifier-bad.tty"
+
+lone_dir="$tmp/lone-notifier"
+mkdir -p "$lone_dir"
+cp "$ROOT/bin/term-notify-sound" "$lone_dir/"
+lone_err="$tmp/lone-notifier.err"
+HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%12 TERM_PROGRAM=tmux \
+  TERM_NOTIFY_TTY="$tmp/lone-notifier.tty" TMUX_SET_LOG="$tmp/lone-notifier.log" \
+  PATH="$mock_bin:/usr/bin:/bin" "$lone_dir/term-notify-sound" 2>"$lone_err"
+_assert_exit "notify: without term-pane-mark the notification succeeds" "0" "$?"
+_assert_eq "notify: without term-pane-mark nothing is reported" "" "$(cat "$lone_err")"
+_assert_file_content "notify: without term-pane-mark it still emits one BEL" \
+  $'\a' "$tmp/lone-notifier.tty"
+_assert_file_missing "notify: without term-pane-mark no pane is marked" \
+  "$tmp/lone-notifier.log"
+
+echo
+echo "=== term-pane-mark ==="
+
+# A pane that owns its tmux variables is marked and cleared directly.
+for mark in pending:@term_notify_pending busy:@term_busy; do
+  name=${mark%%:*}
+  option=${mark#*:}
+  mark_log="$tmp/mark-$name.log"
+  TMUX=/tmp/tmux-test TMUX_PANE=%20 TERM_PROGRAM=tmux TMUX_SET_LOG="$mark_log" \
+    PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" set "$name"
+  _assert_exit "mark $name: set succeeds" 0 "$?"
+  TMUX=/tmp/tmux-test TMUX_PANE=%20 TERM_PROGRAM=tmux TMUX_SET_LOG="$mark_log" \
+    PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" clear "$name"
+  _assert_exit "mark $name: clear succeeds" 0 "$?"
+  _assert_file_content "mark $name: sets then unsets its pane option" \
+    "set-option -p -t %20 $option 1
+set-option -pu -t %20 $option" "$mark_log"
+done
+
+# Leaked tmux variables (an editor launched from a tmux shell) own no pane.
+for leaked_program in vscode ''; do
+  leaked_log="$tmp/mark-leaked-${leaked_program:-unset}.log"
+  TMUX=/tmp/tmux-test TMUX_PANE=%21 TERM_PROGRAM="$leaked_program" \
+    TMUX_SET_LOG="$leaked_log" TMUX_LIST_LOG="$leaked_log" \
+    PS_TTY=pts/5 TMUX_PANES="$panes" \
+    PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" set busy
+  _assert_exit "mark: leaked env in ${leaked_program:-an unnamed terminal} succeeds" 0 "$?"
+  _assert_file_missing "mark: leaked env in ${leaked_program:-an unnamed terminal} marks nothing" \
+    "$leaked_log"
+done
+
+no_tmux_log="$tmp/mark-no-tmux.log"
+env TMUX_PANE=%22 TERM_PROGRAM=tmux TMUX_SET_LOG="$no_tmux_log" \
+  PATH="$mock_bin:$PATH" env -u TMUX "$ROOT/bin/term-pane-mark" set busy
+_assert_file_missing "mark: a pane id without TMUX marks nothing" "$no_tmux_log"
+
+# Stripped tmux variables (muse hooks) resolve the pane by terminal.
+stripped_mark_log="$tmp/mark-stripped.log"
+env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TMUX_SET_LOG="$stripped_mark_log" \
+  PS_TTY='pts/7 ' TMUX_PANES="$panes" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/term-pane-mark" clear busy
+_assert_file_content "mark: stripped env clears the pane owning its terminal" \
+  'set-option -pu -t %7 @term_busy' "$stripped_mark_log"
+
+# An explicit pane needs no ownership lookup.
+explicit_log="$tmp/mark-explicit.log"
+env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TMUX_SET_LOG="$explicit_log" \
+  TMUX_LIST_LOG="$tmp/mark-explicit-list.log" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/term-pane-mark" set pending --pane %30
+_assert_file_content "mark: an explicit pane is marked" \
+  'set-option -p -t %30 @term_notify_pending 1' "$explicit_log"
+_assert_file_missing "mark: an explicit pane skips the terminal lookup" \
+  "$tmp/mark-explicit-list.log"
+
+failed_set_err="$tmp/mark-set-fail.err"
+TMUX=/tmp/tmux-test TMUX_PANE=%23 TERM_PROGRAM=tmux TMUX_SET_FAIL=1 \
+  PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" set busy \
+  2>"$failed_set_err"
+_assert_exit "mark: a failed tmux update still succeeds" 0 "$?"
+_assert_eq "mark: a failed tmux update stays silent" "" "$(cat "$failed_set_err")"
+
+invalid_mark_index=0
+assert_invalid_mark() {
+  local description="$1" output rc log
+  shift
+  invalid_mark_index=$((invalid_mark_index + 1))
+  log="$tmp/mark-invalid-$invalid_mark_index.log"
+  output=$(TMUX=/tmp/tmux-test TMUX_PANE=%24 TERM_PROGRAM=tmux \
+    TMUX_SET_LOG="$log" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-pane-mark" "$@" 2>&1)
+  rc=$?
+  _assert_exit "$description: exits with usage status" 64 "$rc"
+  _assert_eq "$description: prints concise usage" \
+    "usage: term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID]" "$output"
+  _assert_file_missing "$description: does not invoke tmux" "$log"
+}
+
+assert_invalid_mark "mark no arguments"
+assert_invalid_mark "mark missing mark" set
+assert_invalid_mark "mark unknown action" toggle busy
+assert_invalid_mark "mark unknown mark" set idle
+assert_invalid_mark "mark raw option name" set @term_busy
+assert_invalid_mark "mark pane without value" set busy --pane
+assert_invalid_mark "mark empty pane" set busy --pane ''
+assert_invalid_mark "mark unknown flag" set busy --tty /dev/pts/1
+assert_invalid_mark "mark extra arguments" set busy --pane %1 extra
+assert_invalid_mark "mark repeated pane" set busy --pane %1 --pane %2
+assert_invalid_mark "mark owner without value" set busy --owner
+assert_invalid_mark "mark nonnumeric owner" set busy --owner abc
+assert_invalid_mark "mark zero owner" set busy --owner 0
+assert_invalid_mark "mark repeated owner" set busy --owner 1 --owner 2
+
+# With --owner, only the pane terminal's foreground program may change the
+# mark: an agent the pane's agent launches inherits the pane but runs without
+# its terminal. /proc supplies pgrp, tty_nr, and tpgid; pts/9 is 34825.
+owner_root="$tmp/owner-proc"
+mkdir -p "$owner_root/self"
+printf '1 (test) S 1 1 1 0 -1 0\n' >"$owner_root/self/stat"
+write_owner() { # write_owner PID PGRP TTY_NR TPGID
+  mkdir -p "$owner_root/$1"
+  printf '%s (agent (x)) S 1 %s %s %s %s 0\n' "$1" "$2" "$2" "$3" "$4" \
+    >"$owner_root/$1/stat"
+}
+write_owner 4242 4242 34825 4242 # foreground of pts/9
+write_owner 4243 4243 34825 4300 # background group on pts/9
+write_owner 4244 4244 0 -1       # no terminal: a nested agent
+write_owner 4245 4245 34826 4245 # foreground of another pty, pts/10
+owner_index=0
+# assert_owned DESCRIPTION EXPECTED-LOG ARGS... runs with PS_STATE set, so a
+# result that ignored /proc would show.
+assert_owned() {
+  local description=$1 expected=$2 log
+  shift 2
+  owner_index=$((owner_index + 1))
+  log="$tmp/mark-owner-$owner_index.log"
+  TMUX=/tmp/tmux-test TMUX_PANE=%40 TERM_PROGRAM=tmux TMUX_SET_LOG="$log" \
+    TMUX_PANE_TTY=/dev/pts/9 TERM_PANE_MARK_PROC_ROOT="$owner_root" \
+    PS_STATE='4246 4246 pts/9' PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-pane-mark" "$@"
+  _assert_exit "mark owner: $description succeeds" 0 "$?"
+  if [[ -n $expected ]]; then
+    _assert_file_content "mark owner: $description" "$expected" "$log"
+  else
+    _assert_file_missing "mark owner: $description" "$log"
+  fi
+}
+assert_owned "the foreground program sets the mark" \
+  'set-option -p -t %40 @term_busy 1' set busy --owner 4242
+assert_owned "the foreground program clears the mark" \
+  'set-option -pu -t %40 @term_busy' clear busy --owner 4242
+assert_owned "a background process group cannot set it" '' set busy --owner 4243
+assert_owned "a process without a terminal cannot set it" '' set busy --owner 4244
+assert_owned "a process without a terminal cannot clear it" '' clear busy --owner 4244
+assert_owned "another terminal's foreground cannot set it" '' set busy --owner 4245
+assert_owned "an exited process is not asked about through ps" '' \
+  set busy --owner 4246
+assert_owned "options combine with an explicit pane" \
+  'set-option -p -t %41 @term_busy 1' set busy --owner 4242 --pane %41
+
+# Without /proc, ps reports the process group, foreground group, and terminal.
+for case in '4242 4242 pts/9:set-option -p -t %40 @term_busy 1:foreground' \
+  '4242 4300 pts/9::background' '4242 4242 pts/10::another terminal' \
+  '4242 4242 ?::no terminal'; do
+  state=${case%%:*}
+  rest=${case#*:}
+  expected=${rest%%:*}
+  log="$tmp/mark-owner-ps-${case##*:}.log"
+  TMUX=/tmp/tmux-test TMUX_PANE=%40 TERM_PROGRAM=tmux TMUX_SET_LOG="$log" \
+    TMUX_PANE_TTY=/dev/pts/9 PS_STATE="$state" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-pane-mark" set busy --owner 4242
+  if [[ -n $expected ]]; then
+    _assert_file_content "mark owner via ps: ${case##*:} sets the mark" "$expected" "$log"
+  else
+    _assert_file_missing "mark owner via ps: ${case##*:} cannot set it" "$log"
+  fi
+done
+
+# Linux reports the controlling terminal in /proc as a device number, so the
+# lookup needs no ps. Unix98 ptys use majors 136-143 and extended minor bits.
+proc_root="$tmp/proc"
+mkdir -p "$proc_root/self"
+proc_panes=$'/dev/pts/5 %5\n/dev/pts/257 %257\n/dev/pts/300 %300\n/dev/pts/7 %7'
+for case in '34821:%5:pts/5' '35073:%257:pts/257 (major 137)' \
+  '1083436:%300:pts/300 (extended minor)'; do
+  tty_nr=${case%%:*}
+  expected=${case#*:}
+  expected=${expected%%:*}
+  printf '123 (agent (x) y) S 1 123 123 %s 123 0\n' "$tty_nr" >"$proc_root/self/stat"
+  proc_log="$tmp/mark-proc-$tty_nr.log"
+  env -u TMUX -u TMUX_PANE -u TERM_PROGRAM -u PS_TTY \
+    TERM_PANE_MARK_PROC_ROOT="$proc_root" TMUX_SET_LOG="$proc_log" \
+    TMUX_PANES="$proc_panes" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-pane-mark" set busy
+  _assert_file_content "mark: /proc resolves ${case##*:} without ps" \
+    "set-option -p -t $expected @term_busy 1" "$proc_log"
+done
+
+# No controlling terminal in /proc is final: ps is not asked.
+printf '123 (agent) S 1 123 123 0 -1 0\n' >"$proc_root/self/stat"
+env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TERM_PANE_MARK_PROC_ROOT="$proc_root" \
+  TMUX_SET_LOG="$tmp/mark-proc-none.log" PS_TTY=pts/5 \
+  TMUX_PANES="$proc_panes" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/term-pane-mark" set busy
+_assert_file_missing "mark: /proc without a terminal marks nothing" \
+  "$tmp/mark-proc-none.log"
+
+# A terminal that is not a pty (a virtual console) falls back to ps.
+printf '123 (agent) S 1 123 123 1025 123 0\n' >"$proc_root/self/stat"
+env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TERM_PANE_MARK_PROC_ROOT="$proc_root" \
+  TMUX_SET_LOG="$tmp/mark-proc-console.log" PS_TTY=pts/7 \
+  TMUX_PANES="$proc_panes" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/term-pane-mark" set busy
+_assert_file_content "mark: a non-pty /proc terminal falls back to ps" \
+  'set-option -p -t %7 @term_busy 1' "$tmp/mark-proc-console.log"
+
+_test_summary

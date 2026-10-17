@@ -1,0 +1,84 @@
+.TH TMUX-COPY-LAST-OUTPUT 1 "2026-10-12" "tmux-tools" "User Commands"
+.SH NAME
+tmux-copy-last-output \- copy recent tmux command blocks to the clipboard
+.SH SYNOPSIS
+.B tmux-copy-last-output
+.RB [ \-\-print ]
+.RI [ count ]
+.SH DESCRIPTION
+.B tmux-copy-last-output
+captures the last 10,000 lines of the current tmux pane, detects shell
+prompt boundaries, and copies the most recent command plus its output to the
+clipboard. A command whose output is longer than that has scrolled its own
+prompt out of range and is reported as not found. When
+.I count
+is supplied, it must be a positive base-10 integer and the command copies that
+many recent command blocks. The default is one.
+.PP
+With
+.BR \-\-print ,
+the command writes the blocks to standard output instead of the clipboard, so
+a caller can route them elsewhere, such as pasting them into another pane.
+.PP
+The parser recognizes only a two-line prompt. The first line starts with
+.BR user@host: ,
+optionally preceded by an exit code such as
+.BR "[0] " ;
+the user name may contain only letters, digits, and underscores. The line
+directly below it is
+.B $
+or
+.BR % ,
+optionally followed by a space and the command, for example:
+.PP
+.RS
+.nf
+[0] user@host:~/src/project (main)
+$ make test
+.fi
+.RE
+.PP
+These bash and zsh prompt settings produce that shape:
+.PP
+.RS
+.nf
+PS1='[$?] \eu@\eh:\ew\en$ '
+PROMPT=$'[%?] %n@%m:%~\en%% '
+.fi
+.RE
+.PP
+If no complete command block is found, the command displays a
+tmux message and exits successfully so keybindings do not fail noisily. With
+.BR \-\-print
+it exits with status 3 instead, so a pipeline routes nothing.
+.SH CLIPBOARD BACKENDS
+The command tries
+.BR pbcopy (1)
+on macOS,
+.BR xclip (1)
+when
+.B DISPLAY
+is set, and finally OSC 52 through the attached tmux client TTY.
+.SH EXIT STATUS
+.TP
+.B 0
+The command copied or printed output, reported that no block was found without
+.BR \-\-print ,
+or displayed a clipboard failure message through tmux.
+.TP
+.B 1
+An unexpected shell, tmux, or parsing failure occurred before tmux messaging
+could report the result.
+.TP
+.B 3
+With
+.BR \-\-print ,
+no command block was found; the command reports that through tmux and prints
+nothing.
+.TP
+.B 64
+The arguments were invalid. The command writes a usage diagnostic before any
+tmux or clipboard command is invoked.
+.SH SEE ALSO
+.BR tmux (1),
+.BR term-notify-sound (1)

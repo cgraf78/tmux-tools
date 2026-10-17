@@ -27,3 +27,4 @@ fi
 "$ROOT/test/tmux-tools-harness-test"
 "$ROOT/test/tmux-continuum-test"
 "$ROOT/test/tmux-tools-test"
+"$ROOT/test/copy-mark-test"

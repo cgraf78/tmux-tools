@@ -5,7 +5,7 @@
 [![Bash Version](https://img.shields.io/badge/bash-%3E%3D3.2-blue.svg)](https://www.gnu.org/software/bash/)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20WSL-lightgrey.svg)](#)
 
-Two small fixes for tmux setups that outgrow the defaults:
+Small helpers for tmux setups that outgrow the defaults:
 
 - **`tmux-continuum-default-server`**: tmux-continuum saves and restores
   only on a server that is the only tmux server running when it loads. If any
@@ -16,6 +16,17 @@ Two small fixes for tmux setups that outgrow the defaults:
   no-ops.
 - **`tmux-clip-paste`**: a `display-popup` picker cannot paste into the pane
   behind it. This hands the selection off and pastes it once the popup closes.
+- **`tmux-copy-last-output [N]`**: copy the last N commands and their output
+  from the current pane to your clipboard, through `pbcopy`, `xclip`, or
+  OSC 52 (which can reach your local clipboard over SSH). It is like "copy last
+  output" in Warp or iTerm2, but inside tmux. **It needs a specific two-line
+  prompt; see [Prompt format](#prompt-format).**
+- **`term-notify-sound`**: ring the terminal bell. Call it when a job or agent
+  finishes. Inside tmux it also marks which pane rang, which plain tmux does
+  not track (tmux records a bell against the window).
+- **`term-pane-mark`**: set or clear a `busy` or `pending` mark on your tmux
+  pane, for example while a coding agent works on a prompt, so your tmux
+  config can show it.
 
 ## Requirements
 
@@ -24,6 +35,9 @@ Two small fixes for tmux setups that outgrow the defaults:
 - tmux-continuum and tmux-resurrect for `tmux-continuum-default-server`
   (found under `$TMUX_PLUGIN_MANAGER_PATH`, which TPM sets, else
   `$HOME/.local/share/tmux-plugins`)
+- For `tmux-copy-last-output`'s clipboard copy: `pbcopy` when it is on
+  `PATH`, else `xclip` when `DISPLAY` is set, else a terminal that supports
+  OSC 52 attached to the tmux client
 
 ## Install
 
@@ -42,6 +56,12 @@ checkout, or put `bin/` on `PATH` and `man/` on `MANPATH`.
 On upgrade, the installer removes links to retired commands only when they
 still point into the same tmux-tools checkout. Your own files and links that
 point elsewhere are left untouched.
+
+`tmux-copy-last-output`, `term-notify-sound`, and `term-pane-mark` moved here
+from [cmdblocks](https://github.com/cgraf78/cmdblocks) with the same names,
+options, and exit statuses. The tmux-tools installer retargets existing
+cmdblocks links, since it replaces any symlink at a command or man page path;
+it still refuses a regular file.
 
 ## Commands
 
@@ -119,6 +139,79 @@ How it works:
 
 `man tmux-clip-paste` covers the claim, recovery, and exit-status details.
 
+### `tmux-copy-last-output`
+
+Copy the last command and its output with `prefix y`, or the last N with
+`prefix Y`:
+
+```tmux
+bind y run-shell 'TMUX_PANE=#{pane_id} tmux-copy-last-output'
+bind Y command-prompt -p 'Copy last N commands:' 'run-shell "TMUX_PANE=#{pane_id} tmux-copy-last-output %1"'
+```
+
+`tmux-copy-last-output [--print] [N]` copies the last N command blocks (the
+default is 1) from the last 10,000 lines of the pane. `--print` writes them to
+standard output instead, so a binding can route them elsewhere.
+
+#### Prompt format
+
+`tmux-copy-last-output` finds command boundaries by reading the pane text for
+a two-line prompt. It recognizes exactly this shape:
+
+```text
+[0] user@host:~/src/project (main)
+$ make test
+```
+
+- **Line 1** starts with `user@host:`, optionally preceded by an exit code
+  such as `[0] `. The user name may contain only letters, digits, and `_`;
+  the host may also contain `.` and `-`. Anything after the colon is ignored.
+- **Line 2**, immediately below, is `$` (bash) or `%` (zsh), optionally
+  followed by a space and the command.
+
+These prompts match:
+
+```bash
+# bash (~/.bashrc). Use a literal `$`: `\$` turns into `#` for root.
+PS1='[$?] \u@\h:\w\n$ '
+```
+
+```zsh
+# zsh (~/.zshrc)
+PROMPT=$'[%?] %n@%m:%~\n%% '
+```
+
+With any other prompt, the command finds no blocks: it shows a tmux message,
+"No command output found", and copies nothing. With `--print` it also exits
+with status 3. Prompt colors are fine, because tmux captures the text without
+them.
+
+### `term-notify-sound` and `term-pane-mark`
+
+- `term-notify-sound [--owner PID]`: write one BEL to `/dev/tty`
+  (`TERM_NOTIFY_TTY` overrides it), falling back to the tmux pane's tty. Inside
+  tmux it then runs `term-pane-mark set pending`. Typical use is
+  `make; term-notify-sound`, or an agent's "finished" hook.
+- `term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID]`: set or
+  clear `@term_notify_pending` or `@term_busy` on the caller's own pane.
+  `--owner PID` limits changes to that process while it runs in the pane's
+  foreground, so programs an agent launches cannot clear the agent's mark.
+
+Both set the pane options `@term_notify_pending` and `@term_busy` to `1`.
+Rendering and clearing the pending mark is up to your tmux config. For
+example, show both in pane borders and clear the pending mark when you visit
+the pane. The explicit hook index keeps any hooks you already have on those
+events:
+
+```tmux
+set -g pane-border-status top
+set -g pane-border-format '#{?@term_notify_pending,[!] ,}#{?@term_busy,[busy] ,}#{pane_current_command}'
+set-hook -g after-select-pane[100] 'set-option -pu @term_notify_pending'
+set-hook -g after-select-window[100] 'set-option -pu @term_notify_pending'
+```
+
+`man term-pane-mark` explains how it decides which pane is the caller's.
+
 The WezTerm tab helpers `wezterm-switch-tab` and `wezterm-move-tab` moved to
 [termnav](https://github.com/cgraf78/termnav).
 
@@ -135,6 +228,7 @@ Or run the focused command test directly:
 ```sh
 test/tmux-tools-test
 test/tmux-continuum-test
+test/copy-mark-test
 ```
 
 If `tmux` is not installed, the test suite skips tmux server integration cases.

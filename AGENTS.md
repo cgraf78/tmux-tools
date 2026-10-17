@@ -2,25 +2,44 @@
 
 ## About
 
-Three Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
+Six Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
 `/bin/bash` 3.2 is a hard contract with its own CI job.
+`tmux-copy-last-output`, `term-pane-mark`, and `term-notify-sound` were
+imported from cgraf78/cmdblocks@52aae58; that archived repo holds their
+earlier history.
 
 ## Layout
 
 - `bin/tmux-continuum-default-server`, `bin/tmux-continuum-save-gate`,
-  `bin/tmux-clip-paste`: the commands.
+  `bin/tmux-clip-paste`, `bin/tmux-copy-last-output`, `bin/term-pane-mark`,
+  `bin/term-notify-sound`: the commands. Each must stay self-contained.
 - `man/man1/`: one page per command. Detailed behavior lives here, not in
   the README.
 - `install.sh`: generated checkout installer (see below).
   `support/install-checkout.sh` is the repo-owned delegate it runs.
 - `test/run`: entry point for `test/tmux-tools-harness-test`,
-  `test/tmux-continuum-test`, and `test/tmux-tools-test`.
+  `test/tmux-continuum-test`, `test/tmux-tools-test`, and
+  `test/copy-mark-test` (which sources `test/copy-mark-helpers.sh`).
 
 ## Invariants
 
-- The commands are activation helpers: they exit quietly when plugins, tmux
-  state, or socket identity are missing, so a partial tmux config keeps
-  working. Don't turn those paths into errors.
+- The continuum commands are activation helpers: they exit quietly when
+  plugins, tmux state, or socket identity are missing, so a partial tmux
+  config keeps working. Don't turn those paths into errors.
+- `term-pane-mark` and `term-notify-sound` are best effort: missing tmux,
+  panes, or helpers must not turn the caller's work into an error.
+- `@term_notify_pending` and `@term_busy` (pane options set to `1`) and
+  `TERM_NOTIFY_TTY` are read or set by users' tmux configs, shell prompts,
+  and agent hooks. Don't rename them.
+- Exit 64 is reserved for bad arguments to the pane and copy commands;
+  `tmux-copy-last-output --print` exits 3 when it finds no block, and a
+  tmux binding relies on that status.
+- `tmux-copy-last-output` parses one two-line prompt shape (header comment
+  and awk patterns in the script). If the patterns change, update the README
+  "Prompt format" section and the man page with them.
+- Every `bin/` command needs a `man/man1/<cmd>.1` with `.SH NAME`, a row in
+  `commands=()` in `support/install-checkout.sh`, and a ShellCheck inventory
+  row; `test/tmux-tools-test` checks the first two.
 - `@tmux-tools-resurrect-auto-restore` is a published contract that ds reads.
   Don't rename it. `@tmux-tools-resurrect-restore-started-at` is internal.
 - Default-server ownership is decided by the canonical
@@ -30,19 +49,23 @@ Three Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
 
 - Local: `test/run`. It runs ShellCheck over the `program` rows of
   `.github/shellcheck-files.txt` when `shellcheck` is installed, then the
-  three suites.
+  four suites.
 - CI: `TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_SKIP_SHELLCHECK=1 test/run`
   through shared shell CI with the `base,tmux` profiles.
   `TMUX_TOOLS_REQUIRE_TMUX=1` only turns the skipped real-tmux
   `tmux-clip-paste` block into a failure when tmux is absent.
 - Stock Bash 3.2 (macOS): `PREFIX=$tmp /bin/bash install.sh`, then for each
   installed command `/bin/bash -n`, plus `tmux-clip-paste --help`,
-  `TMUX= tmux-continuum-default-server`, and `tmux-continuum-save-gate`,
-  all run with `/bin/bash`, as the `macos-bash32` job does.
+  `TMUX= tmux-continuum-default-server`, `tmux-continuum-save-gate`, and
+  stub-tmux smokes of `tmux-copy-last-output --print`, `term-pane-mark`, and
+  `term-notify-sound`, all run with `/bin/bash`, as the `macos-bash32` job
+  does.
 
 ## Test isolation
 
-- Most cases use a mock `tmux` first on `PATH`.
+- Most cases use a mock `tmux` first on `PATH`. `test/copy-mark-test` also
+  fakes `TMUX`/`TMUX_PANE`, capture files, and `/proc` (through
+  `TERM_PANE_MARK_PROC_ROOT`), and must stay independent of a real tmux.
 - Real-tmux cases use a private server only: `-S` on a socket under the
   suite temp root (kept short for the macOS `AF_UNIX` limit) or a unique
   `-L` name, always with `-f /dev/null`, and killed on exit. Never touch

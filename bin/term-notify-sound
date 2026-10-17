@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# term-notify-sound — Play a terminal notification sound.
+# Emits one standard bell (BEL), rendered by the terminal client. Falls back to
+# the current tmux pane's pty when /dev/tty is unavailable. Inside tmux it also
+# marks the notifying pane as pending so the tmux config can show which pane
+# wants attention.
+
+set -u
+
+usage() {
+  printf 'usage: term-notify-sound [--owner PID]\n' >&2
+  exit 64
+}
+
+# --owner names the program the notification is for, such as the agent whose
+# hook rings. Programs an agent launches inherit its pane, and without a
+# terminal of their own their bell falls back to the pane's pty; the pending
+# mark then follows term-pane-mark's owner rule, so it lands only for the
+# pane terminal's foreground program. The bell itself still rings.
+owner_args=()
+case $# in
+  0) ;;
+  2)
+    [ "$1" = --owner ] && [ -n "$2" ] || usage
+    owner_args=(--owner "$2")
+    ;;
+  *) usage ;;
+esac
+
+send_tty_notify() {
+  # BEL crosses local and remote ptys; the client owns sound playback.
+  printf '\a'
+}
+
+# tmux attributes a bell to a window, never to the pane that rang it, so the
+# notifier publishes that pane itself through term-pane-mark, which owns the
+# pane-ownership rule. Prefer the copy beside this one so a checkout or
+# installed link set stays on one revision. Best effort: a missing helper must
+# not turn a notification into an error.
+mark_pending() {
+  local marker="${BASH_SOURCE[0]%/*}/term-pane-mark"
+  [ -x "$marker" ] || marker=$(command -v term-pane-mark 2>/dev/null) || return 0
+  "$marker" set pending "$@" ${owner_args[@]+"${owner_args[@]}"} >/dev/null 2>&1 || true
+}
+
+notify_tty="${TERM_NOTIFY_TTY:-/dev/tty}"
+if (send_tty_notify >>"$notify_tty") 2>/dev/null; then
+  # Rang the controlling terminal, so the pane is marked only if this process
+  # still owns it; term-pane-mark decides.
+  mark_pending
+elif [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
+  pane_tty=$(tmux display-message -t "${TMUX_PANE}" -p '#{pane_tty}' 2>/dev/null)
+  if [ -n "$pane_tty" ]; then
+    # Delivered to the pane itself, so the pane is the one that rang.
+    send_tty_notify >>"$pane_tty" 2>/dev/null && mark_pending --pane "$TMUX_PANE"
+  fi
+fi
+exit 0

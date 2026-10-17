@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# term-pane-mark — Set or clear a state mark on the caller's own tmux pane.
+# Programs running in a pane (agent hooks, notifiers) publish what they are
+# doing as pane user options; the consuming tmux config renders them. This
+# command owns both the mark vocabulary and the rule for which pane is the
+# caller's, so every publisher agrees on them.
+
+set -u
+
+usage() {
+  printf 'usage: term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID]\n' >&2
+  exit 64
+}
+
+# Pane user options for each mark. pending: the program asked for attention.
+# busy: the program is working on a request.
+mark_option() {
+  case $1 in
+    pending) printf '@term_notify_pending\n' ;;
+    busy) printf '@term_busy\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Print the /proc/PID/stat fields after the command name (state, ppid, pgrp,
+# session, tty_nr, tpgid, ...), or fail without them. The name is parenthesized
+# and may contain spaces, so the fields start after the last ')'.
+proc_stat() {
+  local stat
+  IFS= read -r stat 2>/dev/null <"${TERM_PANE_MARK_PROC_ROOT:-/proc}/$1/stat" || return 1
+  printf '%s\n' "${stat##*)}"
+}
+
+# Print the name ps gives the Linux terminal device number $1 (pts/5), or fail
+# for none (0) or a terminal that is not a Unix98 pty (majors 136-143).
+pty_name() {
+  local major=$((($1 >> 8) & 0xfff)) minor=$((($1 & 0xff) | (($1 >> 12) & 0xfff00)))
+  ((major >= 136 && major <= 143)) || return 1
+  printf 'pts/%s\n' "$(((major - 136) * 256 + minor))"
+}
+
+# Print this process's controlling terminal as ps names it (pts/5), or fail
+# when it has none. Linux exposes it in /proc, which avoids a ps that scans
+# every process (about 100 ms on a busy host); elsewhere, or for a terminal
+# that is not a Unix98 pty, ask ps.
+controlling_tty() {
+  local stat tty
+  local -a fields
+  # self, not $$: this runs in a command substitution, whose subshell shares
+  # the controlling terminal.
+  if stat=$(proc_stat self); then
+    read -r -a fields <<<"$stat"
+    case ${fields[4]:-} in
+      0) return 1 ;;
+      '' | *[!0-9]*) ;;
+      *) pty_name "${fields[4]}" && return 0 ;;
+    esac
+  fi
+  tty=$(ps -o tty= -p "$$" 2>/dev/null) || return 1
+  tty=${tty//[[:space:]]/}
+  case $tty in
+    '' | '?' | '-') return 1 ;;
+  esac
+  printf '%s\n' "$tty"
+}
+
+# Some agents (muse) run hooks with TMUX, TMUX_PANE, and TERM_PROGRAM
+# stripped, though the hook still shares the pane's terminal. Find the pane
+# whose pty is this process's controlling terminal: only a process inside that
+# pane can have it, so a match is stronger evidence than inherited variables.
+# Without TMUX this asks the default tmux server. Best effort: no terminal, no
+# usable ps, or no matching pane simply leaves nothing marked.
+pane_for_tty() {
+  local tty
+  tty=$(controlling_tty) || return 1
+  tmux list-panes -a -F '#{pane_tty} #{pane_id}' 2>/dev/null |
+    awk -v tty="/dev/$tty" '$1 == tty { print $2; exit }'
+}
+
+# TMUX and TMUX_PANE leak into programs launched from a tmux shell, such as an
+# editor started with `code .`, whose own terminals are not that pane. tmux
+# sets TERM_PROGRAM=tmux in its panes and a terminal emulator running inside
+# one replaces it, so only a process still in the pane owns it. That check
+# needs no process lookup, which sandboxes and busybox may not support; the
+# terminal match runs only when the variables are absent altogether.
+own_pane() {
+  if [ -n "${TMUX_PANE:-}" ]; then
+    [ -n "${TMUX:-}" ] && [ "${TERM_PROGRAM:-}" = tmux ] || return 1
+    printf '%s\n' "$TMUX_PANE"
+  else
+    pane_for_tty
+  fi
+}
+
+# Return whether process PID runs in the foreground of PANE's terminal: its
+# process group is the terminal's foreground group. A pane's agent is its
+# terminal's foreground program, while programs it launches (a reviewer, a
+# memory classifier) inherit the pane's tmux variables but run without that
+# terminal, so only the pane's own agent may change an owned mark, whatever
+# order the agents start and stop in.
+in_foreground() {
+  local pid=$1 pane=$2 pane_tty stat state pgrp='' tpgid='' tty=''
+  local -a fields
+  pane_tty=$(tmux display-message -t "$pane" -p '#{pane_tty}' 2>/dev/null) || return 1
+  [ -n "$pane_tty" ] || return 1
+  if [ -r "${TERM_PANE_MARK_PROC_ROOT:-/proc}/self/stat" ]; then
+    # With /proc, a missing entry means the process is gone; skip the slow ps.
+    stat=$(proc_stat "$pid") || return 1
+    read -r -a fields <<<"$stat"
+    pgrp=${fields[2]:-}
+    tpgid=${fields[5]:-}
+    tty=$(pty_name "${fields[4]:-0}") || return 1
+  else
+    state=$(ps -o pgid= -o tpgid= -o tty= -p "$pid" 2>/dev/null) || return 1
+    read -r pgrp tpgid tty <<<"$state"
+  fi
+  [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && [ "/dev/$tty" = "$pane_tty" ]
+}
+
+[ $# -ge 2 ] || usage
+action=$1
+case $action in
+  set | clear) ;;
+  *) usage ;;
+esac
+option=$(mark_option "$2") || usage
+shift 2
+pane=''
+owner=''
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] && [ -n "$2" ] || usage
+  case $1 in
+    # An explicit pane is for callers that already proved ownership another
+    # way, such as term-notify-sound after ringing the pane's own tty.
+    --pane)
+      [ -z "$pane" ] || usage
+      pane=$2
+      ;;
+    --owner)
+      [ -z "$owner" ] || usage
+      case $2 in
+        *[!0-9]* | 0) usage ;;
+      esac
+      owner=$2
+      ;;
+    *) usage ;;
+  esac
+  shift 2
+done
+[ -n "$pane" ] || pane=$(own_pane) || pane=''
+[ -n "$pane" ] || exit 0
+
+# Best effort: a missing or older tmux, or a pane that has since closed, must
+# not turn the caller's work into an error.
+if [ -n "$owner" ]; then
+  in_foreground "$owner" "$pane" || exit 0
+fi
+if [ "$action" = set ]; then
+  tmux set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+else
+  tmux set-option -pu -t "$pane" "$option" >/dev/null 2>&1 || true
+fi
+exit 0

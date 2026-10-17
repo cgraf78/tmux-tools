@@ -1,0 +1,107 @@
+.TH TERM-PANE-MARK 1 "2026-10-12" "tmux-tools" "User Commands"
+.SH NAME
+term-pane-mark \- set or clear a state mark on the caller's tmux pane
+.SH SYNOPSIS
+.B term-pane-mark
+.BR set | clear
+.BR pending | busy
+.RB [ \-\-pane
+.IR pane ]
+.RB [ \-\-owner
+.IR pid ]
+.SH DESCRIPTION
+.B term-pane-mark
+lets a program running inside a tmux pane publish its state as a pane user
+option. It only sets and clears options; the tmux configuration that renders
+them owns their presentation.
+.TP
+.B pending
+Sets
+.B @term_notify_pending
+to
+.BR 1 :
+the program asked for attention.
+.BR term-notify-sound (1)
+sets it after ringing. The consuming configuration normally clears it when the
+pane is visited.
+.TP
+.B busy
+Sets
+.B @term_busy
+to
+.BR 1 :
+the program is working on a request, for example an agent between a submitted
+prompt and its finished response. The program that set it clears it,
+normally with
+.B \-\-owner
+so that a nested program cannot clear it early.
+.PP
+The caller's pane is
+.B $TMUX_PANE
+only while
+.B TMUX
+is set and
+.B TERM_PROGRAM
+is
+.BR tmux .
+A program launched from a tmux shell, such as an editor, inherits
+.B TMUX
+and
+.B TMUX_PANE
+but runs its own terminals, which replace
+.BR TERM_PROGRAM ,
+so a leaked pane id is never marked.
+.PP
+When
+.B TMUX_PANE
+is absent, as for agents that run hooks with the tmux variables removed, the
+command looks up its controlling terminal, from
+.I /proc
+on Linux or with
+.BR ps (1)
+elsewhere, and uses the pane of the default tmux server whose pty is that terminal. Only a
+process inside the pane can have it, so a terminal no pane owns, a missing
+terminal, or an unusable
+.B ps
+marks nothing.
+.SH OPTIONS
+.TP
+.BI \-\-pane " pane"
+Mark
+.I pane
+without the ownership lookup, for callers that already proved ownership,
+such as a notifier that rang the pane's own pty.
+.TP
+.BI \-\-owner " pid"
+Change the mark only while process
+.I pid
+runs in the foreground of the pane's terminal, that is, its process group is
+the terminal's foreground group. A pane's agent is that foreground program.
+Programs it launches, such as a reviewer or a memory classifier, inherit the
+pane's tmux variables but run without its terminal, so with
+.B \-\-owner
+they can neither set nor clear the agent's mark, whatever order they start and
+stop in. The terminal is read from
+.I /proc
+on Linux, where a missing entry means the process has exited, and from
+.BR ps (1)
+elsewhere.
+.SH ENVIRONMENT
+.TP
+.B TERM_PANE_MARK_PROC_ROOT
+Override the
+.I /proc
+root used to read terminal state, for tests.
+.SH EXIT STATUS
+.TP
+.B 0
+The mark was updated or intentionally skipped: no owned pane, an
+.B \-\-owner
+outside the pane's foreground, no tmux, or a failed tmux update.
+.TP
+.B 64
+The arguments were invalid. The command writes a usage diagnostic before any
+tmux command is invoked.
+.SH SEE ALSO
+.BR tmux (1),
+.BR term-notify-sound (1)
