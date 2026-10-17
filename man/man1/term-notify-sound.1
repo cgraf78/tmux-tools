@@ -1,0 +1,68 @@
+.TH TERM-NOTIFY-SOUND 1 "2026-10-12" "tmux-tools" "User Commands"
+.SH NAME
+term-notify-sound \- emit a terminal-aware completion notification
+.SH SYNOPSIS
+.B term-notify-sound
+.RB [ \-\-owner
+.IR pid ]
+.SH DESCRIPTION
+.B term-notify-sound
+plays a lightweight terminal notification by emitting one standard terminal
+bell. The terminal client renders that bell, so local and remote-development
+sessions use the same transport.
+.PP
+If
+.I /dev/tty
+is unavailable, the helper attempts to write to the current pane TTY.
+.PP
+Inside tmux, the helper also marks the pane that rang as pending with
+.BR "term-pane-mark set pending" ,
+which sets the pane user option
+.B @term_notify_pending
+to
+.BR 1 .
+tmux records a bell against a window, not the pane that rang it, so this
+option is how a tmux configuration can show which pane wants attention. The
+helper only sets the option; the configuration that renders it owns clearing
+it, for example from
+.B pane-focus-in
+and
+.B pane-focus-out
+hooks.
+.PP
+When the bell goes straight to the controlling terminal,
+.BR term-pane-mark (1)
+decides which pane, if any, this process owns. When the bell falls back to the
+pane's own pty, that pane is marked directly. The helper runs the
+.B term-pane-mark
+beside it, falling back to the one on
+.BR PATH ;
+a missing helper or a failed mark is ignored.
+.SH OPTIONS
+.TP
+.BI \-\-owner " pid"
+Pass
+.I pid
+to the pending mark, which then lands only while that process runs in the
+foreground of the pane's terminal; see
+.BR term-pane-mark (1).
+An agent's hook passes the agent, so a program the agent launched, which
+inherits its pane but rings through the pane fallback without a terminal of
+its own, cannot mark the agent's pane. The bell still rings.
+.SH ENVIRONMENT
+.TP
+.B TERM_NOTIFY_TTY
+Override the primary terminal device, which defaults to
+.IR /dev/tty .
+The tmux pane TTY remains the fallback when this device cannot be opened.
+.SH EXIT STATUS
+.TP
+.B 0
+The notification was emitted or intentionally ignored after best-effort
+fallbacks.
+.TP
+.B 64
+The arguments were invalid; nothing rang.
+.SH SEE ALSO
+.BR term-pane-mark (1),
+.BR tmux-copy-last-output (1)

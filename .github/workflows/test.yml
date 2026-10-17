@@ -47,13 +47,55 @@ jobs:
           PREFIX="$install_prefix" /bin/bash install.sh
 
           for command in tmux-clip-paste tmux-continuum-default-server \
-            tmux-continuum-save-gate; do
-            [[ -L "$install_prefix/bin/$command" ]]
+            tmux-continuum-save-gate tmux-copy-last-output term-pane-mark \
+            term-notify-sound; do
+            [[ -L "$install_prefix/bin/$command" ]] || exit 1
             /bin/bash -n "$install_prefix/bin/$command"
           done
           /bin/bash "$install_prefix/bin/tmux-clip-paste" --help >/dev/null
           TMUX= /bin/bash "$install_prefix/bin/tmux-continuum-default-server"
           /bin/bash "$install_prefix/bin/tmux-continuum-save-gate"
+
+          # The pane commands talk to tmux, so give them a stub that serves a
+          # fixed pane capture and logs every other call. Run each command
+          # with /bin/bash: its env-bash shebang would pick PATH's bash.
+          # Bash 3.2's errexit ignores a failed [[ ]], so each check exits
+          # explicitly.
+          stub_dir="$RUNNER_TEMP/tmux-stub"
+          mkdir -p "$stub_dir"
+          printf '%s\n' '#!/bin/sh' \
+            'case $1 in' \
+            '  capture-pane) cat "$STUB_CAPTURE" ;;' \
+            '  *) printf "%s\n" "$*" >>"$STUB_LOG" ;;' \
+            'esac' >"$stub_dir/tmux"
+          chmod +x "$stub_dir/tmux"
+          export STUB_CAPTURE="$stub_dir/capture" STUB_LOG="$stub_dir/log"
+
+          printf '%s\n' '[0] me@host:~' '$ echo hi' 'hi' '[0] me@host:~' '$' \
+            >"$STUB_CAPTURE"
+          output=$(PATH="$stub_dir:$PATH" \
+            /bin/bash "$install_prefix/bin/tmux-copy-last-output" --print)
+          [[ $output == $'$ echo hi\nhi' ]] || exit 1
+          : >"$STUB_CAPTURE"
+          status=0
+          PATH="$stub_dir:$PATH" /bin/bash \
+            "$install_prefix/bin/tmux-copy-last-output" --print || status=$?
+          [[ $status -eq 3 ]] || exit 1
+
+          status=0
+          /bin/bash "$install_prefix/bin/term-pane-mark" 2>/dev/null ||
+            status=$?
+          [[ $status -eq 64 ]] || exit 1
+          : >"$STUB_LOG"
+          PATH="$stub_dir:$PATH" TMUX=/tmp/stub,1,0 TMUX_PANE=%7 \
+            TERM_PROGRAM=tmux /bin/bash "$install_prefix/bin/term-pane-mark" \
+            set busy
+          grep -qx 'set-option -p -t %7 @term_busy 1' "$STUB_LOG"
+
+          bell="$RUNNER_TEMP/bell"
+          PATH="$stub_dir:$PATH" TMUX= TMUX_PANE= TERM_NOTIFY_TTY="$bell" \
+            /bin/bash "$install_prefix/bin/term-notify-sound"
+          [[ $(cat "$bell") == $'\a' ]] || exit 1
 
   required:
     name: Required

@@ -22,6 +22,9 @@ commands=(
   tmux-continuum-default-server
   tmux-continuum-save-gate
   tmux-clip-paste
+  tmux-copy-last-output
+  term-pane-mark
+  term-notify-sound
 )
 
 # A checkout-backed install is only valid while every public artifact exists.
@@ -64,7 +67,7 @@ for command in "${commands[@]}"; do
   LINK_TARGETS+=("$MAN_DIR/$command.1")
 done
 
-# A complete destination preflight still cannot make six separate ln calls
+# A complete destination preflight still cannot make the separate ln calls
 # atomic. Preserve each old symlink selection so a later filesystem failure
 # can put the prior installation back exactly; newly published links are
 # removed. Parallel indexed arrays keep the installer compatible with Bash 3.2.

@@ -1,11 +1,16 @@
 # type<TAB>repository-relative path
 # `fixture` records are discovered but intentionally excluded from ShellCheck.
+program	bin/term-notify-sound
+program	bin/term-pane-mark
 program	bin/tmux-clip-paste
 program	bin/tmux-continuum-default-server
 program	bin/tmux-continuum-save-gate
+program	bin/tmux-copy-last-output
 program	install.sh
 program	scripts/checkout-installer.conf
 program	support/install-checkout.sh
+program	test/copy-mark-helpers.sh
+program	test/copy-mark-test
 program	test/run
 program	test/tmux-continuum-test
 program	test/tmux-tools-harness-test
