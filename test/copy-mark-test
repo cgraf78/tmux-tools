@@ -322,7 +322,7 @@ HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%7 TERM_PROGRAM=tmux 
 _assert_file_content "notify: tmux direct delivery still emits one BEL" \
   $'\a' "$tmp/tmux-direct.tty"
 _assert_file_content "notify: tmux direct delivery marks the notifying pane" \
-  'set-option -p -t %7 @term_notify_pending 1' "$direct_set_log"
+  'set-option -pu -t %7 @term_notify_exit_status ; set-option -p -t %7 @term_notify_pending 1' "$direct_set_log"
 
 # The pane-tty fallback delivers to the pane itself, so it marks the pane
 # whatever terminal program the caller reports.
@@ -332,7 +332,7 @@ HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%8 TERM_PROGRAM=vscod
   TMUX_SET_LOG="$fallback_set_log" \
   PATH="$mock_bin:$PATH" "$ROOT/bin/term-notify-sound"
 _assert_file_content "notify: tmux pane fallback marks the notifying pane" \
-  'set-option -p -t %8 @term_notify_pending 1' "$fallback_set_log"
+  'set-option -pu -t %8 @term_notify_exit_status ; set-option -p -t %8 @term_notify_pending 1' "$fallback_set_log"
 
 # An editor launched from a tmux shell inherits TMUX and TMUX_PANE, but its
 # own terminal replaces TERM_PROGRAM; ringing that terminal must not mark the
@@ -380,7 +380,7 @@ env -u TMUX -u TMUX_PANE -u TERM_PROGRAM HOME="$tmp/tmux-notify-home" \
 _assert_file_content "notify: stripped tmux env still emits one BEL" \
   $'\a' "$tmp/tmux-stripped.tty"
 _assert_file_content "notify: stripped tmux env marks the pane owning its terminal" \
-  'set-option -p -t %5 @term_notify_pending 1' "$stripped_log"
+  'set-option -pu -t %5 @term_notify_exit_status ; set-option -p -t %5 @term_notify_pending 1' "$stripped_log"
 
 # Outside every pane (a terminal that is not tmux), or with no controlling
 # terminal at all, nothing is marked; the bell still rings.
@@ -448,6 +448,29 @@ HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%13 TERM_PROGRAM=tmux
 _assert_file_content "notify: without one beside it, PATH's term-pane-mark marks" \
   'path-marker set pending' "$tmp/notifier-path.log"
 
+# A failed notification carries its status through both routes and either
+# option order, without changing the single-BEL transport.
+for route in direct fallback; do
+  log="$tmp/notifier-status-$route.log"
+  if [[ $route == direct ]]; then
+    primary="$tmp/notifier-status-direct.tty"
+    argv=(--exit-status 008 --owner 4242)
+    expected='notifier-pair set pending --owner 4242 --exit-status 8'
+  else
+    primary="$tmp/missing/status.tty"
+    argv=(--owner 4242 --exit-status 008)
+    expected='notifier-pair set pending --pane %14 --owner 4242 --exit-status 8'
+  fi
+  TMUX=/tmp/tmux-test TMUX_PANE=%14 TERM_PROGRAM=tmux \
+    TERM_NOTIFY_TTY="$primary" TMUX_PANE_TTY="$tmp/notifier-status-fallback.tty" \
+    MARKER_LOG="$log" PATH="$mock_bin:$PATH" \
+    "$marker_dir/term-notify-sound" "${argv[@]}"
+  _assert_exit "notify status: $route succeeds" 0 "$?"
+  _assert_file_content "notify status: $route forwards canonical status" "$expected" "$log"
+  _assert_file_content "notify status: $route emits one BEL" \
+    $'\a' "$tmp/notifier-status-$route.tty"
+done
+
 # --owner reaches the pending mark on both delivery routes, so a program an
 # agent launched (no terminal, inherited pane) cannot mark the agent's pane.
 HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%13 TERM_PROGRAM=tmux \
@@ -463,15 +486,17 @@ _assert_file_content "notify: --owner reaches a pane-fallback mark" \
   'notifier-pair set pending --pane %14 --owner 4242' "$tmp/notifier-owner-fallback.log"
 _assert_file_content "notify: --owner still rings through the pane fallback" \
   $'\a' "$tmp/notifier-owner-fallback.tty"
-for bad_args in '--owner' '--owner ""' '--pane %1' '--owner 1 extra'; do
+for bad_args in '--owner' '--owner ""' '--owner 1 --owner 2' '--pane %1' '--owner 1 extra' '--exit-status' '--exit-status ""' '--exit-status -1' '--exit-status 256' '--exit-status 1x' '--exit-status 99999999999999999999999999999' '--exit-status 1 --exit-status 2'; do
   eval "set -- $bad_args"
-  output=$(TERM_NOTIFY_TTY="$tmp/notifier-bad.tty" PATH="$mock_bin:$PATH" \
+  output=$(TMUX=/tmp/tmux-test TMUX_PANE=%14 TERM_PROGRAM=tmux \
+    TMUX_SET_LOG="$tmp/notifier-bad.log" TERM_NOTIFY_TTY="$tmp/notifier-bad.tty" PATH="$mock_bin:$PATH" \
     "$ROOT/bin/term-notify-sound" "$@" 2>&1)
   _assert_exit "notify: arguments $bad_args are a usage error" 64 "$?"
   _assert_eq "notify: arguments $bad_args print usage" \
-    'usage: term-notify-sound [--owner PID]' "$output"
+    'usage: term-notify-sound [--owner PID] [--exit-status CODE]' "$output"
 done
 _assert_file_missing "notify: a usage error rings nothing" "$tmp/notifier-bad.tty"
+_assert_file_missing "notify: a usage error changes no pane state" "$tmp/notifier-bad.log"
 
 lone_dir="$tmp/lone-notifier"
 mkdir -p "$lone_dir"
@@ -501,9 +526,14 @@ for mark in pending:@term_notify_pending busy:@term_busy; do
   TMUX=/tmp/tmux-test TMUX_PANE=%20 TERM_PROGRAM=tmux TMUX_SET_LOG="$mark_log" \
     PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" clear "$name"
   _assert_exit "mark $name: clear succeeds" 0 "$?"
+  expected="set-option -p -t %20 $option 1
+set-option -pu -t %20 $option"
+  if [[ $name == pending ]]; then
+    expected="set-option -pu -t %20 @term_notify_exit_status ; set-option -p -t %20 @term_notify_pending 1
+set-option -pu -t %20 @term_notify_pending ; set-option -pu -t %20 @term_notify_exit_status"
+  fi
   _assert_file_content "mark $name: sets then unsets its pane option" \
-    "set-option -p -t %20 $option 1
-set-option -pu -t %20 $option" "$mark_log"
+    "$expected" "$mark_log"
 done
 
 # Leaked tmux variables (an editor launched from a tmux shell) own no pane.
@@ -512,7 +542,7 @@ for leaked_program in vscode ''; do
   TMUX=/tmp/tmux-test TMUX_PANE=%21 TERM_PROGRAM="$leaked_program" \
     TMUX_SET_LOG="$leaked_log" TMUX_LIST_LOG="$leaked_log" \
     PS_TTY=pts/5 TMUX_PANES="$panes" \
-    PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" set busy
+    PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" set pending --exit-status 42
   _assert_exit "mark: leaked env in ${leaked_program:-an unnamed terminal} succeeds" 0 "$?"
   _assert_file_missing "mark: leaked env in ${leaked_program:-an unnamed terminal} marks nothing" \
     "$leaked_log"
@@ -537,7 +567,7 @@ env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TMUX_SET_LOG="$explicit_log" \
   TMUX_LIST_LOG="$tmp/mark-explicit-list.log" PATH="$mock_bin:$PATH" \
   "$ROOT/bin/term-pane-mark" set pending --pane %30
 _assert_file_content "mark: an explicit pane is marked" \
-  'set-option -p -t %30 @term_notify_pending 1' "$explicit_log"
+  'set-option -pu -t %30 @term_notify_exit_status ; set-option -p -t %30 @term_notify_pending 1' "$explicit_log"
 _assert_file_missing "mark: an explicit pane skips the terminal lookup" \
   "$tmp/mark-explicit-list.log"
 
@@ -560,7 +590,7 @@ assert_invalid_mark() {
   rc=$?
   _assert_exit "$description: exits with usage status" 64 "$rc"
   _assert_eq "$description: prints concise usage" \
-    "usage: term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID]" "$output"
+    "usage: term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID] [--exit-status CODE]" "$output"
   _assert_file_missing "$description: does not invoke tmux" "$log"
 }
 
@@ -578,6 +608,62 @@ assert_invalid_mark "mark owner without value" set busy --owner
 assert_invalid_mark "mark nonnumeric owner" set busy --owner abc
 assert_invalid_mark "mark zero owner" set busy --owner 0
 assert_invalid_mark "mark repeated owner" set busy --owner 1 --owner 2
+
+# Each log line is one tmux invocation, so queue separators catch a split
+# metadata/pending update that focus acknowledgement could interleave.
+# Exit status belongs only to a newly pending notification. Leading zeroes
+# remain decimal and are canonicalized before reaching tmux.
+for code in 0 255 008; do
+  case $code in
+    0) metadata='set-option -pu -t %31 @term_notify_exit_status' ;;
+    255) metadata='set-option -p -t %31 @term_notify_exit_status 255' ;;
+    008) metadata='set-option -p -t %31 @term_notify_exit_status 8' ;;
+  esac
+  log="$tmp/status-$code.log"
+  TMUX_SET_LOG="$log" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-pane-mark" set pending --exit-status "$code" --pane %31
+  _assert_exit "mark status $code: valid decimal status succeeds" 0 "$?"
+  _assert_file_content "mark status $code: queues metadata before pending in one tmux invocation" \
+    "$metadata ; set-option -p -t %31 @term_notify_pending 1" "$log"
+done
+
+lifecycle_log="$tmp/status-lifecycle.log"
+for args in 'set pending --exit-status 7' 'set pending --exit-status 0' \
+  'set pending --exit-status 9' 'set pending' 'clear pending'; do
+  read -r -a argv <<<"$args"
+  TMUX_SET_LOG="$lifecycle_log" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/term-pane-mark" "${argv[@]}" --pane %32
+done
+_assert_file_content "mark: success, ordinary notification, and clear remove stale failure" \
+  'set-option -p -t %32 @term_notify_exit_status 7 ; set-option -p -t %32 @term_notify_pending 1
+set-option -pu -t %32 @term_notify_exit_status ; set-option -p -t %32 @term_notify_pending 1
+set-option -p -t %32 @term_notify_exit_status 9 ; set-option -p -t %32 @term_notify_pending 1
+set-option -pu -t %32 @term_notify_exit_status ; set-option -p -t %32 @term_notify_pending 1
+set-option -pu -t %32 @term_notify_pending ; set-option -pu -t %32 @term_notify_exit_status' "$lifecycle_log"
+
+for code in '' -1 256 1x 99999999999999999999999999999; do
+  assert_invalid_mark "mark invalid status '$code'" set pending --exit-status "$code"
+done
+assert_invalid_mark "mark missing status" set pending --exit-status
+assert_invalid_mark "mark repeated status" set pending --exit-status 1 --exit-status 2
+assert_invalid_mark "mark busy status" set busy --exit-status 1
+assert_invalid_mark "mark clear pending status" clear pending --exit-status 1
+assert_invalid_mark "mark clear busy status" clear busy --exit-status 0
+
+# Status is explicit CLI data; unrelated inherited environment must never
+# turn an ordinary notifier or pane mark into a failed-command notification.
+for program in term-pane-mark term-notify-sound; do
+  argv=()
+  [[ $program != term-pane-mark ]] || argv=(set pending)
+  log="$tmp/inherited-status-$program.log"
+  TMUX=/tmp/tmux-test TMUX_PANE=%33 TERM_PROGRAM=tmux \
+    exit_status=42 owner=4243 TERM_NOTIFY_EXIT_STATUS=42 \
+    TERM_NOTIFY_TTY="$tmp/inherited-status.tty" TMUX_SET_LOG="$log" \
+    PATH="$mock_bin:$PATH" "$ROOT/bin/$program" "${argv[@]+"${argv[@]}"}"
+  _assert_exit "$program: ignores inherited status and owner" 0 "$?"
+  _assert_file_content "$program: inherited status leaves ordinary pending" \
+    'set-option -pu -t %33 @term_notify_exit_status ; set-option -p -t %33 @term_notify_pending 1' "$log"
+done
 
 # With --owner, only the pane terminal's foreground program may change the
 # mark: an agent the pane's agent launches inherits the pane but runs without
@@ -613,6 +699,12 @@ assert_owned() {
     _assert_file_missing "mark owner: $description" "$log"
   fi
 }
+assert_owned "a background owner cannot publish failure metadata" '' \
+  set pending --exit-status 42 --owner 4243
+assert_owned "a foreground owner publishes failure metadata first" \
+  'set-option -p -t %40 @term_notify_exit_status 42 ; set-option -p -t %40 @term_notify_pending 1' \
+  set pending --owner 4242 --exit-status 42
+
 assert_owned "the foreground program sets the mark" \
   'set-option -p -t %40 @term_busy 1' set busy --owner 4242
 assert_owned "the foreground program clears the mark" \

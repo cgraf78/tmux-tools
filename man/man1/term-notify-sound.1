@@ -1,10 +1,12 @@
-.TH TERM-NOTIFY-SOUND 1 "2026-10-12" "tmux-tools" "User Commands"
+.TH TERM-NOTIFY-SOUND 1 "2026-10-23" "tmux-tools" "User Commands"
 .SH NAME
 term-notify-sound \- emit a terminal-aware completion notification
 .SH SYNOPSIS
 .B term-notify-sound
 .RB [ \-\-owner
 .IR pid ]
+.RB [ \-\-exit-status
+.IR code ]
 .SH DESCRIPTION
 .B term-notify-sound
 plays a lightweight terminal notification by emitting one standard terminal
@@ -49,6 +51,16 @@ foreground of the pane's terminal; see
 An agent's hook passes the agent, so a program the agent launched, which
 inherits its pane but rings through the pane fallback without a terminal of
 its own, cannot mark the agent's pane. The bell still rings.
+.TP
+.BI \-\-exit-status " code"
+Pass a decimal shell exit status from 0 through 255 to the pending mark.
+Options may appear in either order. Leading zeroes are accepted and removed.
+A nonzero status publishes the pane option
+.B @term_notify_exit_status
+before marking the pane pending. A zero status or no status clears any stale
+failure metadata. The terminal bell is unchanged; the tmux configuration
+renders the status and clears it along with the pending mark when visited.
+Status is accepted only through this option, not through the environment.
 .SH ENVIRONMENT
 .TP
 .B TERM_NOTIFY_TTY
