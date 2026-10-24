@@ -8,7 +8,7 @@
 set -u
 
 usage() {
-  printf 'usage: term-notify-sound [--owner PID]\n' >&2
+  printf 'usage: term-notify-sound [--owner PID] [--exit-status CODE]\n' >&2
   exit 64
 }
 
@@ -17,15 +17,35 @@ usage() {
 # terminal of their own their bell falls back to the pane's pty; the pending
 # mark then follows term-pane-mark's owner rule, so it lands only for the
 # pane terminal's foreground program. The bell itself still rings.
-owner_args=()
-case $# in
-  0) ;;
-  2)
-    [ "$1" = --owner ] && [ -n "$2" ] || usage
-    owner_args=(--owner "$2")
-    ;;
-  *) usage ;;
-esac
+owner=''
+exit_status=''
+mark_args=()
+while [ $# -gt 0 ]; do
+  [ $# -ge 2 ] && [ -n "$2" ] || usage
+  case $1 in
+    --owner)
+      [ -z "$owner" ] || usage
+      owner=$2
+      ;;
+    --exit-status)
+      [ -z "$exit_status" ] || usage
+      case $2 in
+        *[!0-9]*) usage ;;
+      esac
+      exit_status=$2
+      # Match the marker's decimal contract without octal or overflow.
+      while [ "${exit_status#0}" != "$exit_status" ]; do
+        exit_status=${exit_status#0}
+      done
+      exit_status=${exit_status:-0}
+      [ "${#exit_status}" -le 3 ] && [ "$exit_status" -le 255 ] || usage
+      ;;
+    *) usage ;;
+  esac
+  shift 2
+done
+[ -z "$owner" ] || mark_args+=(--owner "$owner")
+[ -z "$exit_status" ] || mark_args+=(--exit-status "$exit_status")
 
 send_tty_notify() {
   # BEL crosses local and remote ptys; the client owns sound playback.
@@ -40,7 +60,7 @@ send_tty_notify() {
 mark_pending() {
   local marker="${BASH_SOURCE[0]%/*}/term-pane-mark"
   [ -x "$marker" ] || marker=$(command -v term-pane-mark 2>/dev/null) || return 0
-  "$marker" set pending "$@" ${owner_args[@]+"${owner_args[@]}"} >/dev/null 2>&1 || true
+  "$marker" set pending "$@" ${mark_args[@]+"${mark_args[@]}"} >/dev/null 2>&1 || true
 }
 
 notify_tty="${TERM_NOTIFY_TTY:-/dev/tty}"

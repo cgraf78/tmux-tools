@@ -8,7 +8,7 @@
 set -u
 
 usage() {
-  printf 'usage: term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID]\n' >&2
+  printf 'usage: term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID] [--exit-status CODE]\n' >&2
   exit 64
 }
 
@@ -127,6 +127,7 @@ option=$(mark_option "$2") || usage
 shift 2
 pane=''
 owner=''
+exit_status=''
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] && [ -n "$2" ] || usage
   case $1 in
@@ -143,6 +144,21 @@ while [ $# -gt 0 ]; do
       esac
       owner=$2
       ;;
+    --exit-status)
+      [ "$action" = set ] && [ "$option" = @term_notify_pending ] || usage
+      [ -z "$exit_status" ] || usage
+      case $2 in
+        *[!0-9]*) usage ;;
+      esac
+      exit_status=$2
+      # Trim zeroes before arithmetic: shell statuses are decimal, and a
+      # length guard avoids overflow for untrusted arbitrarily long input.
+      while [ "${exit_status#0}" != "$exit_status" ]; do
+        exit_status=${exit_status#0}
+      done
+      exit_status=${exit_status:-0}
+      [ "${#exit_status}" -le 3 ] && [ "$exit_status" -le 255 ] || usage
+      ;;
     *) usage ;;
   esac
   shift 2
@@ -155,7 +171,21 @@ done
 if [ -n "$owner" ]; then
   in_foreground "$owner" "$pane" || exit 0
 fi
-if [ "$action" = set ]; then
+if [ "$option" = @term_notify_pending ]; then
+  # Submit each transition as one tmux command queue, so a focus hook cannot
+  # acknowledge pending between the metadata and mark updates. Ordinary
+  # notifications replace any previous failure before becoming pending.
+  if [ "$action" = clear ]; then
+    tmux set-option -pu -t "$pane" "$option" \; \
+      set-option -pu -t "$pane" @term_notify_exit_status >/dev/null 2>&1 || true
+  elif [ -n "$exit_status" ] && [ "$exit_status" != 0 ]; then
+    tmux set-option -p -t "$pane" @term_notify_exit_status "$exit_status" \; \
+      set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+  else
+    tmux set-option -pu -t "$pane" @term_notify_exit_status \; \
+      set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+  fi
+elif [ "$action" = set ]; then
   tmux set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
 else
   tmux set-option -pu -t "$pane" "$option" >/dev/null 2>&1 || true
