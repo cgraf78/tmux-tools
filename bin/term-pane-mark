@@ -8,7 +8,7 @@
 set -u
 
 usage() {
-  printf 'usage: term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID] [--exit-status CODE]\n' >&2
+  printf 'usage: term-pane-mark set|clear|reset pending|busy [--pane PANE] [--owner PID] [--exit-status CODE] [--token TOKEN]\n' >&2
   exit 64
 }
 
@@ -120,7 +120,7 @@ in_foreground() {
 [ $# -ge 2 ] || usage
 action=$1
 case $action in
-  set | clear) ;;
+  set | clear | reset) ;;
   *) usage ;;
 esac
 option=$(mark_option "$2") || usage
@@ -128,6 +128,7 @@ shift 2
 pane=''
 owner=''
 exit_status=''
+token=''
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] && [ -n "$2" ] || usage
   case $1 in
@@ -159,10 +160,22 @@ while [ $# -gt 0 ]; do
       exit_status=${exit_status:-0}
       [ "${#exit_status}" -le 3 ] && [ "$exit_status" -le 255 ] || usage
       ;;
+    --token)
+      [ "$option" = @term_busy ] && [ -z "$token" ] || usage
+      token=$2
+      case $token in *[!a-zA-Z0-9:._-]*) usage ;; esac
+      [ "${#token}" -le 256 ] || usage
+      ;;
     *) usage ;;
   esac
   shift 2
 done
+if [ "$action" = reset ]; then
+  # Returning foreground shells may discard a mark left by a killed child.
+  # This bypasses only turn matching, never terminal ownership, and must not
+  # acknowledge attention that the user has not visited.
+  [ "$option" = @term_busy ] && [ -n "$owner" ] && [ -z "$token" ] || usage
+fi
 [ -n "$pane" ] || pane=$(own_pane) || pane=''
 [ -n "$pane" ] || exit 0
 
@@ -171,7 +184,10 @@ done
 if [ -n "$owner" ]; then
   in_foreground "$owner" "$pane" || exit 0
 fi
-if [ "$option" = @term_notify_pending ]; then
+if [ "$action" = reset ]; then
+  tmux set-option -pu -t "$pane" @term_busy \; \
+    set-option -pu -t "$pane" @term_busy_token >/dev/null 2>&1 || true
+elif [ "$option" = @term_notify_pending ]; then
   # Submit each transition as one tmux command queue, so a focus hook cannot
   # acknowledge pending between the metadata and mark updates. Ordinary
   # notifications replace any previous failure before becoming pending.
@@ -186,8 +202,19 @@ if [ "$option" = @term_notify_pending ]; then
       set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
   fi
 elif [ "$action" = set ]; then
-  tmux set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+  if [ -n "$token" ]; then
+    tmux set-option -p -t "$pane" @term_busy_token "$token" \; \
+      set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+  else
+    tmux set-option -pu -t "$pane" @term_busy_token \; \
+      set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+  fi
 else
-  tmux set-option -pu -t "$pane" "$option" >/dev/null 2>&1 || true
+  # Events can arrive after a newer turn starts. Compare and clear inside the
+  # same server queue, never via a read followed by a separate option update.
+  # Untagged legacy stops may clear only untagged work; they cannot acknowledge
+  # a newer tokenized producer's state.
+  tmux if-shell -F -t "$pane" "#{==:#{@term_busy_token},$token}" \
+    'set-option -pu @term_busy ; set-option -pu @term_busy_token' '' >/dev/null 2>&1 || true
 fi
 exit 0

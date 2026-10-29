@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Exercise summary semantics without writing to a user's terminal or server.
+set -uo pipefail
+unset BASH_ENV ENV
+ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+tmp=$(
+  umask 077
+  mktemp -d "${TMPDIR:-/tmp}/tps.XXXXXXXX"
+) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+mkdir "$tmp/bin"
+cat >"$tmp/bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STATE_CALLS"
+case " $* " in
+  *' list-panes '*)
+    [ "${STATE_FAIL:-0}" != 1 ] || exit 1
+    printf '%s\n' "${STATE_ROWS:-}"
+    ;;
+  *' list-clients '*)
+    if [ -n "${STATE_SEEN:-}" ] && [ -f "$STATE_SEEN" ]; then
+      printf '%s\n' "${STATE_SECOND_CLIENTS:-${STATE_CLIENTS:-}}"
+    else
+      [ -z "${STATE_SEEN:-}" ] || : >"$STATE_SEEN"
+      printf '%s\n' "${STATE_CLIENTS:-}"
+    fi
+    ;;
+  *) exit 1 ;;
+esac
+MOCK
+chmod +x "$tmp/bin/tmux"
+cat >"$tmp/bin/termnav" <<'MOCK'
+#!/usr/bin/env bash
+exit "${STATE_ROUTE_STATUS:-3}"
+MOCK
+chmod +x "$tmp/bin/termnav"
+export PATH="$tmp/bin:$PATH" STATE_CALLS="$tmp/calls"
+failures=0
+check() {
+  local label=$1 expected=$2 actual=$3
+  if [ "$expected" = "$actual" ]; then
+    printf 'PASS: %s\n' "$label"
+  else
+    printf 'FAIL: %s: expected %q, got %q\n' "$label" "$expected" "$actual" >&2
+    failures=$((failures + 1))
+  fi
+}
+summary() {
+  # shellcheck disable=SC2016 # tmux's literal session identifier.
+  "$ROOT/bin/term-pane-state" --socket /private/test.sock --session '$7' --print
+}
+export STATE_ROWS=$'%1 1 0 0\n%2 0 1 1\n%3 0 1 0'
+check 'working and attention are independent' \
+  '{"v":1,"working":1,"pending":2,"failed":1}' "$(summary 2>/dev/null)"
+export STATE_ROWS=''
+check 'empty session has no state' \
+  '{"v":1,"working":0,"pending":0,"failed":0}' "$(summary 2>/dev/null)"
+now=$(date +%s)
+export STATE_ROWS="%1 0 0 0 $((now + 15)):2:3:1"
+check 'fresh child session contributes independent work and attention' \
+  '{"v":1,"working":2,"pending":3,"failed":1}' "$(summary 2>/dev/null)"
+export STATE_ROWS="%1 1 1 0 $((now - 1)):2:3:1"
+check 'expired child cannot leave ghost attention' \
+  '{"v":1,"working":1,"pending":1,"failed":0}' "$(summary 2>/dev/null)"
+export STATE_ROWS="%1 0 0 0 $((now + 15)):1:0:2"
+check 'malformed child contribution is ignored' \
+  '{"v":1,"working":0,"pending":0,"failed":0}' "$(summary 2>/dev/null)"
+export STATE_ROWS="%1 0 0 0 $((now + 600)):1:1:1"
+check 'unbounded child leases are ignored' \
+  '{"v":1,"working":0,"pending":0,"failed":0}' "$(summary 2>/dev/null)"
+# shellcheck disable=SC2016 # Deliberately malformed machine data, never code.
+export STATE_ROWS='%1 $(touch /tmp/never-evaluate-state) 1 0'
+summary >"$tmp/invalid" 2>/dev/null
+check 'malformed snapshot fails closed' 1 "$?"
+check 'malformed snapshot emits no partial JSON' '' "$(cat "$tmp/invalid")"
+export STATE_ROWS='%1 0 0 1'
+summary >"$tmp/invalid" 2>/dev/null
+check 'failure without pending is rejected' 1 "$?"
+export STATE_ROWS='%1 1 0 0' STATE_FAIL=1
+summary >"$tmp/invalid" 2>/dev/null
+check 'query failure is distinguishable from idle' 1 "$?"
+unset STATE_FAIL
+# shellcheck disable=SC2016 # tmux identifier is literal machine data.
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 /dev/ttys999'
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+  --client-pid 13 --client-created 123 >"$tmp/stale" 2>/dev/null
+check 'reused client identity cannot publish' 1 "$?"
+check 'publisher never renders status text' '' "$(cat "$tmp/stale")"
+# shellcheck disable=SC2016
+export STATE_CLIENTS='12 123 $7 1 xterm-256color /dev/ttys999 /dev/ttys999'
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+  --client-pid 12 --client-created 123 >/dev/null 2>&1
+check 'control clients cannot publish escapes' 1 "$?"
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --session bad --print >/dev/null 2>&1
+check 'session identifiers are validated' 64 "$?"
+mkdir "$tmp/no-route"
+ln -s "$tmp/bin/tmux" "$tmp/no-route/tmux"
+export STATE_ROWS='%1 1 0 0'
+# shellcheck disable=SC2016 # Literal tmux session identifier.
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/null /dev/null'
+PATH="$tmp/no-route:/usr/bin:/bin" "$ROOT/bin/term-pane-state" --socket /private/test.sock \
+  --client /dev/null --client-pid 12 --client-created 123 >/dev/null 2>&1
+check 'missing hierarchy owner fails closed instead of guessing tty ownership' 1 "$?"
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$ROOT/test/term-pane-state-pty.py" "$ROOT/bin/term-pane-state" "$tmp" || failures=$((failures + 1))
+else
+  printf 'SKIP: Python unavailable for terminal byte tests\n'
+fi
+exit "$((failures != 0))"

@@ -30,13 +30,16 @@ tmux-clip-paste \- paste popup-selected text into the current tmux pane
 .SH DESCRIPTION
 .B tmux-clip-paste
 loads a handoff file into the tmux paste buffer, pastes it into the current
-pane, and removes the file. It is useful when a tmux popup or picker must write
-its selected text before tmux can paste after the popup closes.
+pane, and removes the file. With an explicit pane target it can deliver text
+behind a picker popup before that popup closes. It also supports serialized
+two-phase handoffs.
 .PP
 The default path is isolated by tmux server and pane inside a private per-user
-runtime directory. Producers should pipe selected text to
+runtime directory. Serialized producers can supply complete selected text to
 .B --publish
 so the complete payload replaces the handoff file atomically.
+Concurrent operations should each prepare a complete invocation-unique private
+file and pass it with --file; two simultaneous producers must not share a slot.
 Consumers load the payload into a unique named tmux buffer and explicitly
 paste it into the resolved pane with tmux's delete-after-paste operation.
 .SH OPTIONS
@@ -70,8 +73,10 @@ failure, the claimed payload always remains at the private path named in the
 diagnostic. A best-effort hard link also restores the public path when it is
 still vacant; that convenience never removes the private claim or overwrites a
 newer payload. Only non-symlink regular files are accepted as handoffs. An
-interrupted client checks whether its unique buffer still exists to distinguish
-a committed paste from a retryable failure. After a committed paste, local
+interrupted or failed paste retains recovery even when its buffer disappeared:
+buffer absence does not prove delivery. The diagnostic warns that the paste
+may already have reached the pane; do not retry automatically. After a
+confirmed successful paste, local
 cleanup failures are reported as warnings without changing the successful
 status.
 .TP
@@ -83,8 +88,12 @@ Show usage.
 Override the default handoff file path.
 .SH EXAMPLES
 .nf
-bind P display-popup -E 'your-picker | tmux-clip-paste --pane "#{pane_id}" --publish' \\; run-shell 'tmux-clip-paste --pane "#{pane_id}"'
+bind P display-popup -E 'clip pick --paste-pane #{pane_id}'
 .fi
+The optional dotfiles clip command owns successful selection and the private
+per-operation handoff. Without it, prepare a complete private file and call
+tmux-clip-paste with --file and --pane. Never unconditionally consume a shared
+handoff after a cancelled picker.
 .SH EXIT STATUS
 .TP
 .B 0

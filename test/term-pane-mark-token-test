@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# Real command-queue guards must reject stale lifecycle events atomically.
+set -uo pipefail
+unset BASH_ENV ENV
+ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+command -v tmux >/dev/null 2>&1 || {
+  printf 'SKIP: tmux unavailable\n'
+  exit 0
+}
+# Termux has no /tmp; honor its private TMPDIR. macOS commonly supplies a long
+# TMPDIR, so use the short system root only when it actually exists.
+tmpbase=${TMPDIR:-/tmp}
+if [ "${#tmpbase}" -gt 60 ] && [ -d /tmp ]; then
+  tmpbase=/tmp
+fi
+tmp=$(
+  umask 077
+  mktemp -d "$tmpbase/tmt.XXXXXXXX"
+) || exit 1
+socket="$tmp/t"
+# shellcheck disable=SC2329 # Called by the EXIT trap.
+cleanup() {
+  tmux -S "$socket" kill-server >/dev/null 2>&1 || true
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
+pane=$(tmux -S "$socket" -f /dev/null new-session -d -P -F '#{pane_id}' 'exec sleep 600') || exit 1
+export TMUX="$socket,0,0" TERM_PROGRAM=tmux TMUX_PANE="$pane"
+mark() { "$ROOT/bin/term-pane-mark" "$@" --pane "$pane"; }
+value() { tmux -S "$socket" show-options -pqv -t "$pane" @term_busy; }
+failures=0
+check() {
+  if [ "$2" = "$3" ]; then
+    printf 'PASS: %s\n' "$1"
+  else
+    printf 'FAIL: %s: expected %q, got %q\n' "$1" "$2" "$3" >&2
+    failures=$((failures + 1))
+  fi
+}
+mark set busy --token session:turn-a 2>/dev/null
+check 'tokenized turn starts working' 1 "$(value)"
+mark clear busy --token session:turn-b 2>/dev/null
+check 'other turn cannot clear working' 1 "$(value)"
+mark set busy --token session:turn-b 2>/dev/null
+mark clear busy --token session:turn-a 2>/dev/null
+check 'late stop cannot clear newer turn' 1 "$(value)"
+mark clear busy 2>/dev/null
+check 'legacy stop cannot clear tokenized work' 1 "$(value)"
+mark clear busy --token session:turn-b 2>/dev/null
+check 'matching stop clears work' '' "$(value)"
+mark set busy --token 'bad,#{pane_id}' >/dev/null 2>&1
+check 'tmux-format tokens are rejected' 64 "$?"
+mark set pending --token session:turn-a >/dev/null 2>&1
+check 'token contract belongs only to busy' 64 "$?"
+mark set busy --token crashed:turn
+mark reset busy --owner "$$" >/dev/null 2>&1
+check 'unrelated reset remains best effort' 0 "$?"
+check 'unrelated terminal owner cannot reset work' 1 "$(value)"
+foreground=$(tmux -S "$socket" display-message -p -t "$pane" '#{pane_pid}')
+mark reset busy --owner "$foreground" >/dev/null 2>&1
+check 'foreground return resets stale work' '' "$(value)"
+check 'reset removes the stale turn token too' '' \
+  "$(tmux -S "$socket" show-options -pqv -t "$pane" @term_busy_token)"
+mark reset busy >/dev/null 2>&1
+check 'reset requires explicit foreground ownership proof' 64 "$?"
+mark reset pending --owner "$foreground" >/dev/null 2>&1
+check 'reset cannot acknowledge pending attention' 64 "$?"
+mark reset busy --owner "$foreground" --token old:turn >/dev/null 2>&1
+check 'reset cannot carry an unrelated turn token' 64 "$?"
+
+# Cleanup must compare the snapshot's generation inside tmux, not delete a
+# lease renewed by another publisher between the query and the cleanup queue.
+old="$(($(date +%s) - 1)):1:1:0"
+renewed="$(($(date +%s) + 15)):2:2:1"
+tmux -S "$socket" set-option -p -t "$pane" @termnav_child_attention "$old"
+"$ROOT/bin/term-pane-state" --socket "$socket" --session "\$0" --print >/dev/null
+check 'expired child option is removed from the display source' '' \
+  "$(tmux -S "$socket" show-options -pqv -t "$pane" @termnav_child_attention)"
+mkdir "$tmp/bin"
+cat >"$tmp/bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+"$STATE_REAL_TMUX" "$@" || exit $?
+case " $* " in
+  *' list-panes '*)
+    "$STATE_REAL_TMUX" -S "$STATE_SOCKET" set-option -p -t "$STATE_PANE" \
+      @termnav_child_attention "$STATE_RENEW"
+    ;;
+esac
+MOCK
+chmod +x "$tmp/bin/tmux"
+tmux -S "$socket" set-option -p -t "$pane" @termnav_child_attention "$old"
+STATE_REAL_TMUX=$(command -v tmux) STATE_SOCKET="$socket" STATE_PANE="$pane" \
+STATE_RENEW="$renewed" PATH="$tmp/bin:$PATH" \
+  "$ROOT/bin/term-pane-state" --socket "$socket" --session "\$0" --print >/dev/null
+check 'cleanup cannot erase a concurrently renewed child lease' "$renewed" \
+  "$(tmux -S "$socket" show-options -pqv -t "$pane" @termnav_child_attention)"
+exit "$((failures != 0))"

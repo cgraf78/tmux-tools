@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Summarize one attached tmux session and publish it to that exact client.
+# This is a short-lived tmux #() job: tmux serializes identical jobs and its
+# status interval reconciles missed transitions without per-pane processes.
+set -uo pipefail
+
+usage() {
+  printf '%s\n' 'usage: term-pane-state --socket SOCKET (--session ID --print | --client NAME --client-pid PID --client-created EPOCH)' >&2
+  exit 64
+}
+
+# tmux identifiers are machine data. Restrict them before putting them into
+# formats or queries; malformed state must never turn into shell evaluation.
+valid_number() {
+  case $1 in '' | *[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 20 ]
+}
+
+valid_session() {
+  case $1 in \$*) valid_number "${1#\$}" ;; *) return 1 ;; esac
+}
+
+valid_pane() {
+  case $1 in %*) valid_number "${1#%}" ;; *) return 1 ;; esac
+}
+
+# Use explicit -S even when called from a status job: inherited TMUX can
+# describe another server, especially for SSH and same-host nested clients.
+query() {
+  tmux -S "$socket" "$@" 2>/dev/null
+}
+
+# Resolve one live client, rejecting control mode and identity reuse. The tty
+# comes only from the server, never from an arbitrary path passed by a hook.
+resolve_client() {
+  local rows name pid created tty scope term control extra
+  # Some non-UTF8 tmux job locales rewrite literal tabs as underscores. Keep
+  # fixed machine fields first and the terminal client name last, like tmux's
+  # other exact-client adapters; no display strings determine behavior.
+  rows=$(query list-clients -F '#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{client_name}') || return 1
+  while read -r pid created scope control term tty name extra; do
+    [ "$name" = "$client" ] && [ "$pid" = "$client_pid" ] &&
+      [ "$created" = "$client_created" ] && [ "$control" = 0 ] &&
+      [ -z "$extra" ] || continue
+    valid_session "$scope" || return 1
+    case $tty in /dev/*) ;; *) return 1 ;; esac
+    client_tty=$tty
+    client_term=$term
+    session=$scope
+    return 0
+  done <<<"$rows"
+  return 1
+}
+
+# A child publisher renews a bounded lease using the parent's wall clock.
+# Invalid or expired children contribute nothing, without hiding local work.
+child_counts() {
+  local encoded=$1 now=$2 expiry work waiting failed extra number
+  IFS=: read -r expiry work waiting failed extra <<<"$encoded"
+  [ -z "$extra" ] && valid_number "$expiry" && [ "${#expiry}" -le 12 ] || return 1
+  for number in "$work" "$waiting" "$failed"; do
+    valid_number "$number" && [ "${#number}" -le 6 ] || return 1
+  done
+  expiry=$((10#$expiry)) work=$((10#$work)) waiting=$((10#$waiting)) failed=$((10#$failed))
+  [ "$expiry" -gt "$now" ] && [ "$expiry" -le "$((now + 30))" ] &&
+    [ "$work" -le 100000 ] && [ "$waiting" -le 100000 ] && [ "$failed" -le "$waiting" ] || return 1
+  working_count=$((working_count + work))
+  pending_count=$((pending_count + waiting))
+  failed_count=$((failed_count + failed))
+}
+
+# Only wire-shaped values are embedded in a format comparison. Arbitrary
+# malformed text is ignored, never expanded as tmux format syntax. The
+# comparison and deletion share one server queue so a renewed lease survives
+# cleanup based on an older snapshot.
+clear_child() {
+  local pane=$1 encoded=$2
+  case $encoded in '' | *[!0-9:]*) return 0 ;; esac
+  [ "${#encoded}" -le 64 ] || return 0
+  query if-shell -F -t "$pane" "#{==:#{@termnav_child_attention},$encoded}" \
+    'set-option -pu @termnav_child_attention' '' >/dev/null || true
+}
+
+# The embedding config supplies structured predicates, shared with its tmux
+# display and focus policy. Do not scrape colored @window_marker display text.
+snapshot() {
+  local rows pane busy waiting failed child extra now
+  working_count=0 pending_count=0 failed_count=0
+  rows=$(query list-panes -s -t "$session" -F '#{pane_id} #{?#{E:@pane_busy},1,0} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_failed},1,0} #{@termnav_child_attention}') || return 1
+  now=$(date +%s) || return 1
+  valid_number "$now" || return 1
+  while read -r pane busy waiting failed child extra; do
+    [ -n "$pane$busy$waiting$failed$extra" ] || continue
+    valid_pane "$pane" || return 1
+    case "$busy $waiting $failed" in
+      '0 0 0' | '1 0 0' | '0 1 0' | '1 1 0' | '0 1 1' | '1 1 1') ;;
+      *) return 1 ;;
+    esac
+    working_count=$((working_count + busy))
+    pending_count=$((pending_count + waiting))
+    failed_count=$((failed_count + failed))
+    if [ -n "$child" ] && [ -z "$extra" ]; then
+      child_counts "$child" "$now" || clear_child "$pane" "$child"
+    fi
+  done <<<"$rows"
+  [ "$working_count" -le 100000 ] && [ "$pending_count" -le 100000 ] &&
+    [ "$failed_count" -le 100000 ] || return 1
+  printf -v payload '{"v":1,"working":%s,"pending":%s,"failed":%s}' \
+    "$working_count" "$pending_count" "$failed_count"
+}
+
+socket='' session='' client='' client_pid='' client_created='' print_only=0
+while [ "$#" -gt 0 ]; do
+  case $1 in
+    --print)
+      [ "$print_only" = 0 ] || usage
+      print_only=1
+      shift
+      ;;
+    --socket | --session | --client | --client-pid | --client-created)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || usage
+      case $1 in
+        --socket)
+          [ -z "$socket" ] || usage
+          socket=$2
+          ;;
+        --session)
+          [ -z "$session" ] || usage
+          session=$2
+          ;;
+        --client)
+          [ -z "$client" ] || usage
+          client=$2
+          ;;
+        --client-pid)
+          [ -z "$client_pid" ] || usage
+          client_pid=$2
+          ;;
+        --client-created)
+          [ -z "$client_created" ] || usage
+          client_created=$2
+          ;;
+      esac
+      shift 2
+      ;;
+    *) usage ;;
+  esac
+done
+case $socket in /*) ;; *) usage ;; esac
+if [ "$print_only" = 1 ]; then
+  if [ -n "$client$client_pid$client_created" ] || ! valid_session "$session"; then usage; fi
+  snapshot || exit 1
+  printf '%s\n' "$payload"
+  exit 0
+fi
+if [ -z "$client" ] || [ -n "$session" ] || ! valid_number "$client_pid" ||
+  ! valid_number "$client_created"; then usage; fi
+[ "$client_pid" != 0 ] || usage
+client_tty='' client_term=''
+resolve_client || exit 1
+snapshot || exit 1
+
+# Hierarchical transport owns local/SSH ancestry, which cannot be inferred
+# from a terminal name or escaped from an invisible originating pane. Only
+# its explicit 'no parent' result permits direct terminal publication.
+# Missing ownership machinery must not turn a still-attached but suspended
+# client's tty into permission to write over the shell that resumed there.
+command -v termnav >/dev/null 2>&1 || exit 1
+routed=0
+termnav tmux attention --tmux-socket "$socket" --client-name "$client" \
+  --client-pid "$client_pid" --client-created "$client_created" \
+  --working "$working_count" --pending "$pending_count" --failed "$failed_count" >/dev/null 2>&1 || routed=$?
+case $routed in 0) exit 0 ;; 3) ;; *) exit 1 ;; esac
+
+# Opening first and revalidating afterward avoids writing to a subsequently
+# opened tty belonging to a replacement client. Retain the descriptor through
+# the write, and reject both regular files and symlinks outside /dev.
+[ -c "$client_tty" ] || exit 1
+original_tty=$client_tty original_session=$session original_term=$client_term
+exec 3>>"$client_tty" || exit 1
+resolve_client && [ "$client_tty" = "$original_tty" ] &&
+  [ "$session" = "$original_session" ] && [ "$client_term" = "$original_term" ] || exit 1
+
+# A changing heartbeat lets the UI expire stale state after a crash, detach,
+# or SSH loss. Receivers measure age locally, avoiding cross-host clock skew.
+heartbeat=$(date +%s) || exit 1
+valid_number "$heartbeat" || exit 1
+payload="${payload%\}},\"heartbeat\":$heartbeat}"
+encoded=$(printf '%s' "$payload" | base64 | tr -d '\r\n') || exit 1
+case $client_term in
+  tmux* | screen*)
+    printf '\033Ptmux;\033\033]1337;SetUserVar=TERM_PANE_STATE=%s\a\033\134' "$encoded" >&3
+    ;;
+  *) printf '\033]1337;SetUserVar=TERM_PANE_STATE=%s\a' "$encoded" >&3 ;;
+esac

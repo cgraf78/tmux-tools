@@ -1213,6 +1213,27 @@ done
 _assert_eq "clip publish leaves no transaction residue after post-mv TERM" \
   "" "$publish_commit_signal_residue"
 
+# A failed tool can remove its source without ever publishing it. Source
+# disappearance is not a commit witness: the final destination must identify
+# the private inode before an ambiguous nonzero mv can be called successful.
+publish_lost_source_file="$clip_dir/lost-source-selection"
+publish_lost_source_bin=$(_tmpdir)
+printf 'previous payload\n' >"$publish_lost_source_file"
+cat >"$publish_lost_source_bin/mv" <<'MOCK'
+#!/usr/bin/env bash
+[[ "$1" != -- ]] || shift
+rm -f -- "$1"
+exit 1
+MOCK
+chmod +x "$publish_lost_source_bin/mv"
+printf 'replacement\n' | PATH="$publish_lost_source_bin:$PATH" \
+  tmux-clip-paste --file "$publish_lost_source_file" --publish >/dev/null 2>&1
+publish_lost_source_rc=$?
+_assert_eq "clip publish rejects missing source without a matching destination inode" \
+  "1" "$publish_lost_source_rc"
+_assert_eq "clip publish preserves prior bytes after source loss and failed mv" \
+  "previous payload" "$(cat "$publish_lost_source_file")"
+
 concurrent_publish_file="$clip_dir/concurrent-publish-selection"
 concurrent_publish_ready="$clip_dir/concurrent-publish.ready"
 concurrent_publish_continue="$clip_dir/concurrent-publish.continue"
@@ -1376,11 +1397,13 @@ env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
   TMUX_TOOLS_TEST_COMMIT_PASTE=1 \
   tmux-clip-paste --file "$paste_commit_file" >"$paste_commit_output" 2>&1
 paste_commit_rc=$?
-_assert_eq "clip paste reports success after an ambiguous committed paste" \
-  "0" "$paste_commit_rc"
-paste_commit_claims=$(printf '%s\n' "$clip_dir"/.paste-commit-selection.consume.*)
-_assert_eq "clip paste removes its claim after an ambiguous committed paste" \
-  "$clip_dir/.paste-commit-selection.consume.*" "$paste_commit_claims"
+_assert_eq "clip paste reports ambiguous delivery as an operational failure" \
+  "1" "$paste_commit_rc"
+paste_commit_claim=$(printf '%s\n' "$clip_dir"/.paste-commit-selection.consume.*/payload)
+_assert_eq "a missing buffer never proves delivery or discards recovery" \
+  "committed paste payload" "$(cat "$paste_commit_claim")"
+_assert_contains "ambiguous delivery warns against blind retries" \
+  'do not retry automatically' "$(cat "$paste_commit_output")"
 
 paste_signal_file="$clip_dir/paste-signal-selection"
 printf 'signaled committed paste payload\n' >"$paste_signal_file"
@@ -1389,11 +1412,11 @@ env -u TMUX_PANE PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_TMUX_LOG="$clip_log" \
   TMUX_TOOLS_TEST_COMMIT_PASTE=1 TMUX_TOOLS_TEST_SIGNAL_PASTE=1 \
   tmux-clip-paste --file "$paste_signal_file" >/dev/null 2>&1
 paste_signal_rc=$?
-_assert_eq "clip paste reports success when TERM follows a committed paste" \
-  "0" "$paste_signal_rc"
-paste_signal_claims=$(printf '%s\n' "$clip_dir"/.paste-signal-selection.consume.*)
-_assert_eq "clip paste removes its claim after post-commit TERM" \
-  "$clip_dir/.paste-signal-selection.consume.*" "$paste_signal_claims"
+_assert_eq "clip paste preserves TERM when delivery is unconfirmed" \
+  "143" "$paste_signal_rc"
+paste_signal_claim=$(printf '%s\n' "$clip_dir"/.paste-signal-selection.consume.*/payload)
+_assert_eq "clip paste retains recovery after ambiguous post-paste TERM" \
+  "signaled committed paste payload" "$(cat "$paste_signal_claim")"
 
 paste_cleanup_file="$clip_dir/paste-cleanup-selection"
 paste_cleanup_output="$clip_dir/paste-cleanup.output"

@@ -1,0 +1,42 @@
+.TH TERM-PANE-STATE 1
+.SH NAME
+term-pane-state \- publish independent tmux work and attention state
+.SH SYNOPSIS
+.B term-pane-state --socket SOCKET --session ID --print
+.br
+.B term-pane-state --socket SOCKET --client NAME --client-pid PID --client-created EPOCH
+.SH DESCRIPTION
+Summarizes the panes in exactly one session. The embedding tmux configuration
+defines the structured predicates @pane_busy, @pane_pending and @pane_failed;
+the same predicates should drive its status display. Work and attention are
+independent: pending or failed work does not hide another running pane.
+.PP
+The print form emits a versioned JSON object with integer v, working, pending,
+and failed fields. A failed query or invalid snapshot emits nothing and exits 1.
+.PP
+The client form resolves an exact live non-control client on the named socket,
+summarizes its session, opens its character tty and revalidates the client before
+publishing the TERM_PANE_STATE WezTerm user variable. Its payload also carries
+a changing heartbeat integer. The UI should expire state based on local time
+since receipt, not compare clocks across hosts. No status text is printed.
+.PP
+Use this short-lived helper in a client-specific tmux status #() job. tmux
+serializes identical jobs; status-interval supplies bounded reconciliation
+without a resident watcher or a process per pane. A query is not acknowledgment:
+the existing pane focus policy remains authoritative.
+.PP
+Publishing requires Termnav's tmux attention route to verify foreground
+ownership and compose state through immediate local or SSH parents. Only its
+explicit no-parent result permits direct publication. A missing or failed
+transport emits nothing; the print-only summary remains available standalone.
+.PP
+Snapshots are advisory display state. A delayed snapshot can briefly replace
+a newer visual state; the next successful poll repairs it. Child leases and
+the GUI must expire state when updates stop. No lifecycle operation is driven
+by these badges.
+.SH EXIT STATUS
+0 indicates success; 1 indicates missing, invalid or changed runtime state;
+64 indicates invalid arguments.
+.SH SEE ALSO
+.BR term-pane-mark (1),
+.BR tmux (1)

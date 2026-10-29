@@ -2,6 +2,7 @@
 # `fixture` records are discovered but intentionally excluded from ShellCheck.
 program	bin/term-notify-sound
 program	bin/term-pane-mark
+program	bin/term-pane-state
 program	bin/tmux-clip-paste
 program	bin/tmux-continuum-default-server
 program	bin/tmux-continuum-save-gate
@@ -15,3 +16,5 @@ program	test/run
 program	test/tmux-continuum-test
 program	test/tmux-tools-harness-test
 program	test/tmux-tools-test
+program	test/term-pane-state-test
+program	test/term-pane-mark-token-test

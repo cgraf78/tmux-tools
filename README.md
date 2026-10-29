@@ -14,11 +14,12 @@ Small helpers for tmux setups that outgrow the defaults:
   saved or restored. This pins save and restore to the default server,
   whatever order the servers start in, and makes the other servers cheap
   no-ops.
-- **`tmux-clip-paste`**: a `display-popup` picker cannot paste into the pane
-  behind it. This hands the selection off and pastes it once the popup closes.
+- **`tmux-clip-paste`**: claim a complete private handoff and paste it into an
+  explicitly selected pane, including the pane behind a picker popup.
 - **`tmux-copy-last-output [N]`**: copy the last N commands and their output
-  from the current pane to your clipboard, through `pbcopy`, `xclip`, or
-  OSC 52 (which can reach your local clipboard over SSH). It is like "copy last
+  from the current pane to your clipboard. `clip` owns transport and history
+  when installed; explicit client targeting makes OSC 52 reach the initiating
+  workstation over SSH. It is like "copy last
   output" in Warp or iTerm2, but inside tmux. **It needs a specific two-line
   prompt; see [Prompt format](#prompt-format).**
 - **`term-notify-sound`**: ring the terminal bell. Call it when a job or agent
@@ -27,6 +28,8 @@ Small helpers for tmux setups that outgrow the defaults:
 - **`term-pane-mark`**: set or clear a `busy` or `pending` mark on your tmux
   pane, for example while a coding agent works on a prompt, so your tmux
   config can show it.
+- **`term-pane-state`**: summarize work and attention independently and publish
+  the attached session's state to its exact containing terminal client.
 
 ## Requirements
 
@@ -35,9 +38,9 @@ Small helpers for tmux setups that outgrow the defaults:
 - tmux-continuum and tmux-resurrect for `tmux-continuum-default-server`
   (found under `$TMUX_PLUGIN_MANAGER_PATH`, which TPM sets, else
   `$HOME/.local/share/tmux-plugins`)
-- For `tmux-copy-last-output`'s clipboard copy: `pbcopy` when it is on
-  `PATH`, else `xclip` when `DISPLAY` is set, else a terminal that supports
-  OSC 52 attached to the tmux client
+- For `tmux-copy-last-output`'s clipboard copy: `clip` when installed; otherwise
+  `pbcopy`, `wl-copy` with `WAYLAND_DISPLAY`, `xclip` with `DISPLAY`, or an
+  explicitly selected tmux client whose terminal supports OSC 52.
 
 ## Install
 
@@ -112,15 +115,20 @@ save is due. See `man tmux-continuum-default-server` and
 ### `tmux-clip-paste`
 
 ```tmux
-bind P display-popup -E 'your-picker | tmux-clip-paste --pane "#{pane_id}" --publish' \; run-shell 'tmux-clip-paste --pane "#{pane_id}"'
+bind P display-popup -E 'clip pick --paste-pane #{pane_id}'
 ```
 
-The picker inside the popup pipes its selection to `--publish`. Once the popup
-closes, the chained `run-shell` pastes it into the pane that opened the popup.
+With the optional dotfiles `clip` command installed, this picker creates a
+private handoff per operation and invokes `tmux-clip-paste --file ... --pane ...`
+only after a successful selection. Cancelling never pastes an older recovery
+payload, and concurrent pickers in one pane cannot exchange selections. The
+explicit target allows delivery to the underlying pane before the popup closes.
+Standalone producers can likewise prepare a complete private file and pass it
+with `--file` and `--pane`.
 
 ```sh
-your-picker | tmux-clip-paste --publish   # publish a selection
-tmux-clip-paste                           # paste it into the current pane
+tmux-clip-paste --publish < complete.payload # serialized two-phase publication
+tmux-clip-paste                           # consume that published selection
 tmux-clip-paste --pane %3                 # paste into a specific pane
 tmux-clip-paste --path                    # print the handoff file path
 tmux-clip-paste --file /tmp/selection     # use a custom handoff file
@@ -132,26 +140,31 @@ How it works:
   per-user runtime directory. Set `TMUX_TOOLS_CLIP_PASTE_FILE` or pass
   `--file` to override it.
 - `--publish` replaces the handoff file atomically. Use it instead of
-  redirecting to the path printed by `--path`.
+  redirecting to the path printed by `--path`. This explicit two-phase API
+  shares one pending slot per server/pane; concurrent operations should use
+  invocation-unique private files instead.
 - Each paste claims one payload and uses its own named tmux buffer, so
   concurrent pastes cannot overwrite each other. On failure the payload is
-  kept and the diagnostic says where.
+  kept and the diagnostic says where. An unsuccessful paste command may have
+  delivered its bytes before failing; do not retry automatically. A disappeared
+  buffer alone cannot prove delivery.
 
 `man tmux-clip-paste` covers the claim, recovery, and exit-status details.
 
 ### `tmux-copy-last-output`
 
-Copy the last command and its output with `prefix y`, or the last N with
-`prefix Y`:
+Copy the last command and its output with `prefix y`:
 
 ```tmux
-bind y run-shell 'TMUX_PANE=#{pane_id} tmux-copy-last-output'
-bind Y command-prompt -p 'Copy last N commands:' 'run-shell "TMUX_PANE=#{pane_id} tmux-copy-last-output %1"'
+bind y run-shell 'tmux-copy-last-output --pane #{pane_id} --client #{q:client_name}'
 ```
 
-`tmux-copy-last-output [--print] [N]` copies the last N command blocks (the
+`tmux-copy-last-output [--print] [--pane PANE] [--client CLIENT] [N]` copies the last N command blocks (the
 default is 1) from the last 10,000 lines of the pane. `--print` writes them to
 standard output instead, so a binding can route them elsewhere.
+Clipboard targeting validates the exact client name/TTY instead of choosing
+the most recently active attachment. It does not pin a process generation
+across detach/reconnect and reuse of the same terminal name.
 
 #### Prompt format
 
@@ -211,6 +224,32 @@ set-hook -g after-select-window[100] 'set-option -pu @term_notify_pending'
 ```
 
 `man term-pane-mark` explains how it decides which pane is the caller's.
+
+Busy producers can add `--token SESSION:TURN` to both set and clear. Tokens
+keep a delayed Stop from clearing a newer turn, while `--owner PID` still
+requires the producer to own the foreground terminal. Untagged legacy stops
+do not clear tagged work. A shared background backend has no such terminal;
+it must supply a verified frontend association instead of guessing a pane.
+
+### `term-pane-state`
+
+`term-pane-state --socket SOCKET --session ID --print` emits a versioned JSON
+snapshot with independent `working`, `pending`, and `failed` counts. The
+embedding config supplies the structured `@pane_busy`, `@pane_pending`, and
+`@pane_failed` predicates that also drive its local display. Fresh leased
+child summaries from Termnav contribute to the same snapshot; expired or
+malformed children cannot leave a ghost badge.
+
+For client-specific status jobs, use `--client NAME --client-pid PID
+--client-created EPOCH` instead of `--session ID --print`. The helper validates
+that exact non-control client and publishes the `TERM_PANE_STATE` user variable
+through Termnav's hierarchical attention route, or directly to a revalidated
+terminal when Termnav explicitly reports no parent. The payload's heartbeat
+lets a GUI expire stale state after detach or transport failure. No display
+text is written. Publication requires Termnav's foreground ownership checks;
+without it the helper emits nothing. Display snapshots can briefly arrive
+out of order and reconcile on the next successful poll; they never control
+lifecycle operations. See `man term-pane-state` for activation and lifetime details.
 
 The WezTerm tab helpers `wezterm-switch-tab` and `wezterm-move-tab` moved to
 [termnav](https://github.com/cgraf78/termnav).

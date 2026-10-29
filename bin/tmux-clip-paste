@@ -212,13 +212,20 @@ _publish() {
   trap '_record_publish_signal 130' INT
   trap '_record_publish_signal 143' TERM
   mv -- "$tmpfile" "$file" || mv_status=$?
-  local redirected_owned=0
+  local redirected_owned=0 committed=0
   if _file_identity "$redirected" && [[ "$REPLY" == "$tmp_identity" ]]; then
     redirected_owned=1
   fi
-  if ((redirected_owned == 0)) && {
-    ((mv_status == 0)) || [[ ! -e "$tmpfile" && ! -L "$tmpfile" ]]
-  }; then
+  if ((mv_status == 0)); then
+    # A successful rename is a commit even if a later publisher has already
+    # replaced it. A nonzero reply is ambiguous: a vanished source alone does
+    # not prove it reached the destination, so require the exact private inode.
+    committed=1
+  elif [[ ! -e "$tmpfile" && ! -L "$tmpfile" && -f "$file" && ! -L "$file" ]] &&
+    _file_identity "$file" && [[ "$REPLY" == "$tmp_identity" ]]; then
+    committed=1
+  fi
+  if ((redirected_owned == 0 && committed)); then
     tmpfile=""
     redirected=""
     exec 3>&- 2>/dev/null || :
@@ -460,40 +467,20 @@ tmux load-buffer -b "$buffer_name" "$claim_file" ||
 trap '_record_paste_signal 129' HUP
 trap '_record_paste_signal 130' INT
 trap '_record_paste_signal 143' TERM
-# `paste-buffer -d` removes this invocation's unique buffer after tmux sends it.
-# A signal or transport error can make the command return nonzero after that
-# side effect, so a successful query finding the buffer absent proves tmux
-# committed the paste. If the buffer remains or its state cannot be queried, the
-# EXIT path retains the recovery copy. That preserves the payload, but a caller
-# may need to resolve whether an unobservable paste reached the pane before a
-# retry.
+# A nonzero reply cannot prove delivery, even if the named buffer disappeared:
+# another client can delete it or the server can restart before the paste.
+# Retain recovery for every ambiguous outcome; warn that delivery may already
+# have happened so callers never blindly retry and duplicate the selection.
 paste_status=0
 tmux paste-buffer -b "$buffer_name" -p -t "$target_pane" -d || paste_status=$?
-paste_committed=0
 if ((paste_status == 0)); then
-  paste_committed=1
-else
-  buffer_listing=""
-  buffer_query_status=0
-  buffer_listing=$(tmux list-buffers -F '#{buffer_name}') || buffer_query_status=$?
-  if ((buffer_query_status == 0)); then
-    buffer_present=0
-    while IFS= read -r listed_buffer; do
-      if [[ "$listed_buffer" == "$buffer_name" ]]; then
-        buffer_present=1
-        break
-      fi
-    done <<<"$buffer_listing"
-    ((buffer_present)) || paste_committed=1
-  fi
-fi
-if ((paste_committed)); then
   buffer_name=""
   trap '' HUP INT TERM
   _discard_committed_claim
   trap - EXIT
   exit 0
 fi
+_warn "paste delivery is unconfirmed and may already have reached the pane; do not retry automatically"
 if ((pending_paste_signal)); then
   exit "$pending_paste_signal"
 fi
