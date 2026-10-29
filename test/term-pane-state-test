@@ -31,10 +31,11 @@ MOCK
 chmod +x "$tmp/bin/tmux"
 cat >"$tmp/bin/termnav" <<'MOCK'
 #!/usr/bin/env bash
+printf '%s\n' "$@" >"$STATE_NATIVE_ARGS"
 exit "${STATE_ROUTE_STATUS:-3}"
 MOCK
 chmod +x "$tmp/bin/termnav"
-export PATH="$tmp/bin:$PATH" STATE_CALLS="$tmp/calls"
+export PATH="$tmp/bin:$PATH" STATE_CALLS="$tmp/calls" STATE_NATIVE_ARGS="$tmp/native-args"
 failures=0
 check() {
   local label=$1 expected=$2 actual=$3
@@ -102,8 +103,8 @@ PATH="$tmp/no-route:/usr/bin:/bin" "$ROOT/bin/term-pane-state" --socket /private
   --client /dev/null --client-pid 12 --client-created 123 >/dev/null 2>&1
 check 'missing hierarchy owner fails closed instead of guessing tty ownership' 1 "$?"
 if command -v python3 >/dev/null 2>&1; then
-  python3 "$ROOT/test/term-pane-state-pty.py" "$ROOT/bin/term-pane-state" "$tmp" || failures=$((failures + 1))
+  python3 "$ROOT/test/term-pane-state-delegate.py" "$ROOT/bin/term-pane-state" "$tmp" || failures=$((failures + 1))
 else
-  printf 'SKIP: Python unavailable for terminal byte tests\n'
+  printf 'SKIP: Python unavailable for native delegation tests\n'
 fi
 exit "$((failures != 0))"
