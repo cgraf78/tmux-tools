@@ -7,9 +7,15 @@ command -v tmux >/dev/null 2>&1 || {
   printf 'SKIP: tmux unavailable\n'
   exit 0
 }
+# Termux has no /tmp; honor its private TMPDIR. macOS commonly supplies a long
+# TMPDIR, so use the short system root only when it actually exists.
+tmpbase=${TMPDIR:-/tmp}
+if [ "${#tmpbase}" -gt 60 ] && [ -d /tmp ]; then
+  tmpbase=/tmp
+fi
 tmp=$(
   umask 077
-  mktemp -d /tmp/tmt.XXXXXXXX
+  mktemp -d "$tmpbase/tmt.XXXXXXXX"
 ) || exit 1
 socket="$tmp/t"
 # shellcheck disable=SC2329 # Called by the EXIT trap.
