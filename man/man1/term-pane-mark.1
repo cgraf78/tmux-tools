@@ -3,7 +3,7 @@
 term-pane-mark \- set or clear a state mark on the caller's tmux pane
 .SH SYNOPSIS
 .B term-pane-mark
-.BR set | clear
+.BR set | clear | reset
 .BR pending | busy
 .RB [ \-\-pane
 .IR pane ]
@@ -11,6 +11,8 @@ term-pane-mark \- set or clear a state mark on the caller's tmux pane
 .IR pid ]
 .RB [ \-\-exit-status
 .IR code ]
+.RB [ \-\-token
+.IR token ]
 .SH DESCRIPTION
 .B term-pane-mark
 lets a program running inside a tmux pane publish its state as a pane user
@@ -106,6 +108,20 @@ or
 .BR clear .
 The consuming tmux configuration decides how failures appear and when to
 clear the pending mark and its status, normally when the pane is visited.
+.TP
+.BI \-\-token " token"
+Identify one exact busy lifecycle generation, normally session-id:turn-id.
+The token is restricted to 256 ASCII letters, digits, colons, periods,
+underscores and hyphens. It is invalid for pending marks.
+Setting busy stores @term_busy_token and @term_busy together. Clearing busy
+compares the token in the server's command queue before clearing either
+option; a delayed Stop cannot clear a newer turn. A legacy untagged clear
+cannot clear tagged work. Starting untagged work replaces any old token.
+.PP
+.B reset busy --owner PID
+removes busy and its token after the foreground shell regains control from a
+killed child. Reset requires explicit owner proof, rejects pending marks and
+turn tokens, and never relaxes the foreground-terminal check.
 .SH ENVIRONMENT
 .TP
 .B TERM_PANE_MARK_PROC_ROOT

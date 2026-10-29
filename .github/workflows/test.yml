@@ -48,7 +48,7 @@ jobs:
 
           for command in tmux-clip-paste tmux-continuum-default-server \
             tmux-continuum-save-gate tmux-copy-last-output term-pane-mark \
-            term-notify-sound; do
+            term-notify-sound term-pane-state; do
             [[ -L "$install_prefix/bin/$command" ]] || exit 1
             /bin/bash -n "$install_prefix/bin/$command"
           done
@@ -90,7 +90,10 @@ jobs:
           PATH="$stub_dir:$PATH" TMUX=/tmp/stub,1,0 TMUX_PANE=%7 \
             TERM_PROGRAM=tmux /bin/bash "$install_prefix/bin/term-pane-mark" \
             set busy
-          grep -qx 'set-option -p -t %7 @term_busy 1' "$STUB_LOG"
+          grep -qx 'set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1' "$STUB_LOG"
+
+          /bin/bash test/term-pane-state-test
+          /bin/bash test/term-pane-mark-token-test
 
           bell="$RUNNER_TEMP/bell"
           PATH="$stub_dir:$PATH" TMUX= TMUX_PANE= TERM_NOTIFY_TTY="$bell" \

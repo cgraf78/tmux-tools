@@ -24,6 +24,7 @@ commands=(
   tmux-clip-paste
   tmux-copy-last-output
   term-pane-mark
+  term-pane-state
   term-notify-sound
 )
 

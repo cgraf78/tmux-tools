@@ -28,3 +28,5 @@ fi
 "$ROOT/test/tmux-continuum-test"
 "$ROOT/test/tmux-tools-test"
 "$ROOT/test/copy-mark-test"
+"$ROOT/test/term-pane-state-test"
+"$ROOT/test/term-pane-mark-token-test"

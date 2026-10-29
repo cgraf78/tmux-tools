@@ -4,6 +4,8 @@ tmux-copy-last-output \- copy recent tmux command blocks to the clipboard
 .SH SYNOPSIS
 .B tmux-copy-last-output
 .RB [ \-\-print ]
+.RB [ \-\-pane " PANE" ]
+.RB [ \-\-client " CLIENT" ]
 .RI [ count ]
 .SH DESCRIPTION
 .B tmux-copy-last-output
@@ -52,13 +54,29 @@ tmux message and exits successfully so keybindings do not fail noisily. With
 .BR \-\-print
 it exits with status 3 instead, so a pipeline routes nothing.
 .SH CLIPBOARD BACKENDS
-The command tries
+When installed,
+.B clip copy
+owns clipboard transport and private history. Pass the exact initiating
+client name and pane ID from a tmux binding; this delivers OSC 52 through
+.B tmux load-buffer -w -t CLIENT
+targeting that name rather than the most recently active attachment or the
+remote host's clipboard. Client names identify terminal devices; this API
+does not pin a process generation across detach/reconnect and name reuse.
+The pane ID also targets the capture explicitly.
+.PP
+Without clip, an explicit client still uses tmux's OSC 52 transport. Without
+an explicit client the standalone command tries
 .BR pbcopy (1)
 on macOS,
+.BR wl-copy (1)
+when
+.B WAYLAND_DISPLAY
+is set, then
 .BR xclip (1)
 when
 .B DISPLAY
-is set, and finally OSC 52 through the attached tmux client TTY.
+is set. It never guesses an OSC 52 destination client. A missing initiating
+client does not fall back to copying on the remote host.
 .SH EXIT STATUS
 .TP
 .B 0

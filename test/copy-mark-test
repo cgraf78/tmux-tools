@@ -3,6 +3,9 @@
 
 set -o pipefail
 export NO_COLOR=1
+# Fixture children must not source the live shell policy and re-add host
+# clipboard tools after this suite has deliberately restricted PATH.
+unset BASH_ENV ENV
 
 TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$TEST_DIR/.." && pwd -P)"
@@ -30,11 +33,16 @@ case "$1" in
     cat "$TMUX_CAPTURE_FILE"
     ;;
   display-message)
-    if [[ "${2:-}" == "-p" && "${3:-}" == "#{client_tty}" ]]; then
+    if [[ "${2:-}" == "-p" && "${3:-}" == "-c" ]]; then
+      printf '%s\n' "${TMUX_TEST_CLIENT_NAME:-$4}"
+    elif [[ "${2:-}" == "-p" && "${3:-}" == "#{client_tty}" ]]; then
       printf '%s\n' "${TMUX_CLIENT_TTY:-}"
     else
       printf '%s\n' "$*" >>"$TMUX_MESSAGE_LOG"
     fi
+    ;;
+  load-buffer)
+    cat >"$PBCOPY_OUT"
     ;;
   *)
     exit 1
@@ -49,6 +57,15 @@ fi
 cat >"$PBCOPY_OUT"
 EOF
 chmod +x "$mock_bin/tmux" "$mock_bin/pbcopy"
+
+# Deliberate copies use clip's shared transport/history policy when present.
+# Keep that dependency mocked so no suite can write the host clipboard/history.
+cat >"$mock_bin/clip" <<'EOF'
+#!/usr/bin/env bash
+[[ -z ${CLIP_CALL_LOG:-} ]] || printf '%s\n' "$*" >>"$CLIP_CALL_LOG"
+cat >"$PBCOPY_OUT"
+EOF
+chmod +x "$mock_bin/clip"
 
 cat >"$tmp/pane.txt" <<'EOF'
 user@test:/repo (main)
@@ -159,7 +176,7 @@ assert_invalid_count() {
 
   _assert_exit "$description: exits with usage status" 64 "$rc"
   _assert_eq "$description: prints concise usage" \
-    "usage: tmux-copy-last-output [--print] [positive-count]" "$output"
+    "usage: tmux-copy-last-output [--print] [--pane PANE] [--client CLIENT] [positive-count]" "$output"
   _assert_file_missing "$description: does not invoke tmux" "$tmux_log"
   _assert_file_missing "$description: does not invoke clipboard" "$pbcopy_log"
 }
@@ -173,6 +190,8 @@ assert_invalid_count "print zero count" --print 0
 assert_invalid_count "print extra arguments" --print 1 2
 assert_invalid_count "print flag after count" 1 --print
 assert_invalid_count "print flag repeated" --print --print
+assert_invalid_count "copy invalid pane" --pane not-a-pane
+assert_invalid_count "copy client without pane" --client /dev/ttys007
 
 cat >"$tmp/no-command.txt" <<'EOF'
 plain output only
@@ -199,6 +218,54 @@ _assert_eq "print: writes the last block to stdout" \
 two output' "$printed"
 _assert_file_missing "print: does not invoke the clipboard" "$tmp/print-pbcopy.log"
 _assert_file_missing "print: reports nothing through tmux" "$tmp/print-message.log"
+
+TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/scoped-message.log" \
+  TMUX_CALL_LOG="$tmp/scoped-tmux.log" CLIP_CALL_LOG="$tmp/scoped-clip.log" \
+  PBCOPY_OUT="$tmp/scoped-copied" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007
+_assert_exit "copy scoped: accepts explicit pane and client" 0 "$?"
+_assert_file_content "copy scoped: uses shared clipboard policy" \
+  'copy --client /dev/ttys007 --pane %7' "$tmp/scoped-clip.log"
+_assert_contains "copy scoped: captures only the initiating pane" \
+  'capture-pane -p -S -10000 -t %7' "$(cat "$tmp/scoped-tmux.log")"
+_assert_file_content "copy scoped: retains command-block content" \
+  '$ echo two
+two output' "$tmp/scoped-copied"
+
+# Restrict PATH so the installed host clip/native clipboard cannot win this
+# standalone test. The tmux stub records transport, never a real user server.
+standalone_bin="$tmp/standalone-bin"
+mkdir -p "$standalone_bin"
+for tool in bash cat awk; do
+  ln -s "$(command -v "$tool")" "$standalone_bin/$tool"
+done
+ln -s "$mock_bin/tmux" "$standalone_bin/tmux"
+TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/standalone-message.log" \
+  TMUX_CALL_LOG="$tmp/standalone-tmux.log" \
+  PBCOPY_OUT="$tmp/standalone-copied" PATH="$standalone_bin" \
+  "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007
+_assert_contains "copy standalone: OSC 52 targets the exact initiating client" \
+  'load-buffer -w -t /dev/ttys007 -' "$(cat "$tmp/standalone-tmux.log")"
+_assert_file_content "copy standalone: scoped transport gets selected content" \
+  '$ echo two
+two output' "$tmp/standalone-copied"
+rm -f "$tmp/standalone-copied" "$tmp/standalone-tmux.log"
+TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/standalone-missing-message.log" \
+  TMUX_CALL_LOG="$tmp/standalone-tmux.log" TMUX_TEST_CLIENT_NAME=/dev/ttys008 \
+  PBCOPY_OUT="$tmp/standalone-copied" PATH="$standalone_bin" \
+  "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007
+_assert_file_missing "copy standalone: detached client cannot copy elsewhere" \
+  "$tmp/standalone-copied"
+_assert_contains "copy standalone: detached client is explained" \
+  'initiating client is no longer attached' "$(cat "$tmp/standalone-missing-message.log")"
+TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/standalone-unscoped-message.log" \
+  TMUX_CALL_LOG="$tmp/standalone-unscoped-tmux.log" \
+  PBCOPY_OUT="$tmp/standalone-copied" PATH="$standalone_bin" \
+  "$ROOT/bin/tmux-copy-last-output"
+_assert_file_missing "copy standalone: absent clipboard never guesses a client" \
+  "$tmp/standalone-copied"
+_assert_contains "copy standalone: missing explicit client is explained" \
+  'pass --pane and --client for OSC 52' "$(cat "$tmp/standalone-unscoped-message.log")"
 
 printed=$(TMUX_CAPTURE_FILE="$tmp/pane.txt" \
   TMUX_MESSAGE_LOG="$tmp/print-two-message.log" \
@@ -272,7 +339,7 @@ case "$1" in
       printf '%s\n' "$TMUX_PANE_TTY"
     fi
     ;;
-  set-option)
+  set-option | if-shell)
     [[ -z ${TMUX_SET_LOG:-} ]] || printf '%s\n' "$*" >>"$TMUX_SET_LOG"
     [[ ${TMUX_SET_FAIL:-0} != 1 ]] || exit 1
     ;;
@@ -518,7 +585,6 @@ echo "=== term-pane-mark ==="
 # A pane that owns its tmux variables is marked and cleared directly.
 for mark in pending:@term_notify_pending busy:@term_busy; do
   name=${mark%%:*}
-  option=${mark#*:}
   mark_log="$tmp/mark-$name.log"
   TMUX=/tmp/tmux-test TMUX_PANE=%20 TERM_PROGRAM=tmux TMUX_SET_LOG="$mark_log" \
     PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" set "$name"
@@ -526,8 +592,8 @@ for mark in pending:@term_notify_pending busy:@term_busy; do
   TMUX=/tmp/tmux-test TMUX_PANE=%20 TERM_PROGRAM=tmux TMUX_SET_LOG="$mark_log" \
     PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" clear "$name"
   _assert_exit "mark $name: clear succeeds" 0 "$?"
-  expected="set-option -p -t %20 $option 1
-set-option -pu -t %20 $option"
+  expected='set-option -pu -t %20 @term_busy_token ; set-option -p -t %20 @term_busy 1
+if-shell -F -t %20 #{==:#{@term_busy_token},} set-option -pu @term_busy ; set-option -pu @term_busy_token '
   if [[ $name == pending ]]; then
     expected="set-option -pu -t %20 @term_notify_exit_status ; set-option -p -t %20 @term_notify_pending 1
 set-option -pu -t %20 @term_notify_pending ; set-option -pu -t %20 @term_notify_exit_status"
@@ -559,7 +625,7 @@ env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TMUX_SET_LOG="$stripped_mark_log" \
   PS_TTY='pts/7 ' TMUX_PANES="$panes" PATH="$mock_bin:$PATH" \
   "$ROOT/bin/term-pane-mark" clear busy
 _assert_file_content "mark: stripped env clears the pane owning its terminal" \
-  'set-option -pu -t %7 @term_busy' "$stripped_mark_log"
+  'if-shell -F -t %7 #{==:#{@term_busy_token},} set-option -pu @term_busy ; set-option -pu @term_busy_token ' "$stripped_mark_log"
 
 # An explicit pane needs no ownership lookup.
 explicit_log="$tmp/mark-explicit.log"
@@ -590,7 +656,7 @@ assert_invalid_mark() {
   rc=$?
   _assert_exit "$description: exits with usage status" 64 "$rc"
   _assert_eq "$description: prints concise usage" \
-    "usage: term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID] [--exit-status CODE]" "$output"
+    "usage: term-pane-mark set|clear|reset pending|busy [--pane PANE] [--owner PID] [--exit-status CODE] [--token TOKEN]" "$output"
   _assert_file_missing "$description: does not invoke tmux" "$log"
 }
 
@@ -706,9 +772,9 @@ assert_owned "a foreground owner publishes failure metadata first" \
   set pending --owner 4242 --exit-status 42
 
 assert_owned "the foreground program sets the mark" \
-  'set-option -p -t %40 @term_busy 1' set busy --owner 4242
+  'set-option -pu -t %40 @term_busy_token ; set-option -p -t %40 @term_busy 1' set busy --owner 4242
 assert_owned "the foreground program clears the mark" \
-  'set-option -pu -t %40 @term_busy' clear busy --owner 4242
+  'if-shell -F -t %40 #{==:#{@term_busy_token},} set-option -pu @term_busy ; set-option -pu @term_busy_token ' clear busy --owner 4242
 assert_owned "a background process group cannot set it" '' set busy --owner 4243
 assert_owned "a process without a terminal cannot set it" '' set busy --owner 4244
 assert_owned "a process without a terminal cannot clear it" '' clear busy --owner 4244
@@ -716,10 +782,10 @@ assert_owned "another terminal's foreground cannot set it" '' set busy --owner 4
 assert_owned "an exited process is not asked about through ps" '' \
   set busy --owner 4246
 assert_owned "options combine with an explicit pane" \
-  'set-option -p -t %41 @term_busy 1' set busy --owner 4242 --pane %41
+  'set-option -pu -t %41 @term_busy_token ; set-option -p -t %41 @term_busy 1' set busy --owner 4242 --pane %41
 
 # Without /proc, ps reports the process group, foreground group, and terminal.
-for case in '4242 4242 pts/9:set-option -p -t %40 @term_busy 1:foreground' \
+for case in '4242 4242 pts/9:set-option -pu -t %40 @term_busy_token ; set-option -p -t %40 @term_busy 1:foreground' \
   '4242 4300 pts/9::background' '4242 4242 pts/10::another terminal' \
   '4242 4242 ?::no terminal'; do
   state=${case%%:*}
@@ -753,7 +819,7 @@ for case in '34821:%5:pts/5' '35073:%257:pts/257 (major 137)' \
     TMUX_PANES="$proc_panes" PATH="$mock_bin:$PATH" \
     "$ROOT/bin/term-pane-mark" set busy
   _assert_file_content "mark: /proc resolves ${case##*:} without ps" \
-    "set-option -p -t $expected @term_busy 1" "$proc_log"
+    "set-option -pu -t $expected @term_busy_token ; set-option -p -t $expected @term_busy 1" "$proc_log"
 done
 
 # No controlling terminal in /proc is final: ps is not asked.
@@ -772,6 +838,6 @@ env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TERM_PANE_MARK_PROC_ROOT="$proc_root" \
   TMUX_PANES="$proc_panes" PATH="$mock_bin:$PATH" \
   "$ROOT/bin/term-pane-mark" set busy
 _assert_file_content "mark: a non-pty /proc terminal falls back to ps" \
-  'set-option -p -t %7 @term_busy 1' "$tmp/mark-proc-console.log"
+  'set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1' "$tmp/mark-proc-console.log"
 
 _test_summary

@@ -8,22 +8,42 @@
 #   $ command   (bash)
 #   % command   (zsh)
 #
-# Usage: tmux-copy-last-output [--print] [positive-count]   (default: 1)
+# Usage: tmux-copy-last-output [--print] [--pane PANE] [--client CLIENT] [count]
 
 set -euo pipefail
 
 usage() {
-  printf 'usage: tmux-copy-last-output [--print] [positive-count]\n' >&2
+  printf 'usage: tmux-copy-last-output [--print] [--pane PANE] [--client CLIENT] [positive-count]\n' >&2
   exit 64
 }
 
 # --print writes the blocks to stdout instead of the clipboard, so a binding
 # can route them elsewhere, such as pasting into another pane.
 print=false
-if [[ "${1-}" == --print ]]; then
-  print=true
-  shift
-fi
+pane=''
+client=''
+while (($#)); do
+  case "$1" in
+    --print)
+      [[ "$print" == false ]] || usage
+      print=true
+      shift
+      ;;
+    --pane)
+      (($# >= 2)) && [[ -z "$pane" && "$2" =~ ^%[0-9]+$ ]] || usage
+      pane=$2
+      shift 2
+      ;;
+    --client)
+      (($# >= 2)) && [[ -z "$client" && -n "$2" ]] || usage
+      client=$2
+      shift 2
+      ;;
+    --*) usage ;;
+    *) break ;;
+  esac
+done
+[[ -z "$client" || -n "$pane" ]] || usage
 (($# <= 1)) || usage
 count="${1-1}"
 if [[ ! "$count" =~ ^[0-9]+$ || ! "$count" =~ [1-9] ]]; then
@@ -38,7 +58,9 @@ count="${count#"${count%%[!0]*}"}"
 # it matters, but the whole history is unbounded: a 90,000-line build log
 # makes a 15 MB OSC 52 write that terminals drop (VS Code's limit is 10M
 # characters) and a paste no agent wants. 10,000 lines stays near 1 MB.
-content=$(tmux capture-pane -p -S -10000)
+capture_args=(-p -S -10000)
+[[ -z "$pane" ]] || capture_args+=(-t "$pane")
+content=$(tmux capture-pane "${capture_args[@]}")
 
 output=$(printf '%s\n' "$content" | awk -v count="$count" '
 # Two-line prompt detection:
@@ -128,28 +150,37 @@ copy_with() {
   { printf '%s' "$output" | "$@" >/dev/null; } 2>&1
 }
 
-copy_osc52() {
-  # Send OSC 52 directly to the attached client's TTY, bypassing
-  # run-shell's stdout capture which would print the escape literally
-  local encoded
-  encoded=$(printf '%s' "$output" | base64 | tr -d '\n')
-  local tty
-  tty=$(tmux display-message -p '#{client_tty}')
-  if [[ -z "$tty" ]]; then
-    printf 'tmux has no attached client TTY\n' >&2
-    return 1
-  fi
-  if ! printf $'\033]52;c;%s\033\\' "$encoded" >"$tty" 2>/dev/null; then
-    printf 'could not write to client TTY %s\n' "$tty" >&2
-    return 1
-  fi
-}
-
 copy_errors=()
 copied=false
-if command -v pbcopy &>/dev/null; then
+if command -v clip &>/dev/null; then
+  copy_args=(copy)
+  [[ -z "$client" ]] || copy_args+=(--client "$client" --pane "$pane")
+  if ! err=$(copy_with clip "${copy_args[@]}"); then
+    fail_copy clip "$err"
+  fi
+  copied=true
+elif [[ -n "$client" ]]; then
+  # Let tmux deliver OSC 52 to the initiating client. An implicit client lookup
+  # can select a different machine attached to this same server.
+  actual_client=$(tmux display-message -p -c "$client" '#{client_name}') ||
+    fail_copy tmux 'initiating client is no longer attached'
+  [[ "$actual_client" == "$client" ]] ||
+    fail_copy tmux 'initiating client is no longer attached'
+  if ! err=$(copy_with tmux load-buffer -w -t "$client" -); then
+    fail_copy tmux "$err"
+  fi
+  copied=true
+elif command -v pbcopy &>/dev/null; then
   if ! err=$(copy_with pbcopy); then
     copy_errors+=("pbcopy: ${err:-unknown error}")
+  else
+    copied=true
+  fi
+fi
+
+if [[ "$copied" == false && -n "${WAYLAND_DISPLAY:-}" ]] && command -v wl-copy &>/dev/null; then
+  if ! err=$(copy_with wl-copy); then
+    copy_errors+=("wl-copy: ${err:-unknown error}")
   else
     copied=true
   fi
@@ -164,15 +195,7 @@ if [[ "$copied" == false ]] && command -v xclip &>/dev/null && [[ -n "${DISPLAY:
 fi
 
 if [[ "$copied" == false ]]; then
-  if ! err=$(copy_osc52); then
-    copy_errors+=("OSC 52: ${err:-unknown error}")
-  else
-    copied=true
-  fi
-fi
-
-if [[ "$copied" == false ]]; then
-  fail_copy "available backends" "${copy_errors[*]}"
+  fail_copy "available backends" "${copy_errors[*]:-no host clipboard; pass --pane and --client for OSC 52}"
 fi
 
 if [[ "$count" == 1 ]]; then
