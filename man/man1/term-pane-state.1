@@ -15,8 +15,8 @@ The print form emits a versioned JSON object with integer v, working, pending,
 and failed fields. A failed query or invalid snapshot emits nothing and exits 1.
 .PP
 The client form resolves an exact live non-control client on the named socket,
-summarizes its session, opens its character tty and revalidates the client before
-publishing the TERM_PANE_STATE WezTerm user variable. Its payload also carries
+summarizes its session and delegates publication of the TERM_PANE_STATE WezTerm
+user variable to Termnav. Its payload also carries
 a changing heartbeat integer. The UI should expire state based on local time
 since receipt, not compare clocks across hosts. No status text is printed.
 .PP
@@ -26,9 +26,11 @@ without a resident watcher or a process per pane. A query is not acknowledgment:
 the existing pane focus policy remains authoritative.
 .PP
 Publishing requires Termnav's tmux attention route to verify foreground
-ownership and compose state through immediate local or SSH parents. Only its
-explicit no-parent result permits direct publication. A missing or failed
-transport emits nothing; the print-only summary remains available standalone.
+ownership and compose state through immediate local or SSH parents, or publish
+directly with its bounded native terminal writer. The shell never writes to a
+client tty. Legacy Termnav status 3 fails closed and requires an update; a
+missing or failed transport emits nothing. The print-only summary remains
+available standalone.
 .PP
 Snapshots are advisory display state. A delayed snapshot can briefly replace
 a newer visual state; the next successful poll repairs it. Child leases and

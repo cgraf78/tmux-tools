@@ -243,8 +243,9 @@ malformed children cannot leave a ghost badge.
 For client-specific status jobs, use `--client NAME --client-pid PID
 --client-created EPOCH` instead of `--session ID --print`. The helper validates
 that exact non-control client and publishes the `TERM_PANE_STATE` user variable
-through Termnav's hierarchical attention route, or directly to a revalidated
-terminal when Termnav explicitly reports no parent. The payload's heartbeat
+through Termnav's hierarchical attention route or its bounded native direct
+terminal writer. Legacy Termnav status 3 fails closed and requires an update;
+the shell never writes to a client tty. The payload's heartbeat
 lets a GUI expire stale state after detach or transport failure. No display
 text is written. Publication requires Termnav's foreground ownership checks;
 without it the helper emits nothing. Display snapshots can briefly arrive

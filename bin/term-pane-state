@@ -33,19 +33,17 @@ query() {
 # Resolve one live client, rejecting control mode and identity reuse. The tty
 # comes only from the server, never from an arbitrary path passed by a hook.
 resolve_client() {
-  local rows name pid created tty scope term control extra
+  local rows name pid created tty scope _term control extra
   # Some non-UTF8 tmux job locales rewrite literal tabs as underscores. Keep
   # fixed machine fields first and the terminal client name last, like tmux's
   # other exact-client adapters; no display strings determine behavior.
   rows=$(query list-clients -F '#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{client_name}') || return 1
-  while read -r pid created scope control term tty name extra; do
+  while read -r pid created scope control _term tty name extra; do
     [ "$name" = "$client" ] && [ "$pid" = "$client_pid" ] &&
       [ "$created" = "$client_created" ] && [ "$control" = 0 ] &&
       [ -z "$extra" ] || continue
     valid_session "$scope" || return 1
     case $tty in /dev/*) ;; *) return 1 ;; esac
-    client_tty=$tty
-    client_term=$term
     session=$scope
     return 0
   done <<<"$rows"
@@ -156,40 +154,14 @@ fi
 if [ -z "$client" ] || [ -n "$session" ] || ! valid_number "$client_pid" ||
   ! valid_number "$client_created"; then usage; fi
 [ "$client_pid" != 0 ] || usage
-client_tty='' client_term=''
 resolve_client || exit 1
 snapshot || exit 1
 
-# Hierarchical transport owns local/SSH ancestry, which cannot be inferred
-# from a terminal name or escaped from an invisible originating pane. Only
-# its explicit 'no parent' result permits direct terminal publication.
-# Missing ownership machinery must not turn a still-attached but suspended
-# client's tty into permission to write over the shell that resumed there.
+# Termnav owns both direct tty emission and hierarchical transport. Its bounded
+# native writer is the only owner of terminal publication; legacy status 3 is
+# not permission to fall back to a shell write that can hang on backpressure.
 command -v termnav >/dev/null 2>&1 || exit 1
-routed=0
 termnav tmux attention --tmux-socket "$socket" --client-name "$client" \
   --client-pid "$client_pid" --client-created "$client_created" \
-  --working "$working_count" --pending "$pending_count" --failed "$failed_count" >/dev/null 2>&1 || routed=$?
-case $routed in 0) exit 0 ;; 3) ;; *) exit 1 ;; esac
-
-# Opening first and revalidating afterward avoids writing to a subsequently
-# opened tty belonging to a replacement client. Retain the descriptor through
-# the write, and reject both regular files and symlinks outside /dev.
-[ -c "$client_tty" ] || exit 1
-original_tty=$client_tty original_session=$session original_term=$client_term
-exec 3>>"$client_tty" || exit 1
-resolve_client && [ "$client_tty" = "$original_tty" ] &&
-  [ "$session" = "$original_session" ] && [ "$client_term" = "$original_term" ] || exit 1
-
-# A changing heartbeat lets the UI expire stale state after a crash, detach,
-# or SSH loss. Receivers measure age locally, avoiding cross-host clock skew.
-heartbeat=$(date +%s) || exit 1
-valid_number "$heartbeat" || exit 1
-payload="${payload%\}},\"heartbeat\":$heartbeat}"
-encoded=$(printf '%s' "$payload" | base64 | tr -d '\r\n') || exit 1
-case $client_term in
-  tmux* | screen*)
-    printf '\033Ptmux;\033\033]1337;SetUserVar=TERM_PANE_STATE=%s\a\033\134' "$encoded" >&3
-    ;;
-  *) printf '\033]1337;SetUserVar=TERM_PANE_STATE=%s\a' "$encoded" >&3 ;;
-esac
+  --working "$working_count" --pending "$pending_count" --failed "$failed_count" >/dev/null 2>&1 || exit 1
+exit 0
