@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pty
 import select
@@ -197,8 +198,20 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
             timeout=5,
             env=env,
         ).stdout.strip()
-        assert '"pending":2,"failed":2' in printed, printed
-        print("PASS: print snapshot remains session-wide")
+        # tmux versions differ on whether list-panes has implicit client focus.
+        # The print form must retain the server's unmodified list-panes view.
+        rows = tmux(
+            "list-panes",
+            "-s",
+            "-t",
+            session,
+            "-F",
+            "#{?#{E:@pane_pending},1,0} #{?#{E:@pane_failed},1,0}",
+        )
+        expected = [sum(int(row.split()[index]) for row in rows.splitlines()) for index in (0, 1)]
+        snapshot = json.loads(printed)
+        assert [snapshot["pending"], snapshot["failed"]] == expected, (snapshot, expected)
+        print("PASS: print snapshot retains the server's list-panes view")
     finally:
         try:
             tmux("kill-server")
