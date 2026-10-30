@@ -337,6 +337,8 @@ case "$1" in
       printf '%s\n' "$TMUX_CLIENT_TERMTYPE"
     elif [[ "${2:-}" == "-t" && "${4:-}" == "-p" && "${5:-}" == "#{pane_tty}" ]]; then
       printf '%s\n' "$TMUX_PANE_TTY"
+    elif [[ "${2:-}" == "-p" && "${3:-}" == "-t" && "${5:-}" == "#{pane_id}" ]]; then
+      printf '%s\n' "$4"
     fi
     ;;
   set-option | if-shell)
@@ -593,7 +595,7 @@ for mark in pending:@term_notify_pending busy:@term_busy; do
     PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" clear "$name"
   _assert_exit "mark $name: clear succeeds" 0 "$?"
   expected='set-option -pu -t %20 @term_busy_token ; set-option -p -t %20 @term_busy 1
-if-shell -F -t %20 #{==:#{@term_busy_token},} set-option -pu @term_busy ; set-option -pu @term_busy_token '
+if-shell -F -t %20 #{==:#{@term_busy_token},} set-option -pu -t %20 @term_busy ; set-option -pu -t %20 @term_busy_token '
   if [[ $name == pending ]]; then
     expected="set-option -pu -t %20 @term_notify_exit_status ; set-option -p -t %20 @term_notify_pending 1
 set-option -pu -t %20 @term_notify_pending ; set-option -pu -t %20 @term_notify_exit_status"
@@ -625,7 +627,7 @@ env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TMUX_SET_LOG="$stripped_mark_log" \
   PS_TTY='pts/7 ' TMUX_PANES="$panes" PATH="$mock_bin:$PATH" \
   "$ROOT/bin/term-pane-mark" clear busy
 _assert_file_content "mark: stripped env clears the pane owning its terminal" \
-  'if-shell -F -t %7 #{==:#{@term_busy_token},} set-option -pu @term_busy ; set-option -pu @term_busy_token ' "$stripped_mark_log"
+  'if-shell -F -t %7 #{==:#{@term_busy_token},} set-option -pu -t %7 @term_busy ; set-option -pu -t %7 @term_busy_token ' "$stripped_mark_log"
 
 # An explicit pane needs no ownership lookup.
 explicit_log="$tmp/mark-explicit.log"
@@ -774,7 +776,7 @@ assert_owned "a foreground owner publishes failure metadata first" \
 assert_owned "the foreground program sets the mark" \
   'set-option -pu -t %40 @term_busy_token ; set-option -p -t %40 @term_busy 1' set busy --owner 4242
 assert_owned "the foreground program clears the mark" \
-  'if-shell -F -t %40 #{==:#{@term_busy_token},} set-option -pu @term_busy ; set-option -pu @term_busy_token ' clear busy --owner 4242
+  'if-shell -F -t %40 #{==:#{@term_busy_token},} set-option -pu -t %40 @term_busy ; set-option -pu -t %40 @term_busy_token ' clear busy --owner 4242
 assert_owned "a background process group cannot set it" '' set busy --owner 4243
 assert_owned "a process without a terminal cannot set it" '' set busy --owner 4244
 assert_owned "a process without a terminal cannot clear it" '' clear busy --owner 4244

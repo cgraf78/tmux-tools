@@ -214,7 +214,11 @@ else
   # same server queue, never via a read followed by a separate option update.
   # Untagged legacy stops may clear only untagged work; they cannot acknowledge
   # a newer tokenized producer's state.
-  tmux if-shell -F -t "$pane" "#{==:#{@term_busy_token},$token}" \
-    'set-option -pu @term_busy ; set-option -pu @term_busy_token' '' >/dev/null 2>&1 || true
+  # if-shell's target scopes the comparison, but not its nested commands. Use
+  # the exact pane ID there so focus on another pane cannot redirect the clear.
+  pane_id=$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null) || exit 0
+  [[ $pane_id =~ ^%[0-9]+$ ]] || exit 0
+  tmux if-shell -F -t "$pane_id" "#{==:#{@term_busy_token},$token}" \
+    "set-option -pu -t $pane_id @term_busy ; set-option -pu -t $pane_id @term_busy_token" '' >/dev/null 2>&1 || true
 fi
 exit 0

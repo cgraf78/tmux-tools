@@ -48,6 +48,16 @@ mark clear busy 2>/dev/null
 check 'legacy stop cannot clear tokenized work' 1 "$(value)"
 mark clear busy --token session:turn-b 2>/dev/null
 check 'matching stop clears work' '' "$(value)"
+other_pane=$(tmux -S "$socket" split-window -h -P -F '#{pane_id}' -t "$pane" 'exec sleep 600') || exit 1
+tmux -S "$socket" select-pane -t "$other_pane"
+tmux -S "$socket" set-option -p -t "$other_pane" @term_busy_token session:shell \; \
+  set-option -p -t "$other_pane" @term_busy 1
+mark set busy --token session:unfocused 2>/dev/null
+mark clear busy --token session:unfocused 2>/dev/null
+check 'matching stop clears unfocused agent pane' '' "$(value)"
+check 'matching stop leaves selected shell pane alone' 1 \
+  "$(tmux -S "$socket" show-options -pqv -t "$other_pane" @term_busy)"
+tmux -S "$socket" select-pane -t "$pane"
 mark set busy --token 'bad,#{pane_id}' >/dev/null 2>&1
 check 'tmux-format tokens are rejected' 64 "$?"
 mark set pending --token session:turn-a >/dev/null 2>&1
