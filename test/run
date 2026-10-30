@@ -29,4 +29,13 @@ fi
 "$ROOT/test/tmux-tools-test"
 "$ROOT/test/copy-mark-test"
 "$ROOT/test/term-pane-state-test"
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$ROOT/test/term-pane-state-client.py"
+else
+  if [[ ${TMUX_TOOLS_REQUIRE_TMUX:-0} == 1 ]]; then
+    printf 'FAIL: Python required for real-client attention test\n' >&2
+    exit 1
+  fi
+  printf 'SKIP: Python unavailable for real-client attention test\n'
+fi
 "$ROOT/test/term-pane-mark-token-test"

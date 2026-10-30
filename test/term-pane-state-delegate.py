@@ -19,7 +19,7 @@ class Publication(unittest.TestCase):
         """Use the existing tmux/native fixtures without a real tty or server."""
         env = dict(
             os.environ,
-            STATE_CLIENTS="12 123 $7 0 xterm-256color /dev/null /dev/null",
+            STATE_CLIENTS="12 123 $7 0 xterm-256color /dev/null %1 1 1 /dev/null",
             STATE_ROWS="%1 1 1 1",
             STATE_ROUTE_STATUS=str(route),
         )

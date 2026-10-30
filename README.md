@@ -242,7 +242,10 @@ malformed children cannot leave a ghost badge.
 
 For client-specific status jobs, use `--client NAME --client-pid PID
 --client-created EPOCH` instead of `--session ID --print`. The helper validates
-that exact non-control client and publishes the `TERM_PANE_STATE` user variable
+that exact non-control client and evaluates the embedding config's attention
+predicates for its selected pane. This makes a focused pane's local attention
+clear in WezTerm as it does in tmux, while attention from other panes and child
+sessions remains visible. It publishes the `TERM_PANE_STATE` user variable
 through Termnav's hierarchical attention route or its bounded native direct
 terminal writer. Legacy Termnav status 3 fails closed and requires an update;
 the shell never writes to a client tty. The payload's heartbeat

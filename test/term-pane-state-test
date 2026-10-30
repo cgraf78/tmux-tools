@@ -82,23 +82,62 @@ summary >"$tmp/invalid" 2>/dev/null
 check 'query failure is distinguishable from idle' 1 "$?"
 unset STATE_FAIL
 # shellcheck disable=SC2016 # tmux identifier is literal machine data.
-export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 /dev/ttys999'
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 1 1 /dev/ttys999'
 "$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
   --client-pid 13 --client-created 123 >"$tmp/stale" 2>/dev/null
 check 'reused client identity cannot publish' 1 "$?"
 check 'publisher never renders status text' '' "$(cat "$tmp/stale")"
 # shellcheck disable=SC2016
-export STATE_CLIENTS='12 123 $7 1 xterm-256color /dev/ttys999 /dev/ttys999'
+export STATE_CLIENTS='12 123 $7 1 xterm-256color /dev/ttys999 %1 1 1 /dev/ttys999'
 "$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
   --client-pid 12 --client-created 123 >/dev/null 2>&1
 check 'control clients cannot publish escapes' 1 "$?"
+# The session-wide query cannot identify which exact client is looking at a
+# pane. A client-targeted expansion must replace only that pane's local alert.
+# shellcheck disable=SC2016 # tmux's literal session identifier.
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 0 0 /dev/ttys999'
+export STATE_ROUTE_STATUS=0 STATE_ROWS='%1 1 1 1'
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+  --client-pid 12 --client-created 123 >/dev/null 2>&1
+check 'focused client publishes successfully' 0 "$?"
+check 'focused client keeps working' 1 "$(awk '$0 == "--working" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+check 'focused client hides its own pending mark' 0 "$(awk '$0 == "--pending" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+check 'focused client hides its own failure' 0 "$(awk '$0 == "--failed" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+check 'print summary stays session-wide' \
+  '{"v":1,"working":1,"pending":1,"failed":1}' "$(summary 2>/dev/null)"
+export STATE_ROWS=$'%1 1 1 1\n%2 0 1 1'
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+  --client-pid 12 --client-created 123 >/dev/null 2>&1
+check 'background pane remains pending' 1 "$(awk '$0 == "--pending" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+check 'background failure remains visible' 1 "$(awk '$0 == "--failed" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+export STATE_ROWS="%1 1 1 1 $((now + 15)):2:3:1"
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+  --client-pid 12 --client-created 123 >/dev/null 2>&1
+check 'focused pane retains child pending attention' 3 "$(awk '$0 == "--pending" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+check 'focused pane retains child failure' 1 "$(awk '$0 == "--failed" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+# shellcheck disable=SC2016 # tmux's literal session identifier.
+export STATE_ROWS='%1 1 1 1' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %9 0 0 /dev/ttys999'
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+  --client-pid 12 --client-created 123 >/dev/null 2>&1
+check 'changed client pane fails closed' 1 "$?"
+# shellcheck disable=SC2016 # tmux's literal session identifier.
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 0 1 /dev/ttys999'
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+  --client-pid 12 --client-created 123 >/dev/null 2>&1
+check 'invalid client failure fails closed' 1 "$?"
+# shellcheck disable=SC2016 # tmux's literal session identifier.
+export STATE_ROWS='%1 1 1 1' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 1 1 /dev/ttys999'
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+  --client-pid 12 --client-created 123 >/dev/null 2>&1
+check 'unfocused client keeps its own pending mark' 1 "$(awk '$0 == "--pending" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+check 'unfocused client keeps its own failure' 1 "$(awk '$0 == "--failed" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
 "$ROOT/bin/term-pane-state" --socket /private/test.sock --session bad --print >/dev/null 2>&1
 check 'session identifiers are validated' 64 "$?"
 mkdir "$tmp/no-route"
 ln -s "$tmp/bin/tmux" "$tmp/no-route/tmux"
 export STATE_ROWS='%1 1 0 0'
 # shellcheck disable=SC2016 # Literal tmux session identifier.
-export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/null /dev/null'
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/null %1 0 0 /dev/null'
 PATH="$tmp/no-route:/usr/bin:/bin" "$ROOT/bin/term-pane-state" --socket /private/test.sock \
   --client /dev/null --client-pid 12 --client-created 123 >/dev/null 2>&1
 check 'missing hierarchy owner fails closed instead of guessing tty ownership' 1 "$?"

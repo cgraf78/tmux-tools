@@ -20,7 +20,7 @@ jobs:
     uses: cgraf78/actions/.github/workflows/shell-ci.yml@6ecbf5dafaeb9483aeeba3915321544b31572172
     with:
       matrix-set: full
-      profiles: base,tmux
+      profiles: base,tmux,python
       shellcheck-inventory-path: .github/shellcheck-files.txt
       test-command: TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_SKIP_SHELLCHECK=1 test/run
 
