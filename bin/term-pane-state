@@ -33,18 +33,26 @@ query() {
 # Resolve one live client, rejecting control mode and identity reuse. The tty
 # comes only from the server, never from an arbitrary path passed by a hook.
 resolve_client() {
-  local rows name pid created tty scope _term control extra
+  local rows name pid created tty scope _term control pane pending failed extra
   # Some non-UTF8 tmux job locales rewrite literal tabs as underscores. Keep
   # fixed machine fields first and the terminal client name last, like tmux's
   # other exact-client adapters; no display strings determine behavior.
-  rows=$(query list-clients -F '#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{client_name}') || return 1
-  while read -r pid created scope control _term tty name extra; do
+  # list-clients expands the selected pane and predicates for each client,
+  # including tmux 3.2a where display-message -c rejects a client argument.
+  rows=$(query list-clients -F '#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_failed},1,0} #{client_name}') || return 1
+  while read -r pid created scope control _term tty pane pending failed name extra; do
     [ "$name" = "$client" ] && [ "$pid" = "$client_pid" ] &&
       [ "$created" = "$client_created" ] && [ "$control" = 0 ] &&
       [ -z "$extra" ] || continue
     valid_session "$scope" || return 1
     case $tty in /dev/*) ;; *) return 1 ;; esac
+    valid_pane "$pane" || return 1
+    case "$pending $failed" in
+      '0 0' | '1 0' | '1 1') ;;
+      *) return 1 ;;
+    esac
     session=$scope
+    client_pane=$pane client_pending=$pending client_failed=$failed
     return 0
   done <<<"$rows"
   return 1
@@ -95,8 +103,8 @@ snapshot() {
       *) return 1 ;;
     esac
     if [ -n "$client_pane" ] && [ "$pane" = "$client_pane" ]; then
-      # list-panes has no client focus context. Reuse the embedding config's
-      # predicates evaluated for this client's selected pane instead.
+      # list-panes has no reliable context for this exact client. Reuse the
+      # embedding config's predicates evaluated for its selected pane.
       waiting=$client_pending failed=$client_failed
       client_pane_seen=1
     fi
@@ -164,17 +172,8 @@ if [ -z "$client" ] || [ -n "$session" ] || ! valid_number "$client_pid" ||
 [ "$client_pid" != 0 ] || usage
 resolve_client || exit 1
 # The same pane can be pending for an unfocused client and already seen by a
-# focused one. Query only this client's selected pane; the remaining panes keep
-# the session-wide result, including active panes in background windows.
-client_view=$(query display-message -p -c "$client" \
-  '#{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_failed},1,0}') || exit 1
-case $client_view in *$'\n'*) exit 1 ;; esac
-read -r client_pane client_pending client_failed extra <<<"$client_view"
-valid_pane "$client_pane" && [ -z "${extra:-}" ] || exit 1
-case "$client_pending $client_failed" in
-  '0 0' | '1 0' | '1 1') ;;
-  *) exit 1 ;;
-esac
+# focused one. Replace only this client's selected pane in the session-wide
+# result, including active panes in background windows.
 snapshot || exit 1
 
 # Termnav owns both direct tty emission and hierarchical transport. Its bounded

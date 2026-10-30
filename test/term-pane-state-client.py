@@ -53,14 +53,19 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
 
     def tmux(*args: str) -> str:
         """Query or mutate only the private test server."""
-        return subprocess.run(
+        result = subprocess.run(
             [TMUX, "-S", socket, *args],
+            check=False,
             text=True,
             capture_output=True,
-            check=True,
             timeout=5,
             env=env,
-        ).stdout.strip()
+        )
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, result.args, output=result.stdout, stderr=result.stderr
+            )
+        return result.stdout.strip()
 
     client_pid = None
     master = None
@@ -113,7 +118,7 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
         os.write(master, b"\x1b[I")
         poll(
             "client focus",
-            lambda: tmux("display-message", "-p", "-c", name, "#{client_flags}"),
+            lambda: tmux("list-clients", "-F", "#{client_flags}"),
             lambda value: "focused" in value,
         )
 
@@ -148,13 +153,13 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
         focused = publish()
         assert focused["--pending"] == "1", focused
         assert focused["--failed"] == "1", focused
-        assert tmux("display-message", "-p", "-c", name, "#{pane_id}") == first
+        assert tmux("list-clients", "-F", "#{pane_id}") == first
         print("PASS: focused pane clears only its own local attention")
 
         os.write(master, b"\x1b[O")
         poll(
             "client unfocus",
-            lambda: tmux("display-message", "-p", "-c", name, "#{client_flags}"),
+            lambda: tmux("list-clients", "-F", "#{client_flags}"),
             lambda value: "focused" not in value,
         )
         unfocused = publish()
@@ -165,13 +170,13 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
         os.write(master, b"\x1b[I")
         poll(
             "client refocus",
-            lambda: tmux("display-message", "-p", "-c", name, "#{client_flags}"),
+            lambda: tmux("list-clients", "-F", "#{client_flags}"),
             lambda value: "focused" in value,
         )
         tmux("split-window", "-h", "-t", "attention:0", "sleep 60")
         poll(
             "pane switch",
-            lambda: tmux("display-message", "-p", "-c", name, "#{pane_id}"),
+            lambda: tmux("list-clients", "-F", "#{pane_id}"),
             lambda value: value != first,
         )
         switched = publish()
