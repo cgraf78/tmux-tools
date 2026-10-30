@@ -82,7 +82,7 @@ clear_child() {
 # The embedding config supplies structured predicates, shared with its tmux
 # display and focus policy. Do not scrape colored @window_marker display text.
 snapshot() {
-  local rows pane busy waiting failed child extra now
+  local rows pane busy waiting failed child extra now client_pane_seen=0
   working_count=0 pending_count=0 failed_count=0
   rows=$(query list-panes -s -t "$session" -F '#{pane_id} #{?#{E:@pane_busy},1,0} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_failed},1,0} #{@termnav_child_attention}') || return 1
   now=$(date +%s) || return 1
@@ -94,6 +94,12 @@ snapshot() {
       '0 0 0' | '1 0 0' | '0 1 0' | '1 1 0' | '0 1 1' | '1 1 1') ;;
       *) return 1 ;;
     esac
+    if [ -n "$client_pane" ] && [ "$pane" = "$client_pane" ]; then
+      # list-panes has no client focus context. Reuse the embedding config's
+      # predicates evaluated for this client's selected pane instead.
+      waiting=$client_pending failed=$client_failed
+      client_pane_seen=1
+    fi
     working_count=$((working_count + busy))
     pending_count=$((pending_count + waiting))
     failed_count=$((failed_count + failed))
@@ -101,6 +107,7 @@ snapshot() {
       child_counts "$child" "$now" || clear_child "$pane" "$child"
     fi
   done <<<"$rows"
+  [ -z "$client_pane" ] || [ "$client_pane_seen" = 1 ] || return 1
   [ "$working_count" -le 100000 ] && [ "$pending_count" -le 100000 ] &&
     [ "$failed_count" -le 100000 ] || return 1
   printf -v payload '{"v":1,"working":%s,"pending":%s,"failed":%s}' \
@@ -108,6 +115,7 @@ snapshot() {
 }
 
 socket='' session='' client='' client_pid='' client_created='' print_only=0
+client_pane='' client_pending='' client_failed=''
 while [ "$#" -gt 0 ]; do
   case $1 in
     --print)
@@ -155,6 +163,18 @@ if [ -z "$client" ] || [ -n "$session" ] || ! valid_number "$client_pid" ||
   ! valid_number "$client_created"; then usage; fi
 [ "$client_pid" != 0 ] || usage
 resolve_client || exit 1
+# The same pane can be pending for an unfocused client and already seen by a
+# focused one. Query only this client's selected pane; the remaining panes keep
+# the session-wide result, including active panes in background windows.
+client_view=$(query display-message -p -c "$client" \
+  '#{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_failed},1,0}') || exit 1
+case $client_view in *$'\n'*) exit 1 ;; esac
+read -r client_pane client_pending client_failed extra <<<"$client_view"
+valid_pane "$client_pane" && [ -z "${extra:-}" ] || exit 1
+case "$client_pending $client_failed" in
+  '0 0' | '1 0' | '1 1') ;;
+  *) exit 1 ;;
+esac
 snapshot || exit 1
 
 # Termnav owns both direct tty emission and hierarchical transport. Its bounded

@@ -20,6 +20,11 @@ user variable to Termnav. Its payload also carries
 a changing heartbeat integer. The UI should expire state based on local time
 since receipt, not compare clocks across hosts. No status text is printed.
 .PP
+For the client's selected pane, the embedding config's pending and failed
+predicates are evaluated with that client's focus context. The print form
+remains a session-wide snapshot. Other panes and fresh child summaries keep
+their attention even when the selected pane's local mark is hidden.
+.PP
 Use this short-lived helper in a client-specific tmux status #() job. tmux
 serializes identical jobs; status-interval supplies bounded reconciliation
 without a resident watcher or a process per pane. A query is not acknowledgment:
