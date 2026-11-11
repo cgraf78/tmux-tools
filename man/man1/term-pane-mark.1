@@ -1,4 +1,4 @@
-.TH TERM-PANE-MARK 1 "2026-10-23" "tmux-tools" "User Commands"
+.TH TERM-PANE-MARK 1 "2026-11-11" "tmux-tools" "User Commands"
 .SH NAME
 term-pane-mark \- set or clear a state mark on the caller's tmux pane
 .SH SYNOPSIS
@@ -9,8 +9,12 @@ term-pane-mark \- set or clear a state mark on the caller's tmux pane
 .IR pane ]
 .RB [ \-\-owner
 .IR pid ]
+.RB [ \-\-kind
+.IR kind ]
 .RB [ \-\-exit-status
 .IR code ]
+.RB [ \-\-if
+.IR condition ]
 .RB [ \-\-token
 .IR token ]
 .SH DESCRIPTION
@@ -22,12 +26,26 @@ them owns their presentation.
 .B pending
 Sets
 .B @term_notify_pending
-to
-.BR 1 :
-the program asked for attention.
+to the kind of attention the program asked for:
+.B done
+(the default),
+.B waiting
+or
+.BR blocked ;
+see
+.BR \-\-kind .
+Any non-empty value means attention exists; readers treat the legacy value
+.B 1
+from older versions as
+.BR done .
 .BR term-notify-sound (1)
-sets it after ringing. The consuming configuration normally clears it when the
-pane is visited.
+sets it after ringing. The consuming configuration normally clears
+.B done
+when the pane is visited, and leaves
+.B waiting
+and
+.B blocked
+for their producer to clear.
 .TP
 .B busy
 Sets
@@ -91,9 +109,36 @@ on Linux, where a missing entry means the process has exited, and from
 .BR ps (1)
 elsewhere.
 .TP
+.BI \-\-kind " kind"
+Store
+.I kind
+as the value of
+.B @term_notify_pending
+for
+.BR "set pending" :
+.B done
+when a task finished and the user has not looked,
+.B waiting
+when the program needs an answer such as a permission prompt or question, or
+.B blocked
+when it stopped on an error and needs the user to resume it. The default is
+.BR done .
+A newer kind replaces an older one. Any other kind, or this option with
+.B busy
+or
+.BR clear ,
+is a usage error.
+.TP
 .BI \-\-exit-status " code"
 Attach a decimal shell exit status from 0 through 255 to
-.BR "set pending" .
+.BR "set pending" ,
+only with kind
+.BR done ;
+with
+.B waiting
+or
+.B blocked
+it is a usage error, and those kinds always remove stale exit-status metadata.
 Options may appear in any order. Leading zeroes are accepted and removed.
 A nonzero status sets the pane option
 .B @term_notify_exit_status
@@ -109,6 +154,28 @@ or
 The consuming tmux configuration decides how failures appear and when to
 clear the pending mark and its status, normally when the pane is visited.
 .TP
+.BI \-\-if " condition"
+Make
+.B clear pending
+conditional:
+.B waiting
+or
+.B blocked
+clears only that kind, and
+.B sticky
+clears either. The value is compared and cleared, together with any exit
+status, in one tmux command queue on the exact pane id, so a
+.B done
+mark that arrived later, a failed command, or a legacy
+.B 1
+is never cleared. Without
+.BR \-\-if ,
+.B clear pending
+clears any kind. This option is invalid with
+.B set
+and
+.BR busy .
+.TP
 .BI \-\-token " token"
 Identify one exact busy lifecycle generation, normally session-id:turn-id.
 The token is restricted to 256 ASCII letters, digits, colons, periods,
@@ -120,8 +187,15 @@ cannot clear tagged work. Starting untagged work replaces any old token.
 .PP
 .B reset busy --owner PID
 removes busy and its token after the foreground shell regains control from a
-killed child. Reset requires explicit owner proof, rejects pending marks and
-turn tokens, and never relaxes the foreground-terminal check.
+killed child. In the same tmux command queue it clears pending of kind
+.B waiting
+or
+.BR blocked ,
+which the killed program can no longer clear; it never touches
+.B done
+or a failed command. Reset requires explicit owner proof, rejects
+.B reset pending
+and turn tokens, and never relaxes the foreground-terminal check.
 .SH ENVIRONMENT
 .TP
 .B TERM_PANE_MARK_PROC_ROOT

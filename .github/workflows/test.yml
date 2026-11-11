@@ -91,6 +91,18 @@ jobs:
             TERM_PROGRAM=tmux /bin/bash "$install_prefix/bin/term-pane-mark" \
             set busy
           grep -qx 'set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1' "$STUB_LOG"
+          : >"$STUB_LOG"
+          PATH="$stub_dir:$PATH" /bin/bash "$install_prefix/bin/term-pane-mark" \
+            set pending --kind waiting --pane %7
+          grep -qx 'set-option -pu -t %7 @term_notify_exit_status ; set-option -p -t %7 @term_notify_pending waiting' "$STUB_LOG"
+          : >"$STUB_LOG"
+          PATH="$stub_dir:$PATH" /bin/bash "$install_prefix/bin/term-pane-mark" \
+            clear pending --if sticky --pane %7
+          grep -qxF 'if-shell -F -t %7 #{||:#{==:#{@term_notify_pending},waiting},#{==:#{@term_notify_pending},blocked}} set-option -pu -t %7 @term_notify_pending ; set-option -pu -t %7 @term_notify_exit_status ' "$STUB_LOG"
+          status=0
+          /bin/bash "$install_prefix/bin/term-pane-mark" set pending \
+            --kind waiting --exit-status 1 --pane %7 2>/dev/null || status=$?
+          [[ $status -eq 64 ]] || exit 1
 
           /bin/bash test/term-pane-state-test
           /bin/bash test/term-pane-mark-token-test

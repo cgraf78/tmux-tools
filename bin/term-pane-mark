@@ -8,12 +8,13 @@
 set -u
 
 usage() {
-  printf 'usage: term-pane-mark set|clear|reset pending|busy [--pane PANE] [--owner PID] [--exit-status CODE] [--token TOKEN]\n' >&2
+  printf 'usage: term-pane-mark set|clear|reset pending|busy [--pane PANE] [--owner PID] [--kind done|waiting|blocked] [--exit-status CODE] [--if waiting|blocked|sticky] [--token TOKEN]\n' >&2
   exit 64
 }
 
-# Pane user options for each mark. pending: the program asked for attention.
-# busy: the program is working on a request.
+# Pane user options for each mark. pending: the program asked for attention;
+# its value is the kind of attention (done, waiting or blocked; readers treat
+# the legacy value 1 as done). busy: the program is working on a request.
 mark_option() {
   case $1 in
     pending) printf '@term_notify_pending\n' ;;
@@ -117,6 +118,28 @@ in_foreground() {
   [ -n "$pgrp" ] && [ "$pgrp" = "$tpgid" ] && [ "/dev/$tty" = "$pane_tty" ]
 }
 
+# Set condition to the tmux format that is true when pending holds a kind
+# matching an --if value. The sticky kinds, waiting and blocked, need an
+# action, so a glance must not clear them.
+pending_condition() {
+  case $1 in
+    waiting | blocked) condition="#{==:#{@term_notify_pending},$1}" ;;
+    sticky) condition='#{||:#{==:#{@term_notify_pending},waiting},#{==:#{@term_notify_pending},blocked}}' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Set pane_id to PANE's exact id. if-shell's target scopes its condition, but
+# not its nested commands, so those must name the pane id itself or focus on
+# another pane could redirect them. A pane id needs no lookup.
+resolve_pane_id() {
+  pane_id=$1
+  if ! [[ $pane_id =~ ^%[0-9]+$ ]]; then
+    pane_id=$(tmux display-message -p -t "$1" '#{pane_id}' 2>/dev/null) || return 1
+  fi
+  [[ $pane_id =~ ^%[0-9]+$ ]]
+}
+
 [ $# -ge 2 ] || usage
 action=$1
 case $action in
@@ -128,6 +151,9 @@ shift 2
 pane=''
 owner=''
 exit_status=''
+kind=''
+condition=''
+pane_id=''
 token=''
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] && [ -n "$2" ] || usage
@@ -160,6 +186,19 @@ while [ $# -gt 0 ]; do
       exit_status=${exit_status:-0}
       [ "${#exit_status}" -le 3 ] && [ "$exit_status" -le 255 ] || usage
       ;;
+    --kind)
+      [ "$action" = set ] && [ "$option" = @term_notify_pending ] || usage
+      [ -z "$kind" ] || usage
+      case $2 in
+        done | waiting | blocked) kind=$2 ;;
+        *) usage ;;
+      esac
+      ;;
+    --if)
+      [ "$action" = clear ] && [ "$option" = @term_notify_pending ] || usage
+      [ -z "$condition" ] || usage
+      pending_condition "$2" || usage
+      ;;
     --token)
       [ "$option" = @term_busy ] && [ -z "$token" ] || usage
       token=$2
@@ -170,6 +209,10 @@ while [ $# -gt 0 ]; do
   esac
   shift 2
 done
+# A shell exit status describes a finished command, so it only accompanies
+# done; waiting and blocked always replace a stale failure.
+[ -z "$exit_status" ] || [ "${kind:-done}" = "done" ] || usage
+kind=${kind:-done}
 if [ "$action" = reset ]; then
   # Returning foreground shells may discard a mark left by a killed child.
   # This bypasses only turn matching, never terminal ownership, and must not
@@ -185,21 +228,33 @@ if [ -n "$owner" ]; then
   in_foreground "$owner" "$pane" || exit 0
 fi
 if [ "$action" = reset ]; then
-  tmux set-option -pu -t "$pane" @term_busy \; \
-    set-option -pu -t "$pane" @term_busy_token >/dev/null 2>&1 || true
+  # A killed agent can no longer clear the waiting or blocked attention it
+  # raised. Informational done and failed marks stay until the user looks.
+  resolve_pane_id "$pane" || exit 0
+  pending_condition sticky
+  tmux set-option -pu -t "$pane_id" @term_busy \; \
+    set-option -pu -t "$pane_id" @term_busy_token \; \
+    if-shell -F -t "$pane_id" "$condition" \
+    "set-option -pu -t $pane_id @term_notify_pending ; set-option -pu -t $pane_id @term_notify_exit_status" '' >/dev/null 2>&1 || true
 elif [ "$option" = @term_notify_pending ]; then
   # Submit each transition as one tmux command queue, so a focus hook cannot
   # acknowledge pending between the metadata and mark updates. Ordinary
   # notifications replace any previous failure before becoming pending.
-  if [ "$action" = clear ]; then
+  if [ "$action" = clear ] && [ -n "$condition" ]; then
+    # Compare and clear in one server queue on the exact pane, as busy clears
+    # do, so a newer notification of another kind survives a late clear.
+    resolve_pane_id "$pane" || exit 0
+    tmux if-shell -F -t "$pane_id" "$condition" \
+      "set-option -pu -t $pane_id $option ; set-option -pu -t $pane_id @term_notify_exit_status" '' >/dev/null 2>&1 || true
+  elif [ "$action" = clear ]; then
     tmux set-option -pu -t "$pane" "$option" \; \
       set-option -pu -t "$pane" @term_notify_exit_status >/dev/null 2>&1 || true
   elif [ -n "$exit_status" ] && [ "$exit_status" != 0 ]; then
     tmux set-option -p -t "$pane" @term_notify_exit_status "$exit_status" \; \
-      set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+      set-option -p -t "$pane" "$option" "$kind" >/dev/null 2>&1 || true
   else
     tmux set-option -pu -t "$pane" @term_notify_exit_status \; \
-      set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+      set-option -p -t "$pane" "$option" "$kind" >/dev/null 2>&1 || true
   fi
 elif [ "$action" = set ]; then
   if [ -n "$token" ]; then
@@ -214,10 +269,7 @@ else
   # same server queue, never via a read followed by a separate option update.
   # Untagged legacy stops may clear only untagged work; they cannot acknowledge
   # a newer tokenized producer's state.
-  # if-shell's target scopes the comparison, but not its nested commands. Use
-  # the exact pane ID there so focus on another pane cannot redirect the clear.
-  pane_id=$(tmux display-message -p -t "$pane" '#{pane_id}' 2>/dev/null) || exit 0
-  [[ $pane_id =~ ^%[0-9]+$ ]] || exit 0
+  resolve_pane_id "$pane" || exit 0
   tmux if-shell -F -t "$pane_id" "#{==:#{@term_busy_token},$token}" \
     "set-option -pu -t $pane_id @term_busy ; set-option -pu -t $pane_id @term_busy_token" '' >/dev/null 2>&1 || true
 fi
