@@ -2,7 +2,7 @@
 
 ## About
 
-Seven Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
+Eight Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
 `/bin/bash` 3.2 is a hard contract with its own CI job.
 `tmux-copy-last-output`, `term-pane-mark`, and `term-notify-sound` were
 imported from cgraf78/cmdblocks@52aae58; that archived repo holds their
@@ -11,8 +11,9 @@ earlier history.
 ## Layout
 
 - `bin/tmux-continuum-default-server`, `bin/tmux-continuum-save-gate`,
-  `bin/tmux-clip-paste`, `bin/tmux-copy-last-output`, `bin/term-pane-mark`,
-  `bin/term-notify-sound`, `bin/term-pane-state`: the commands. Each must
+  `bin/tmux-clip-paste`, `bin/tmux-copy-last-output`,
+  `bin/tmux-command-palette`, `bin/term-pane-mark`, `bin/term-notify-sound`,
+  `bin/term-pane-state`: the commands. Each must
   stay self-contained.
 - `man/man1/`: one page per command. Detailed behavior lives here, not in
   the README.
@@ -22,8 +23,9 @@ earlier history.
   `test/tmux-continuum-test`, `test/tmux-tools-test`,
   `test/copy-mark-test` (which sources `test/copy-mark-helpers.sh`),
   `test/term-pane-state-test` (mock tmux, plus
-  `test/term-pane-state-delegate.py`), `test/term-pane-state-client.py`
-  and `test/term-pane-mark-token-test` (both on a private real tmux).
+  `test/term-pane-state-delegate.py`), `test/term-pane-state-client.py`,
+  `test/tmux-command-palette-client.py` (with a stand-in fzf) and
+  `test/term-pane-mark-token-test` (all on a private real tmux).
 
 ## Invariants
 
@@ -49,7 +51,11 @@ earlier history.
   Its JSON carries `waiting`, with `failed + waiting <= pending`; it passes
   `termnav tmux attention --waiting N` only when N is non-zero and retries
   once without it when an older Termnav exits 2.
-- Exit 64 is reserved for bad arguments to the pane and copy commands;
+- `tmux-command-palette` replays the picked key with `send-keys -K` only
+  after its popup closes, so prompts open over the pane; before tmux 3.4 it
+  names the key instead. Never run a binding's command text directly: its
+  formats and prompts need the client's own key context.
+- Exit 64 is reserved for bad arguments to the pane, copy and palette commands;
   `tmux-copy-last-output --print` exits 3 when it finds no block, and a
   tmux binding relies on that status.
 - `tmux-copy-last-output` parses one two-line prompt shape (header comment
@@ -75,9 +81,9 @@ earlier history.
 - Stock Bash 3.2 (macOS): `PREFIX=$tmp /bin/bash install.sh`, then for each
   installed command `/bin/bash -n`, plus `tmux-clip-paste --help`,
   `TMUX= tmux-continuum-default-server`, `tmux-continuum-save-gate`, and
-  stub-tmux smokes of `tmux-copy-last-output --print`, `term-pane-mark`, and
-  `term-notify-sound`, all run with `/bin/bash`, as the `macos-bash32` job
-  does.
+  stub-tmux smokes of `tmux-copy-last-output --print`,
+  `tmux-command-palette --list`, `term-pane-mark`, and `term-notify-sound`,
+  all run with `/bin/bash`, as the `macos-bash32` job does.
 
 ## Test isolation
 

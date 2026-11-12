@@ -1,0 +1,92 @@
+.TH TMUX-COMMAND-PALETTE 1 "2026-11-12" "tmux-tools" "User Commands"
+.SH NAME
+tmux-command-palette \- pick a tmux key binding by its note and run it
+.SH SYNOPSIS
+.B tmux-command-palette
+.B \-\-client
+.I client
+.br
+.B tmux-command-palette
+.B \-\-list
+.SH DESCRIPTION
+.B tmux-command-palette
+lists the key bindings of the
+.B root
+and
+.B prefix
+tables that carry a note
+.RB ( "bind-key \-N" )
+in an
+.BR fzf (1)
+popup on
+.IR client .
+Each entry shows the note first and the key second, such as
+.BR "Copy the last N command outputs   prefix O" ,
+sorted by note, so typing part of a description finds the action and shows
+the key that runs it.
+.PP
+Enter runs the chosen binding; Escape closes the popup and runs nothing. The
+popup only picks: once it has closed, the key is handed to the client as if it
+had been typed, so the binding acts on the client's current pane, which is the
+pane the palette was opened from. A prompt, confirmation, menu or popup that
+the binding opens therefore appears over that pane, not inside the palette.
+.PP
+Bind it with the client that pressed the key:
+.PP
+.RS
+.nf
+bind -n M-Space run-shell 'tmux-command-palette --client #{q:client_name}'
+.fi
+.RE
+.PP
+The list leaves out entries that cannot or need not be replayed: mouse
+bindings, which need a pointer position; tmux's own
+.B Select window
+.IR N
+notes on
+.B prefix 0
+to
+.BR "prefix 9" ;
+and a second key with the same note as an earlier one, where the prefix key
+is kept. Copy-mode and other key tables are not listed. The palette's own
+binding stays in the list, as a command palette lists itself.
+.SH OPTIONS
+.TP
+.BI \-\-client " client"
+The tmux client to open the popup on and to replay the key for, usually
+.B #{q:client_name}
+from the binding.
+.TP
+.B \-\-list
+Print the entries the popup would offer and exit. Each line holds the visible
+text (note, padding and key), the key table and the key, separated by tabs.
+.SH COMPATIBILITY
+Replaying a key needs
+.B send-keys \-K
+from tmux 3.4. On older tmux the command cannot type for the client: after a
+pick it turns the prefix on for a prefix binding and shows a message naming
+the key to press, so one key press runs the binding. tmux 3.2 cannot target a
+message at a client, so there the message goes to the session's most recently
+active client.
+.PP
+Without
+.BR fzf (1)
+on
+.BR PATH ,
+the command shows a tmux message saying so and exits successfully.
+.SH EXIT STATUS
+.TP
+.B 0
+A binding was replayed or named, the popup was cancelled, or a missing
+.BR fzf (1)
+or an empty list was reported through tmux.
+.TP
+.B 1
+tmux could not open the popup, for example for an unknown client, or another
+tmux command failed.
+.TP
+.B 64
+The arguments were invalid.
+.SH SEE ALSO
+.BR tmux (1),
+.BR fzf (1)

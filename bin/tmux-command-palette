@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# tmux-command-palette -- pick a tmux key binding by its note and run it.
+#
+# Lists the root and prefix key bindings that carry a note (bind-key -N) in an
+# fzf popup, description first and key second. After the popup closes, the
+# chosen key is replayed for the client as if it had been typed, so it acts on
+# that client's current pane, and any prompt or menu it opens appears over the
+# pane rather than inside the popup.
+#
+# Usage: tmux-command-palette --client CLIENT
+#        tmux-command-palette --list
+
+set -euo pipefail
+
+usage() {
+  printf 'usage: tmux-command-palette --client CLIENT\n       tmux-command-palette --list\n' >&2
+  exit 64
+}
+
+client=''
+list=false
+while (($#)); do
+  case "$1" in
+    --client)
+      (($# >= 2)) && [[ -z "$client" && -n "$2" ]] || usage
+      client=$2
+      shift 2
+      ;;
+    --list)
+      [[ "$list" == false ]] || usage
+      list=true
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+# --list prints what the popup would offer; otherwise a client is required.
+if [[ "$list" == true ]]; then
+  [[ -z "$client" ]] || usage
+else
+  [[ -n "$client" ]] || usage
+fi
+
+tab=$(printf '\t')
+
+# Show a message on the client. tmux 3.2 parses display-message -c as a flag
+# without a value, so there the message goes to the session's latest client.
+message() {
+  tmux display-message -c "$client" "$1" 2>/dev/null || tmux display-message "$1"
+}
+
+# Print one entry per line: the visible text (the note, padding, then the key
+# as it is typed), then the key table and key name, separated by tabs.
+entries() {
+  local table
+
+  for table in prefix root; do
+    # A missing table (a config that unbinds every prefix key) lists nothing.
+    { tmux list-keys -N -T "$table" -P '' 2>/dev/null || true; } |
+      awk -v table="$table" '
+      {
+        sub(/^[ \t]+/, "")
+        key = $1
+        note = $0
+        sub(/^[^ \t]+[ \t]+/, "", note)
+        gsub(/\t/, " ", note)
+        if (key == "" || note == "") next
+        # A mouse binding cannot be replayed without a pointer position.
+        bare = key
+        while (bare ~ /^[CMS]-./) bare = substr(bare, 3)
+        if (bare ~ /^(Mouse|Wheel|SecondClick|DoubleClick|TripleClick)/) next
+        # tmux notes prefix 0-9 one by one; typing the digit is quicker.
+        if (table == "prefix" && key ~ /^[0-9]$/ && note ~ /^Select window [0-9]+$/) next
+        print note "\t" table "\t" key
+      }'
+  done |
+    LC_ALL=C sort -f -s -t "$tab" -k1,1 |
+    awk -F "$tab" '
+      # The same note under two keys is one action: keep the first, which
+      # is the prefix key when both tables have it.
+      !seen[$1]++ {
+        n++
+        note[n] = $1
+        table[n] = $2
+        key[n] = $3
+        if (length($1) > width) width = length($1)
+      }
+      END {
+        format = "%-" width "s   %s\t%s\t%s\n"
+        for (i = 1; i <= n; i++) {
+          shown = table[i] == "prefix" ? "prefix " key[i] : key[i]
+          printf format, note[i], shown, table[i], key[i]
+        }
+      }'
+}
+
+if [[ "$list" == true ]]; then
+  entries
+  exit 0
+fi
+
+# type -P finds only an executable: the popup runs fzf from PATH.
+if ! type -P fzf >/dev/null 2>&1; then
+  message 'The command palette needs fzf'
+  exit 0
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/tmux-command-palette.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+case "$work" in
+  *"'"*)
+    printf 'tmux-command-palette: temporary path contains a quote: %s\n' "$work" >&2
+    exit 1
+    ;;
+esac
+
+entries >"$work/entries"
+if [[ ! -s "$work/entries" ]]; then
+  message 'No key bindings have notes'
+  exit 0
+fi
+
+# The popup only picks: it writes the chosen line and closes. fzf exits 1 with
+# no match and 130 when cancelled, and the popup passes that status on, so only
+# an error tmux itself reports (an unknown client, say) is a failure.
+popup="fzf --delimiter='\\t' --with-nth=1 --no-multi --reverse"
+popup+=" --prompt='Command palette> ' <'$work/entries' >'$work/choice'"
+if ! tmux display-popup -c "$client" -E -w 80% -h 60% "$popup" 2>"$work/error"; then
+  if [[ -s "$work/error" ]]; then
+    cat "$work/error" >&2
+    exit 1
+  fi
+fi
+[[ -s "$work/choice" ]] || exit 0
+table=''
+key=''
+IFS="$tab" read -r _ table key <"$work/choice" || true
+[[ "$table" == prefix || "$table" == root ]] && [[ -n "$key" ]] || exit 0
+
+# tmux ends a command at an argument's trailing ;, so a key such as ; or M-;
+# is spelled with \; on a command line.
+typed=$key
+case "$typed" in
+  *';') typed="${typed%;}\\;" ;;
+esac
+
+# send-keys -K (tmux 3.4) hands a key to the client as if it was typed. With
+# no keys it does nothing, which makes it a probe; older tmux rejects -K.
+if tmux send-keys -K -c "$client" 2>/dev/null; then
+  if [[ "$table" == prefix ]]; then
+    tmux switch-client -c "$client" -T prefix \; send-keys -K -c "$client" "$typed"
+  else
+    tmux send-keys -K -c "$client" "$typed"
+  fi
+  exit 0
+fi
+
+# Older tmux cannot type for the client, so leave the last key to the user:
+# for a prefix binding, turn the prefix on so one key press runs it. Messages
+# expand formats there, so double any #.
+shown=${key//\#/##}
+if [[ "$table" == prefix ]]; then
+  tmux switch-client -c "$client" -T prefix
+  message "Press $shown to run it (the prefix is on)"
+else
+  message "Press $shown to run it"
+fi

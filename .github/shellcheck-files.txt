@@ -4,6 +4,7 @@ program	bin/term-notify-sound
 program	bin/term-pane-mark
 program	bin/term-pane-state
 program	bin/tmux-clip-paste
+program	bin/tmux-command-palette
 program	bin/tmux-continuum-default-server
 program	bin/tmux-continuum-save-gate
 program	bin/tmux-copy-last-output
