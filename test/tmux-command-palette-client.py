@@ -10,6 +10,7 @@ import select
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -80,17 +81,15 @@ with tempfile.TemporaryDirectory(prefix="tcp-client-") as directory:
     fzf.chmod(0o700)
     record = root / "record"
     log = root / "fzf"
-    # A minimal environment: no TMUX, and no caller shell startup hooks
-    # (BASH_ENV) that could add commands such as fzf back.
+    # The caller's environment, which Termux needs to run scripts (PREFIX,
+    # LD_PRELOAD), without TMUX or shell startup hooks (BASH_ENV, ENV) that
+    # could add commands such as fzf back.
     env = {
-        "HOME": str(root),
-        "PATH": f"{bindir}:{os.environ['PATH']}",
-        "TERM": "xterm-256color",
-        "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
+        name: value
+        for name, value in os.environ.items()
+        if name not in ("TMUX", "TMUX_PANE", "BASH_ENV", "ENV")
     }
-    for variable in ("LANG", "LC_ALL", "LC_CTYPE"):
-        if variable in os.environ:
-            env[variable] = os.environ[variable]
+    env.update(HOME=str(root), PATH=f"{bindir}:{os.environ['PATH']}", TERM="xterm-256color")
 
     def tmux(*args: str) -> str:
         """Query or mutate only the private test server."""
@@ -196,11 +195,15 @@ with tempfile.TemporaryDirectory(prefix="tcp-client-") as directory:
                 Path(f"{log}{suffix}").unlink(missing_ok=True)
             tmux("set-environment", "-g", "PALETTE_PICK", text)
             os.write(master, b"\x1b[15~")
-            poll(
-                "the popup offers the entries",
-                lambda: str(Path(f"{log}.offered").exists()),
-                lambda value: value == "True",
-            )
+            try:
+                poll(
+                    "the popup offers the entries",
+                    lambda: str(Path(f"{log}.offered").exists()),
+                    lambda value: value == "True",
+                )
+            except AssertionError:
+                print(messages(), file=sys.stderr)
+                raise
 
         def asked() -> int:
             return messages().count("to run it")
