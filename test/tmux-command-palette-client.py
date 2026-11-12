@@ -82,14 +82,20 @@ with tempfile.TemporaryDirectory(prefix="tcp-client-") as directory:
     record = root / "record"
     log = root / "fzf"
     # The caller's environment, which Termux needs to run scripts (PREFIX,
-    # LD_PRELOAD), without TMUX or shell startup hooks (BASH_ENV, ENV) that
-    # could add commands such as fzf back.
+    # LD_PRELOAD), without TMUX or shell startup files (BASH_ENV, ENV,
+    # ZDOTDIR) that could add commands such as fzf back. SHELL is sh, so
+    # tmux runs commands with a shell that reads no startup file.
     env = {
         name: value
         for name, value in os.environ.items()
-        if name not in ("TMUX", "TMUX_PANE", "BASH_ENV", "ENV")
+        if name not in ("TMUX", "TMUX_PANE", "BASH_ENV", "ENV", "ZDOTDIR")
     }
-    env.update(HOME=str(root), PATH=f"{bindir}:{os.environ['PATH']}", TERM="xterm-256color")
+    env.update(
+        HOME=str(root),
+        PATH=f"{bindir}:{os.environ['PATH']}",
+        SHELL=shutil.which("sh") or "/bin/sh",
+        TERM="xterm-256color",
+    )
 
     def tmux(*args: str) -> str:
         """Query or mutate only the private test server."""
