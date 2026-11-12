@@ -31,7 +31,7 @@ TYPES_FOR_CLIENT = MATCH is not None and (int(MATCH[1]), int(MATCH[2])) >= (3, 4
 # The popup runs this stand-in instead of fzf. It records its arguments and
 # the entries it was offered, then prints the first entry containing
 # $PALETTE_PICK, or exits 130 (fzf's cancel status) when that is empty.
-STUB_FZF = """#!/bin/sh
+STUB_FZF = """#!/usr/bin/env sh
 printf '%s\\n' "$@" >"$PALETTE_LOG.args"
 cat >"$PALETTE_LOG.offered"
 [ -n "$PALETTE_PICK" ] || exit 130
