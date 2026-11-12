@@ -1,18 +1,27 @@
 .TH TERM-PANE-STATE 1
 .SH NAME
-term-pane-state \- publish independent tmux work and attention state
+term-pane-state \- publish per-pane effective tmux work and attention state
 .SH SYNOPSIS
 .B term-pane-state --socket SOCKET --session ID --print
 .br
 .B term-pane-state --socket SOCKET --client NAME --client-pid PID --client-created EPOCH
 .SH DESCRIPTION
 Summarizes the panes in exactly one session. The embedding tmux configuration
-defines the structured predicates @pane_busy, @pane_pending and @pane_failed;
-the same predicates should drive its status display. Work and attention are
-independent: pending or failed work does not hide another running pane.
+defines the structured predicates @pane_busy, @pane_pending, @pane_waiting and
+@pane_failed; the same predicates should drive its status display. Waiting and
+failed must imply pending. A configuration that predates @pane_waiting expands
+it empty, which counts as no waiting panes.
+.PP
+Counts are per-pane effective states chosen by the publisher. Each pane counts
+once, as the first of: failed, waiting, done (pending without either), working
+(busy without attention). A pane with attention does not also count as
+working, but it never hides another pane. A pane that is both failed and
+waiting counts as failed.
 .PP
 The print form emits a versioned JSON object with integer v, working, pending,
-and failed fields. A failed query or invalid snapshot emits nothing and exits 1.
+failed and waiting fields. pending counts every pane with attention; failed
+and waiting are disjoint parts of it, so failed + waiting <= pending and the
+remainder is done. A failed query or invalid snapshot emits nothing and exits 1.
 .PP
 The client form resolves an exact live non-control client on the named socket,
 summarizes its session and delegates publication of the TERM_PANE_STATE WezTerm
@@ -20,10 +29,18 @@ user variable to Termnav. Its payload also carries
 a changing heartbeat integer. The UI should expire state based on local time
 since receipt, not compare clocks across hosts. No status text is printed.
 .PP
-For the client's selected pane, the embedding config's pending and failed
-predicates are evaluated with that client's focus context. The print form
+For the client's selected pane, the embedding config's pending, waiting and
+failed predicates are evaluated with that client's focus context. The print form
 remains a session-wide snapshot. Other panes and fresh child summaries keep
 their attention even when the selected pane's local mark is hidden.
+.PP
+Child layers publish through Termnav pane leases on the parent's wall clock:
+@termnav_child_attention holds expiry:working:pending:failed and
+@termnav_child_waiting holds expiry:N, the child's waiting panes. A waiting
+lease counts only beside a valid attention lease whose pending minus failed
+covers N. A malformed, expired or unbounded lease contributes nothing; a
+wire-shaped one is removed with a compare-and-clear on its exact pane, so a
+renewed lease survives, and other text is left untouched.
 .PP
 Use this short-lived helper in a client-specific tmux status #() job. tmux
 serializes identical jobs; status-interval supplies bounded reconciliation
@@ -34,7 +51,10 @@ Publishing requires Termnav's tmux attention route to verify foreground
 ownership and compose state through immediate local or SSH parents, or publish
 directly with its bounded native terminal writer. The shell never writes to a
 client tty. Legacy Termnav status 3 fails closed and requires an update; a
-missing or failed transport emits nothing. The print-only summary remains
+missing or failed transport emits nothing. The helper passes --waiting to
+Termnav when any pane is waiting; if Termnav exits 2 because it predates that
+flag, the helper retries once without it, and that layer shows waiting
+attention as done. The print-only summary remains
 available standalone.
 .PP
 Snapshots are advisory display state. A delayed snapshot can briefly replace

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Summarize one attached tmux session and publish it to that exact client.
+# Each pane counts once, by its effective state: attention (failed, then
+# waiting, then done) hides the pane's own work.
 # This is a short-lived tmux #() job: tmux serializes identical jobs and its
 # status interval reconciles missed transitions without per-pane processes.
 set -uo pipefail
@@ -33,97 +35,148 @@ query() {
 # Resolve one live client, rejecting control mode and identity reuse. The tty
 # comes only from the server, never from an arbitrary path passed by a hook.
 resolve_client() {
-  local rows name pid created tty scope _term control pane pending failed extra
+  local rows name pid created tty scope _term control pane pending waiting failed extra
   # Some non-UTF8 tmux job locales rewrite literal tabs as underscores. Keep
   # fixed machine fields first and the terminal client name last, like tmux's
   # other exact-client adapters; no display strings determine behavior.
   # list-clients expands the selected pane and predicates for each client,
   # including tmux 3.2a where display-message -c rejects a client argument.
-  rows=$(query list-clients -F '#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_failed},1,0} #{client_name}') || return 1
-  while read -r pid created scope control _term tty pane pending failed name extra; do
+  # A config older than @pane_waiting expands it empty, which reads as 0.
+  rows=$(query list-clients -F '#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_waiting},1,0} #{?#{E:@pane_failed},1,0} #{client_name}') || return 1
+  while read -r pid created scope control _term tty pane pending waiting failed name extra; do
     [ "$name" = "$client" ] && [ "$pid" = "$client_pid" ] &&
       [ "$created" = "$client_created" ] && [ "$control" = 0 ] &&
       [ -z "$extra" ] || continue
     valid_session "$scope" || return 1
     case $tty in /dev/*) ;; *) return 1 ;; esac
     valid_pane "$pane" || return 1
-    case "$pending $failed" in
-      '0 0' | '1 0' | '1 1') ;;
-      *) return 1 ;;
-    esac
+    valid_attention "$pending" "$waiting" "$failed" || return 1
     session=$scope
-    client_pane=$pane client_pending=$pending client_failed=$failed
+    client_pane=$pane client_pending=$pending client_waiting=$waiting
+    client_failed=$failed
     return 0
   done <<<"$rows"
   return 1
 }
 
+# Attention predicates: failed and waiting are subsets of pending. A pane
+# matching both is failed; red outranks yellow.
+valid_attention() {
+  case "$1 $2 $3" in
+    '0 0 0' | '1 0 0' | '1 1 0' | '1 0 1' | '1 1 1') ;;
+    *) return 1 ;;
+  esac
+}
+
 # A child publisher renews a bounded lease using the parent's wall clock.
 # Invalid or expired children contribute nothing, without hiding local work.
+# Sets child_pending and child_failed for the separate waiting lease.
 child_counts() {
-  local encoded=$1 now=$2 expiry work waiting failed extra number
-  IFS=: read -r expiry work waiting failed extra <<<"$encoded"
-  [ -z "$extra" ] && valid_number "$expiry" && [ "${#expiry}" -le 12 ] || return 1
-  for number in "$work" "$waiting" "$failed"; do
-    valid_number "$number" && [ "${#number}" -le 6 ] || return 1
-  done
-  expiry=$((10#$expiry)) work=$((10#$work)) waiting=$((10#$waiting)) failed=$((10#$failed))
+  local encoded=$1 now=$2 expiry work pending failed extra
+  IFS=: read -r expiry work pending failed extra <<<"$encoded"
+  [ -z "$extra" ] && valid_number "$expiry" && [ "${#expiry}" -le 12 ] &&
+    valid_number "$work" && [ "${#work}" -le 6 ] &&
+    valid_number "$pending" && [ "${#pending}" -le 6 ] &&
+    valid_number "$failed" && [ "${#failed}" -le 6 ] || return 1
+  expiry=$((10#$expiry)) work=$((10#$work)) pending=$((10#$pending)) failed=$((10#$failed))
   [ "$expiry" -gt "$now" ] && [ "$expiry" -le "$((now + 30))" ] &&
-    [ "$work" -le 100000 ] && [ "$waiting" -le 100000 ] && [ "$failed" -le "$waiting" ] || return 1
+    [ "$work" -le 100000 ] && [ "$pending" -le 100000 ] && [ "$failed" -le "$pending" ] || return 1
   working_count=$((working_count + work))
-  pending_count=$((pending_count + waiting))
+  pending_count=$((pending_count + pending))
   failed_count=$((failed_count + failed))
+  child_pending=$pending child_failed=$failed
+}
+
+# The child's waiting count travels in its own expiry:N lease, which older
+# readers ignore. It refines the child's pending attention, so it counts only
+# beside a valid attention lease from this snapshot and never makes
+# failed + waiting exceed pending. Returns 1 for a malformed or expired lease,
+# which the caller removes; 2 for a fresh lease that does not fit the
+# attention lease, which is left to expire because the two can briefly
+# disagree while a publisher renews them.
+child_waiting_counts() {
+  local encoded=$1 now=$2 expiry count extra
+  IFS=: read -r expiry count extra <<<"$encoded"
+  [ -z "$extra" ] && valid_number "$expiry" && [ "${#expiry}" -le 12 ] &&
+    valid_number "$count" && [ "${#count}" -le 6 ] || return 1
+  expiry=$((10#$expiry)) count=$((10#$count))
+  [ "$expiry" -gt "$now" ] && [ "$expiry" -le "$((now + 30))" ] &&
+    [ "$count" -le 100000 ] || return 1
+  [ -n "$child_pending" ] && [ "$count" -le "$((child_pending - child_failed))" ] || return 2
+  waiting_count=$((waiting_count + count))
 }
 
 # Only wire-shaped values are embedded in a format comparison. Arbitrary
 # malformed text is ignored, never expanded as tmux format syntax. The
 # comparison and deletion share one server queue so a renewed lease survives
-# cleanup based on an older snapshot.
+# cleanup based on an older snapshot. if-shell's target scopes only the
+# comparison, so the deletion names the exact pane too.
 clear_child() {
-  local pane=$1 encoded=$2
+  local pane=$1 option=$2 encoded=$3
   case $encoded in '' | *[!0-9:]*) return 0 ;; esac
   [ "${#encoded}" -le 64 ] || return 0
-  query if-shell -F -t "$pane" "#{==:#{@termnav_child_attention},$encoded}" \
-    'set-option -pu @termnav_child_attention' '' >/dev/null || true
+  query if-shell -F -t "$pane" "#{==:#{$option},$encoded}" \
+    "set-option -pu -t $pane $option" '' >/dev/null || true
 }
 
 # The embedding config supplies structured predicates, shared with its tmux
 # display and focus policy. Do not scrape colored @window_marker display text.
 snapshot() {
-  local rows pane busy waiting failed child extra now client_pane_seen=0
-  working_count=0 pending_count=0 failed_count=0
-  rows=$(query list-panes -s -t "$session" -F '#{pane_id} #{?#{E:@pane_busy},1,0} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_failed},1,0} #{@termnav_child_attention}') || return 1
+  local rows pane busy pending waiting failed child child_waiting extra now
+  local child_pending child_failed status client_pane_seen=0
+  working_count=0 pending_count=0 waiting_count=0 failed_count=0
+  # Lease values can be empty, so each carries a one-letter prefix that keeps
+  # the whitespace-separated fields aligned. A config older than @pane_waiting
+  # expands it empty, which reads as 0.
+  rows=$(query list-panes -s -t "$session" -F '#{pane_id} #{?#{E:@pane_busy},1,0} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_waiting},1,0} #{?#{E:@pane_failed},1,0} a#{@termnav_child_attention} w#{@termnav_child_waiting}') || return 1
   now=$(date +%s) || return 1
   valid_number "$now" || return 1
-  while read -r pane busy waiting failed child extra; do
-    [ -n "$pane$busy$waiting$failed$extra" ] || continue
+  while read -r pane busy pending waiting failed child child_waiting extra; do
+    [ -n "$pane$busy$pending$waiting$failed$extra" ] || continue
     valid_pane "$pane" || return 1
-    case "$busy $waiting $failed" in
-      '0 0 0' | '1 0 0' | '0 1 0' | '1 1 0' | '0 1 1' | '1 1 1') ;;
-      *) return 1 ;;
-    esac
+    case $busy in 0 | 1) ;; *) return 1 ;; esac
+    valid_attention "$pending" "$waiting" "$failed" || return 1
     if [ -n "$client_pane" ] && [ "$pane" = "$client_pane" ]; then
       # list-panes has no reliable context for this exact client. Reuse the
       # embedding config's predicates evaluated for its selected pane.
-      waiting=$client_pending failed=$client_failed
+      pending=$client_pending waiting=$client_waiting failed=$client_failed
       client_pane_seen=1
     fi
-    working_count=$((working_count + busy))
-    pending_count=$((pending_count + waiting))
-    failed_count=$((failed_count + failed))
-    if [ -n "$child" ] && [ -z "$extra" ]; then
-      child_counts "$child" "$now" || clear_child "$pane" "$child"
+    if [ "$pending" = 1 ]; then
+      pending_count=$((pending_count + 1))
+      if [ "$failed" = 1 ]; then
+        failed_count=$((failed_count + 1))
+      elif [ "$waiting" = 1 ]; then
+        waiting_count=$((waiting_count + 1))
+      fi
+    else
+      working_count=$((working_count + busy))
+    fi
+    # Malformed rows (a lease containing spaces) keep their local state but
+    # contribute and clear nothing from either lease.
+    [ -z "$extra" ] && [ "${child#a}" != "$child" ] &&
+      [ "${child_waiting#w}" != "$child_waiting" ] || continue
+    child=${child#a} child_waiting=${child_waiting#w}
+    child_pending='' child_failed=''
+    if [ -n "$child" ]; then
+      child_counts "$child" "$now" ||
+        clear_child "$pane" @termnav_child_attention "$child"
+    fi
+    if [ -n "$child_waiting" ]; then
+      child_waiting_counts "$child_waiting" "$now"
+      status=$?
+      [ "$status" != 1 ] || clear_child "$pane" @termnav_child_waiting "$child_waiting"
     fi
   done <<<"$rows"
   [ -z "$client_pane" ] || [ "$client_pane_seen" = 1 ] || return 1
   [ "$working_count" -le 100000 ] && [ "$pending_count" -le 100000 ] &&
-    [ "$failed_count" -le 100000 ] || return 1
-  printf -v payload '{"v":1,"working":%s,"pending":%s,"failed":%s}' \
-    "$working_count" "$pending_count" "$failed_count"
+    [ "$failed_count" -le 100000 ] && [ "$waiting_count" -le 100000 ] || return 1
+  printf -v payload '{"v":1,"working":%s,"pending":%s,"failed":%s,"waiting":%s}' \
+    "$working_count" "$pending_count" "$failed_count" "$waiting_count"
 }
 
 socket='' session='' client='' client_pid='' client_created='' print_only=0
-client_pane='' client_pending='' client_failed=''
+client_pane='' client_pending='' client_waiting='' client_failed=''
 while [ "$#" -gt 0 ]; do
   case $1 in
     --print)
@@ -180,7 +233,20 @@ snapshot || exit 1
 # native writer is the only owner of terminal publication; legacy status 3 is
 # not permission to fall back to a shell write that can hang on backpressure.
 command -v termnav >/dev/null 2>&1 || exit 1
-termnav tmux attention --tmux-socket "$socket" --client-name "$client" \
-  --client-pid "$client_pid" --client-created "$client_created" \
-  --working "$working_count" --pending "$pending_count" --failed "$failed_count" >/dev/null 2>&1 || exit 1
+attention=(tmux attention --tmux-socket "$socket" --client-name "$client"
+  --client-pid "$client_pid" --client-created "$client_created"
+  --working "$working_count" --pending "$pending_count" --failed "$failed_count")
+# Termnav treats an omitted --waiting as 0, so the common path stays one run
+# even beside an older Termnav. That version rejects --waiting as a usage
+# error (2) but still publishes the counts without it; its readers then show
+# waiting attention as done.
+waiting=()
+[ "$waiting_count" = 0 ] || waiting=(--waiting "$waiting_count")
+status=0
+termnav "${attention[@]}" ${waiting[@]+"${waiting[@]}"} >/dev/null 2>&1 || status=$?
+if [ "$status" = 2 ] && [ "${#waiting[@]}" != 0 ]; then
+  status=0
+  termnav "${attention[@]}" >/dev/null 2>&1 || status=$?
+fi
+[ "$status" = 0 ] || exit 1
 exit 0

@@ -26,10 +26,11 @@ Small helpers for tmux setups that outgrow the defaults:
   finishes. Inside tmux it also marks which pane rang, which plain tmux does
   not track (tmux records a bell against the window).
 - **`term-pane-mark`**: set or clear a `busy` or `pending` mark on your tmux
-  pane, for example while a coding agent works on a prompt, so your tmux
-  config can show it.
-- **`term-pane-state`**: summarize work and attention independently and publish
-  the attached session's state to its exact containing terminal client.
+  pane, for example while a coding agent works on a prompt or waits for an
+  answer, so your tmux config can show it.
+- **`term-pane-state`**: count each pane's effective state (failed, waiting,
+  done or working) and publish the attached session's state to its exact
+  containing terminal client.
 
 ## Requirements
 
@@ -201,26 +202,43 @@ them.
 
 ### `term-notify-sound` and `term-pane-mark`
 
-- `term-notify-sound [--owner PID]`: write one BEL to `/dev/tty`
-  (`TERM_NOTIFY_TTY` overrides it), falling back to the tmux pane's tty. Inside
-  tmux it then runs `term-pane-mark set pending`. Typical use is
-  `make; term-notify-sound`, or an agent's "finished" hook.
-- `term-pane-mark set|clear pending|busy [--pane PANE] [--owner PID]`: set or
+- `term-notify-sound [--owner PID] [--kind KIND] [--exit-status CODE]`:
+  write one BEL to `/dev/tty` (`TERM_NOTIFY_TTY` overrides it), falling back
+  to the tmux pane's tty. Inside tmux it then runs `term-pane-mark set
+  pending` with the same options. Typical use is `make; term-notify-sound`,
+  or an agent's "finished" hook.
+- `term-pane-mark set|clear|reset pending|busy [--pane PANE] [--owner PID]
+  [--kind KIND] [--exit-status CODE] [--if waiting|blocked|sticky]`: set or
   clear `@term_notify_pending` or `@term_busy` on the caller's own pane.
   `--owner PID` limits changes to that process while it runs in the pane's
   foreground, so programs an agent launches cannot clear the agent's mark.
 
-Both set the pane options `@term_notify_pending` and `@term_busy` to `1`.
+`@term_busy` is set to `1`. `@term_notify_pending` holds the kind of
+attention, chosen with `--kind`:
+
+| Kind | Meaning |
+| --- | --- |
+| `done` (default) | finished and not yet seen; with `--exit-status N`, a failed command |
+| `waiting` | needs an answer, such as a permission prompt |
+| `blocked` | stopped on an error and needs the user to resume it |
+
+Older versions stored `1`; treat it as `done`. `waiting` and `blocked` are
+sticky: a glance should not clear them. Their producer clears them with
+`term-pane-mark clear pending --if waiting|blocked|sticky`, which removes the
+mark only while it still holds that kind (`sticky` means either), so a newer
+`done` survives. `term-pane-mark reset busy --owner PID`, run by a shell
+prompt after a killed child, also clears sticky kinds.
+
 Rendering and clearing the pending mark is up to your tmux config. For
-example, show both in pane borders and clear the pending mark when you visit
-the pane. The explicit hook index keeps any hooks you already have on those
-events:
+example, show both in pane borders and clear informational marks when you
+visit the pane. The explicit hook index keeps any hooks you already have on
+those events:
 
 ```tmux
 set -g pane-border-status top
-set -g pane-border-format '#{?@term_notify_pending,[!] ,}#{?@term_busy,[busy] ,}#{pane_current_command}'
-set-hook -g after-select-pane[100] 'set-option -pu @term_notify_pending'
-set-hook -g after-select-window[100] 'set-option -pu @term_notify_pending'
+set -g pane-border-format '#{?@term_notify_pending,[#{@term_notify_pending}] ,}#{?@term_busy,[busy] ,}#{pane_current_command}'
+set-hook -g after-select-pane[100] 'if -F "#{||:#{==:#{@term_notify_pending},waiting},#{==:#{@term_notify_pending},blocked}}" "" "set-option -pu @term_notify_pending ; set-option -pu @term_notify_exit_status"'
+set-hook -g after-select-window[100] 'if -F "#{||:#{==:#{@term_notify_pending},waiting},#{==:#{@term_notify_pending},blocked}}" "" "set-option -pu @term_notify_pending ; set-option -pu @term_notify_exit_status"'
 ```
 
 `man term-pane-mark` explains how it decides which pane is the caller's.
@@ -234,11 +252,17 @@ it must supply a verified frontend association instead of guessing a pane.
 ### `term-pane-state`
 
 `term-pane-state --socket SOCKET --session ID --print` emits a versioned JSON
-snapshot with independent `working`, `pending`, and `failed` counts. The
-embedding config supplies the structured `@pane_busy`, `@pane_pending`, and
-`@pane_failed` predicates that also drive its local display. Fresh leased
-child summaries from Termnav contribute to the same snapshot; expired or
-malformed children cannot leave a ghost badge.
+snapshot with `working`, `pending`, `failed` and `waiting` counts. The
+embedding config supplies the structured `@pane_busy`, `@pane_pending`,
+`@pane_waiting` and `@pane_failed` predicates that also drive its local
+display; a config without `@pane_waiting` reports no waiting panes. Each
+pane counts once, by its effective state: failed, then waiting, then done,
+then working. `pending` counts every pane with attention, `failed` and
+`waiting` are disjoint parts of it, and the rest of `pending` is done. A pane
+with attention does not count as working. Fresh leased child summaries from
+Termnav (`@termnav_child_attention` and the separate `@termnav_child_waiting`)
+contribute to the same snapshot; expired or malformed children cannot leave a
+ghost badge.
 
 For client-specific status jobs, use `--client NAME --client-pid PID
 --client-created EPOCH` instead of `--session ID --print`. The helper validates
@@ -249,7 +273,10 @@ sessions remains visible. It publishes the `TERM_PANE_STATE` user variable
 through Termnav's hierarchical attention route or its bounded native direct
 terminal writer. Legacy Termnav status 3 fails closed and requires an update;
 the shell never writes to a client tty. The payload's heartbeat
-lets a GUI expire stale state after detach or transport failure. No display
+lets a GUI expire stale state after detach or transport failure. The helper
+passes `--waiting` only while a pane is waiting; a Termnav that predates it
+exits 2, and the helper retries once without it, so that layer shows waiting
+attention as done. No display
 text is written. Publication requires Termnav's foreground ownership checks;
 without it the helper emits nothing. Display snapshots can briefly arrive
 out of order and reconcile on the next successful poll; they never control

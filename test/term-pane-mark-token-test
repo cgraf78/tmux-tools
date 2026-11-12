@@ -78,6 +78,77 @@ check 'reset cannot acknowledge pending attention' 64 "$?"
 mark reset busy --owner "$foreground" --token old:turn >/dev/null 2>&1
 check 'reset cannot carry an unrelated turn token' 64 "$?"
 
+# Pending kinds: the value names the attention; conditional clears compare and
+# clear in the server queue and never acknowledge informational attention.
+pending() { tmux -S "$socket" show-options -pqv -t "${1:-$pane}" @term_notify_pending; }
+status() { tmux -S "$socket" show-options -pqv -t "$pane" @term_notify_exit_status; }
+for kind in waiting blocked; do
+  mark set pending --kind "$kind" 2>/dev/null
+  check "set pending stores kind $kind" "$kind" "$(pending)"
+done
+mark set pending --exit-status 3 2>/dev/null
+mark set pending --kind waiting 2>/dev/null
+check 'waiting replaces a stale failure status' '' "$(status)"
+mark clear pending --if blocked 2>/dev/null
+check 'clear --if blocked leaves waiting' waiting "$(pending)"
+mark clear pending --if waiting 2>/dev/null
+check 'clear --if waiting clears waiting' '' "$(pending)"
+mark set pending --kind blocked 2>/dev/null
+mark clear pending --if waiting 2>/dev/null
+check 'clear --if waiting leaves blocked' blocked "$(pending)"
+mark clear pending --if blocked 2>/dev/null
+check 'clear --if blocked clears blocked' '' "$(pending)"
+for kind in waiting blocked; do
+  mark set pending --kind "$kind" 2>/dev/null
+  mark clear pending --if sticky 2>/dev/null
+  check "clear --if sticky clears $kind" '' "$(pending)"
+done
+mark set pending 2>/dev/null
+check 'set pending defaults to done' "done" "$(pending)"
+mark clear pending --if sticky 2>/dev/null
+check 'clear --if sticky leaves done' "done" "$(pending)"
+mark set pending --exit-status 2 2>/dev/null
+mark clear pending --if sticky 2>/dev/null
+check 'clear --if sticky leaves a failed command' 'done 2' "$(pending) $(status)"
+tmux -S "$socket" set-option -p -t "$pane" @term_notify_pending 1
+mark clear pending --if sticky 2>/dev/null
+check 'clear --if sticky leaves legacy pending' 1 "$(pending)"
+mark clear pending 2>/dev/null
+check 'plain clear still clears any kind' '' "$(pending)$(status)"
+
+# The comparison and clear name the exact pane, even when another is selected
+# and the target was given as a tmux target rather than an id.
+tmux -S "$socket" split-window -h -t "$pane" 'exec sleep 600' >/dev/null || exit 1
+selected=$(tmux -S "$socket" display-message -p '#{pane_id}')
+[ -n "$selected" ] && [ "$selected" != "$pane" ] || exit 1
+tmux -S "$socket" set-option -p -t "$selected" @term_notify_pending waiting
+mark set pending --kind waiting 2>/dev/null
+target=$(tmux -S "$socket" display-message -p -t "$pane" '#{session_name}:#{window_index}.#{pane_index}')
+[ -n "$target" ] || exit 1
+"$ROOT/bin/term-pane-mark" clear pending --if sticky --pane "$target" 2>/dev/null
+check 'conditional clear resolves a target to its pane' '' "$(pending)"
+check 'conditional clear leaves the selected pane alone' waiting "$(pending "$selected")"
+tmux -S "$socket" set-option -pu -t "$selected" @term_notify_pending
+
+# The killed-child reset also drops sticky attention, never done or failed.
+for kind in waiting blocked; do
+  mark set busy --token crashed:turn 2>/dev/null
+  mark set pending --kind "$kind" 2>/dev/null
+  mark reset busy --owner "$foreground" >/dev/null 2>&1
+  check "reset clears busy beside $kind" '' "$(value)"
+  check "reset clears sticky $kind" '' "$(pending)"
+done
+mark set pending 2>/dev/null
+mark reset busy --owner "$foreground" >/dev/null 2>&1
+check 'reset leaves done attention' "done" "$(pending)"
+mark set pending --exit-status 5 2>/dev/null
+mark reset busy --owner "$foreground" >/dev/null 2>&1
+check 'reset leaves a failed command' 'done 5' "$(pending) $(status)"
+mark set pending --kind waiting 2>/dev/null
+mark reset busy --owner "$$" >/dev/null 2>&1
+check 'an unrelated owner cannot reset sticky attention' waiting "$(pending)"
+mark clear pending 2>/dev/null
+
 # Cleanup must compare the snapshot's generation inside tmux, not delete a
 # lease renewed by another publisher between the query and the cleanup queue.
 old="$(($(date +%s) - 1)):1:1:0"
@@ -103,5 +174,30 @@ STATE_REAL_TMUX=$(command -v tmux) STATE_SOCKET="$socket" STATE_PANE="$pane" \
 STATE_RENEW="$renewed" PATH="$tmp/bin:$PATH" \
   "$ROOT/bin/term-pane-state" --socket "$socket" --session "\$0" --print >/dev/null
 check 'cleanup cannot erase a concurrently renewed child lease' "$renewed" \
+  "$(tmux -S "$socket" show-options -pqv -t "$pane" @termnav_child_attention)"
+
+# An invalid or expired waiting lease is cleared on its own pane, even while
+# another pane is selected, and the 4-field attention lease is left as is.
+tmux -S "$socket" select-pane -t "$selected"
+fresh="$(($(date +%s) + 15)):0:2:0"
+for waiting in "$(($(date +%s) - 1)):1" "$(($(date +%s) + 600)):1" "$(($(date +%s) + 15)):1:2"; do
+  tmux -S "$socket" set-option -p -t "$pane" @termnav_child_attention "$fresh" \; \
+    set-option -p -t "$pane" @termnav_child_waiting "$waiting" \; \
+    set-option -p -t "$selected" @termnav_child_waiting "$waiting"
+  "$ROOT/bin/term-pane-state" --socket "$socket" --session "\$0" --print >"$tmp/out"
+  check "invalid waiting lease $waiting is removed" '' \
+    "$(tmux -S "$socket" show-options -pqv -t "$pane" @termnav_child_waiting)"
+  check "invalid waiting lease $waiting leaves the attention lease" "$fresh" \
+    "$(tmux -S "$socket" show-options -pqv -t "$pane" @termnav_child_attention)"
+  tmux -S "$socket" set-option -pu -t "$selected" @termnav_child_waiting
+done
+tmux -S "$socket" set-option -p -t "$pane" @termnav_child_waiting "$(($(date +%s) + 15)):2"
+check 'a valid waiting lease reaches the snapshot' \
+  '{"v":1,"working":0,"pending":2,"failed":0,"waiting":2}' \
+  "$("$ROOT/bin/term-pane-state" --socket "$socket" --session "\$0" --print)"
+tmux -S "$socket" set-option -p -t "$pane" @termnav_child_attention "$old"
+tmux -S "$socket" set-option -p -t "$selected" @termnav_child_attention "$old"
+"$ROOT/bin/term-pane-state" --socket "$socket" --session "\$0" --print >/dev/null
+check 'an expired attention lease is removed from its own pane' '' \
   "$(tmux -S "$socket" show-options -pqv -t "$pane" @termnav_child_attention)"
 exit "$((failures != 0))"

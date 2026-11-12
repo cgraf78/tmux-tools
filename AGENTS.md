@@ -2,7 +2,7 @@
 
 ## About
 
-Six Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
+Seven Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
 `/bin/bash` 3.2 is a hard contract with its own CI job.
 `tmux-copy-last-output`, `term-pane-mark`, and `term-notify-sound` were
 imported from cgraf78/cmdblocks@52aae58; that archived repo holds their
@@ -12,14 +12,18 @@ earlier history.
 
 - `bin/tmux-continuum-default-server`, `bin/tmux-continuum-save-gate`,
   `bin/tmux-clip-paste`, `bin/tmux-copy-last-output`, `bin/term-pane-mark`,
-  `bin/term-notify-sound`: the commands. Each must stay self-contained.
+  `bin/term-notify-sound`, `bin/term-pane-state`: the commands. Each must
+  stay self-contained.
 - `man/man1/`: one page per command. Detailed behavior lives here, not in
   the README.
 - `install.sh`: generated checkout installer (see below).
   `support/install-checkout.sh` is the repo-owned delegate it runs.
 - `test/run`: entry point for `test/tmux-tools-harness-test`,
-  `test/tmux-continuum-test`, `test/tmux-tools-test`, and
-  `test/copy-mark-test` (which sources `test/copy-mark-helpers.sh`).
+  `test/tmux-continuum-test`, `test/tmux-tools-test`,
+  `test/copy-mark-test` (which sources `test/copy-mark-helpers.sh`),
+  `test/term-pane-state-test` (mock tmux, plus
+  `test/term-pane-state-delegate.py`), `test/term-pane-state-client.py`
+  and `test/term-pane-mark-token-test` (both on a private real tmux).
 
 ## Invariants
 
@@ -28,9 +32,23 @@ earlier history.
   config keeps working. Don't turn those paths into errors.
 - `term-pane-mark` and `term-notify-sound` are best effort: missing tmux,
   panes, or helpers must not turn the caller's work into an error.
-- `@term_notify_pending` and `@term_busy` (pane options set to `1`) and
+- `@term_notify_pending`, `@term_notify_exit_status`, `@term_busy` and
   `TERM_NOTIFY_TTY` are read or set by users' tmux configs, shell prompts,
-  and agent hooks. Don't rename them.
+  and agent hooks. Don't rename them. `@term_busy` is `1`.
+  `@term_notify_pending` holds the attention kind: `done`, `waiting` or
+  `blocked`; readers treat the legacy value `1` as `done`, and any non-empty
+  value as pending. Exit status only accompanies `done`. Kinds, `--kind` and
+  `--if waiting|blocked|sticky` are a cross-repo contract with agent hooks
+  and the tmux config; don't add or rename one without updating them.
+- `term-pane-state` reads the config predicates `@pane_busy`,
+  `@pane_pending`, `@pane_waiting` (empty in older configs, so 0) and
+  `@pane_failed`, and Termnav's leases `@termnav_child_attention`
+  (`expiry:working:pending:failed`) and `@termnav_child_waiting`
+  (`expiry:N`). Each pane counts once by effective state: failed, then
+  waiting, then done, then working; attention hides the pane's own work.
+  Its JSON carries `waiting`, with `failed + waiting <= pending`; it passes
+  `termnav tmux attention --waiting N` only when N is non-zero and retries
+  once without it when an older Termnav exits 2.
 - Exit 64 is reserved for bad arguments to the pane and copy commands;
   `tmux-copy-last-output --print` exits 3 when it finds no block, and a
   tmux binding relies on that status.

@@ -31,11 +31,17 @@ MOCK
 chmod +x "$tmp/bin/tmux"
 cat >"$tmp/bin/termnav" <<'MOCK'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STATE_NATIVE_CALLS"
+# An older Termnav rejects the unknown --waiting flag as a usage error.
+case " $* " in
+  *' --waiting '*) [ "${STATE_REJECT_WAITING:-0}" != 1 ] || exit 2 ;;
+esac
 printf '%s\n' "$@" >"$STATE_NATIVE_ARGS"
 exit "${STATE_ROUTE_STATUS:-3}"
 MOCK
 chmod +x "$tmp/bin/termnav"
 export PATH="$tmp/bin:$PATH" STATE_CALLS="$tmp/calls" STATE_NATIVE_ARGS="$tmp/native-args"
+export STATE_NATIVE_CALLS="$tmp/native-calls"
 failures=0
 check() {
   local label=$1 expected=$2 actual=$3
@@ -50,94 +56,203 @@ summary() {
   # shellcheck disable=SC2016 # tmux's literal session identifier.
   "$ROOT/bin/term-pane-state" --socket /private/test.sock --session '$7' --print
 }
-export STATE_ROWS=$'%1 1 0 0\n%2 0 1 1\n%3 0 1 0'
-check 'working and attention are independent' \
-  '{"v":1,"working":1,"pending":2,"failed":1}' "$(summary 2>/dev/null)"
+native() { awk -v flag="$1" '$0 == flag { getline; print; exit }' "$STATE_NATIVE_ARGS"; }
+publish() {
+  rm -f "$STATE_NATIVE_ARGS" "$STATE_NATIVE_CALLS"
+  "$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
+    --client-pid 12 --client-created 123 >/dev/null 2>&1
+}
+# Rows: pane busy pending waiting failed a<attention lease> w<waiting lease>.
+export STATE_ROWS=$'%1 1 0 0 0 a w\n%2 0 1 0 1 a w\n%3 0 1 0 0 a w'
+check 'each pane counts its effective state' \
+  '{"v":1,"working":1,"pending":2,"failed":1,"waiting":0}' "$(summary 2>/dev/null)"
+export STATE_ROWS=$'%1 1 1 0 0 a w\n%2 1 1 1 0 a w\n%3 1 1 0 1 a w\n%4 1 0 0 0 a w'
+check 'attention hides the same pane'"'"'s work' \
+  '{"v":1,"working":1,"pending":3,"failed":1,"waiting":1}' "$(summary 2>/dev/null)"
+export STATE_ROWS=$'%1 0 1 1 1 a w\n%2 0 1 1 0 a w'
+check 'failed wins over waiting on one pane' \
+  '{"v":1,"working":0,"pending":2,"failed":1,"waiting":1}' "$(summary 2>/dev/null)"
 export STATE_ROWS=''
 check 'empty session has no state' \
-  '{"v":1,"working":0,"pending":0,"failed":0}' "$(summary 2>/dev/null)"
+  '{"v":1,"working":0,"pending":0,"failed":0,"waiting":0}' "$(summary 2>/dev/null)"
+: >"$STATE_CALLS"
+summary >/dev/null 2>&1
+check 'summary queries the waiting predicate and lease' 1 \
+  "$(grep -c '#{?#{E:@pane_waiting},1,0} #{?#{E:@pane_failed},1,0} a#{@termnav_child_attention} w#{@termnav_child_waiting}' "$STATE_CALLS")"
 now=$(date +%s)
-export STATE_ROWS="%1 0 0 0 $((now + 15)):2:3:1"
-check 'fresh child session contributes independent work and attention' \
-  '{"v":1,"working":2,"pending":3,"failed":1}' "$(summary 2>/dev/null)"
-export STATE_ROWS="%1 1 1 0 $((now - 1)):2:3:1"
+export STATE_ROWS="%1 0 0 0 0 a$((now + 15)):2:3:1 w"
+check 'fresh child session contributes its counts' \
+  '{"v":1,"working":2,"pending":3,"failed":1,"waiting":0}' "$(summary 2>/dev/null)"
+export STATE_ROWS="%1 1 1 0 0 a$((now - 1)):2:3:1 w"
 check 'expired child cannot leave ghost attention' \
-  '{"v":1,"working":1,"pending":1,"failed":0}' "$(summary 2>/dev/null)"
-export STATE_ROWS="%1 0 0 0 $((now + 15)):1:0:2"
+  '{"v":1,"working":0,"pending":1,"failed":0,"waiting":0}' "$(summary 2>/dev/null)"
+export STATE_ROWS="%1 0 0 0 0 a$((now + 15)):1:0:2 w"
 check 'malformed child contribution is ignored' \
-  '{"v":1,"working":0,"pending":0,"failed":0}' "$(summary 2>/dev/null)"
-export STATE_ROWS="%1 0 0 0 $((now + 600)):1:1:1"
+  '{"v":1,"working":0,"pending":0,"failed":0,"waiting":0}' "$(summary 2>/dev/null)"
+export STATE_ROWS="%1 0 0 0 0 a$((now + 600)):1:1:1 w"
 check 'unbounded child leases are ignored' \
-  '{"v":1,"working":0,"pending":0,"failed":0}' "$(summary 2>/dev/null)"
+  '{"v":1,"working":0,"pending":0,"failed":0,"waiting":0}' "$(summary 2>/dev/null)"
+
+# The waiting lease refines the 4-field attention lease without changing it.
+lease="$((now + 15)):2:3:1"
+export STATE_ROWS="%1 0 0 0 0 a$lease w$((now + 15)):2"
+: >"$STATE_CALLS"
+check 'fresh child waiting lease adds waiting attention' \
+  '{"v":1,"working":2,"pending":3,"failed":1,"waiting":2}' "$(summary 2>/dev/null)"
+check 'valid child leases are not cleared' 0 "$(grep -c if-shell "$STATE_CALLS")"
+export STATE_ROWS="%1 0 0 0 0 a$lease w$((now + 15)):3"
+: >"$STATE_CALLS"
+check 'waiting beyond the child'"'"'s non-failed attention is rejected' \
+  '{"v":1,"working":2,"pending":3,"failed":1,"waiting":0}' "$(summary 2>/dev/null)"
+check 'an inconsistent fresh waiting lease is left to expire' 0 "$(grep -c if-shell "$STATE_CALLS")"
+export STATE_ROWS="%1 0 0 0 0 a w$((now + 15)):1"
+check 'waiting without an attention lease contributes nothing' \
+  '{"v":1,"working":0,"pending":0,"failed":0,"waiting":0}' "$(summary 2>/dev/null)"
+export STATE_ROWS="%1 0 0 0 0 a$((now - 1)):2:3:1 w$((now + 15)):1"
+check 'waiting beside an expired attention lease contributes nothing' \
+  '{"v":1,"working":0,"pending":0,"failed":0,"waiting":0}' "$(summary 2>/dev/null)"
+for case in "$((now - 1)):1:expired" "$((now + 600)):1:unbounded" \
+  "$((now + 15)):1:2:extra field" "$((now + 15)):x:nonnumeric" \
+  "$((now + 15)):1234567:oversized"; do
+  encoded=${case%:*}
+  export STATE_ROWS="%4 0 0 0 0 a$lease w$encoded"
+  : >"$STATE_CALLS"
+  check "${case##*:} child waiting lease is ignored" \
+    '{"v":1,"working":2,"pending":3,"failed":1,"waiting":0}' "$(summary 2>/dev/null)"
+  if [ "${case##*:}" = nonnumeric ]; then
+    check "${case##*:} child waiting lease is never embedded in a format" 0 \
+      "$(grep -c if-shell "$STATE_CALLS")"
+  else
+    check "${case##*:} child waiting lease is compared and cleared on its pane" \
+      "-S /private/test.sock if-shell -F -t %4 #{==:#{@termnav_child_waiting},$encoded} set-option -pu -t %4 @termnav_child_waiting " \
+      "$(grep if-shell "$STATE_CALLS")"
+  fi
+done
+export STATE_ROWS="%4 0 0 0 0 a$((now - 1)):2:3:1 w$((now - 1)):1"
+: >"$STATE_CALLS"
+summary >/dev/null 2>&1
+# Each logged if-shell ends with a space before its empty else-command.
+expected="-S /private/test.sock if-shell -F -t %4 #{==:#{@termnav_child_attention},$((now - 1)):2:3:1} set-option -pu -t %4 @termnav_child_attention "
+expected+=$'\n'"-S /private/test.sock if-shell -F -t %4 #{==:#{@termnav_child_waiting},$((now - 1)):1} set-option -pu -t %4 @termnav_child_waiting "
+check 'an expired attention lease is cleared on its exact pane' \
+  "$expected" "$(grep if-shell "$STATE_CALLS")"
+export STATE_ROWS="%4 0 0 0 0 a$lease w$((now + 15)):1 extra"
+: >"$STATE_CALLS"
+check 'a lease row with spaces keeps local state only' \
+  '{"v":1,"working":0,"pending":0,"failed":0,"waiting":0}' "$(summary 2>/dev/null)"
+check 'a lease row with spaces clears nothing' 0 "$(grep -c if-shell "$STATE_CALLS")"
+
 # shellcheck disable=SC2016 # Deliberately malformed machine data, never code.
-export STATE_ROWS='%1 $(touch /tmp/never-evaluate-state) 1 0'
+export STATE_ROWS='%1 $(touch /tmp/never-evaluate-state) 1 0 0 a w'
 summary >"$tmp/invalid" 2>/dev/null
 check 'malformed snapshot fails closed' 1 "$?"
 check 'malformed snapshot emits no partial JSON' '' "$(cat "$tmp/invalid")"
-export STATE_ROWS='%1 0 0 1'
-summary >"$tmp/invalid" 2>/dev/null
-check 'failure without pending is rejected' 1 "$?"
-export STATE_ROWS='%1 1 0 0' STATE_FAIL=1
+for tuple in '0 0 0 1' '0 0 1 0' '0 0 1 1' '2 0 0 0' '0 1 2 0'; do
+  export STATE_ROWS="%1 $tuple a w"
+  summary >"$tmp/invalid" 2>/dev/null
+  check "attention tuple '$tuple' is rejected" 1 "$?"
+done
+export STATE_ROWS='%1 1 0 0 0 a w' STATE_FAIL=1
 summary >"$tmp/invalid" 2>/dev/null
 check 'query failure is distinguishable from idle' 1 "$?"
 unset STATE_FAIL
+# Clients: pid created session control term tty pane pending waiting failed name.
 # shellcheck disable=SC2016 # tmux identifier is literal machine data.
-export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 1 1 /dev/ttys999'
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 1 0 1 /dev/ttys999'
 "$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
   --client-pid 13 --client-created 123 >"$tmp/stale" 2>/dev/null
 check 'reused client identity cannot publish' 1 "$?"
 check 'publisher never renders status text' '' "$(cat "$tmp/stale")"
 # shellcheck disable=SC2016
-export STATE_CLIENTS='12 123 $7 1 xterm-256color /dev/ttys999 %1 1 1 /dev/ttys999'
-"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
-  --client-pid 12 --client-created 123 >/dev/null 2>&1
+export STATE_CLIENTS='12 123 $7 1 xterm-256color /dev/ttys999 %1 1 0 1 /dev/ttys999'
+publish
 check 'control clients cannot publish escapes' 1 "$?"
 # The session-wide query cannot identify which exact client is looking at a
 # pane. A client-targeted expansion must replace only that pane's local alert.
 # shellcheck disable=SC2016 # tmux's literal session identifier.
-export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 0 0 /dev/ttys999'
-export STATE_ROUTE_STATUS=0 STATE_ROWS='%1 1 1 1'
-"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
-  --client-pid 12 --client-created 123 >/dev/null 2>&1
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 0 0 0 /dev/ttys999'
+export STATE_ROUTE_STATUS=0 STATE_ROWS='%1 1 1 0 1 a w'
+publish
 check 'focused client publishes successfully' 0 "$?"
-check 'focused client keeps working' 1 "$(awk '$0 == "--working" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
-check 'focused client hides its own pending mark' 0 "$(awk '$0 == "--pending" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
-check 'focused client hides its own failure' 0 "$(awk '$0 == "--failed" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+check 'focused client works again once its own attention is hidden' 1 "$(native --working)"
+check 'focused client hides its own pending mark' 0 "$(native --pending)"
+check 'focused client hides its own failure' 0 "$(native --failed)"
+check 'no waiting attention omits the flag for older Termnav' '' "$(native --waiting)"
 check 'print summary stays session-wide' \
-  '{"v":1,"working":1,"pending":1,"failed":1}' "$(summary 2>/dev/null)"
-export STATE_ROWS=$'%1 1 1 1\n%2 0 1 1'
-"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
-  --client-pid 12 --client-created 123 >/dev/null 2>&1
-check 'background pane remains pending' 1 "$(awk '$0 == "--pending" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
-check 'background failure remains visible' 1 "$(awk '$0 == "--failed" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
-export STATE_ROWS="%1 1 1 1 $((now + 15)):2:3:1"
-"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
-  --client-pid 12 --client-created 123 >/dev/null 2>&1
-check 'focused pane retains child pending attention' 3 "$(awk '$0 == "--pending" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
-check 'focused pane retains child failure' 1 "$(awk '$0 == "--failed" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+  '{"v":1,"working":0,"pending":1,"failed":1,"waiting":0}' "$(summary 2>/dev/null)"
+# The selected pane's predicates replace its row, including waiting.
 # shellcheck disable=SC2016 # tmux's literal session identifier.
-export STATE_ROWS='%1 1 1 1' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %9 0 0 /dev/ttys999'
-"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
-  --client-pid 12 --client-created 123 >/dev/null 2>&1
+export STATE_ROWS='%1 0 1 1 0 a w' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 1 0 0 /dev/ttys999'
+publish
+check 'client focus context decides the selected pane'"'"'s waiting' '' "$(native --waiting)"
+check 'client focus context keeps the selected pane pending' 1 "$(native --pending)"
+# shellcheck disable=SC2016 # tmux's literal session identifier.
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 0 0 0 /dev/ttys999'
+export STATE_ROWS=$'%1 1 1 0 1 a w\n%2 0 1 0 1 a w\n%3 1 1 1 0 a w'
+publish
+check 'background pane remains pending' 2 "$(native --pending)"
+check 'background failure remains visible' 1 "$(native --failed)"
+check 'background waiting remains visible' 1 "$(native --waiting)"
+check 'background waiting pane is not working' 1 "$(native --working)"
+export STATE_ROWS="%1 1 1 0 1 a$((now + 15)):2:3:1 w$((now + 15)):1"
+publish
+check 'focused pane retains child pending attention' 3 "$(native --pending)"
+check 'focused pane retains child failure' 1 "$(native --failed)"
+check 'focused pane retains child waiting' 1 "$(native --waiting)"
+# shellcheck disable=SC2016 # tmux's literal session identifier.
+export STATE_ROWS='%1 1 1 0 1 a w' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %9 0 0 0 /dev/ttys999'
+publish
 check 'changed client pane fails closed' 1 "$?"
+for tuple in '0 0 1' '0 1 0' '0 1 1' '2 0 0'; do
+  # shellcheck disable=SC2016 # tmux's literal session identifier.
+  export STATE_CLIENTS="12 123 \$7 0 xterm-256color /dev/ttys999 %1 $tuple /dev/ttys999"
+  publish
+  check "invalid client attention '$tuple' fails closed" 1 "$?"
+done
 # shellcheck disable=SC2016 # tmux's literal session identifier.
-export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 0 1 /dev/ttys999'
-"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
-  --client-pid 12 --client-created 123 >/dev/null 2>&1
-check 'invalid client failure fails closed' 1 "$?"
+export STATE_ROWS='%1 1 1 0 1 a w' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 1 0 1 /dev/ttys999'
+publish
+check 'unfocused client keeps its own pending mark' 1 "$(native --pending)"
+check 'unfocused client keeps its own failure' 1 "$(native --failed)"
 # shellcheck disable=SC2016 # tmux's literal session identifier.
-export STATE_ROWS='%1 1 1 1' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 1 1 /dev/ttys999'
-"$ROOT/bin/term-pane-state" --socket /private/test.sock --client /dev/ttys999 \
-  --client-pid 12 --client-created 123 >/dev/null 2>&1
-check 'unfocused client keeps its own pending mark' 1 "$(awk '$0 == "--pending" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
-check 'unfocused client keeps its own failure' 1 "$(awk '$0 == "--failed" { getline; print; exit }' "$STATE_NATIVE_ARGS")"
+export STATE_ROWS='%1 1 1 1 0 a w' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 1 1 0 /dev/ttys999'
+publish
+check 'unfocused client keeps its own waiting mark' 1 "$(native --waiting)"
+check 'unfocused waiting pane is not working' 0 "$(native --working)"
+
+# Termnav before --waiting exits 2 for the unknown flag. Retry once without
+# it so attention still publishes, with waiting folded into pending.
+# shellcheck disable=SC2016 # tmux's literal session identifier.
+export STATE_ROWS=$'%1 0 0 0 0 a w\n%2 0 1 1 0 a w' STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys999 %1 0 0 0 /dev/ttys999'
+# Explicit exports: Bash 3.2 must not see assignments before function calls.
+export STATE_REJECT_WAITING=1
+publish
+check 'older Termnav still publishes' 0 "$?"
+check 'older Termnav is retried exactly once' 2 "$(wc -l <"$STATE_NATIVE_CALLS" | tr -d ' ')"
+check 'retry keeps the attention counts' 1 "$(native --pending)"
+check 'retry drops only the waiting flag' '' "$(native --waiting)"
+export STATE_ROUTE_STATUS=1
+publish
+check 'older Termnav failure after the retry still fails' 1 "$?"
+unset STATE_REJECT_WAITING
+publish
+check 'other Termnav failures are not retried' 1 "$(wc -l <"$STATE_NATIVE_CALLS" | tr -d ' ')"
+export STATE_ROUTE_STATUS=2
+publish
+check 'a usage error without --waiting still fails' 1 "$?"
+check 'a usage error is retried at most once' 2 "$(wc -l <"$STATE_NATIVE_CALLS" | tr -d ' ')"
+export STATE_ROWS='%1 0 0 0 0 a w'
+publish
+check 'a usage error without waiting attention is not retried' 1 "$(wc -l <"$STATE_NATIVE_CALLS" | tr -d ' ')"
+export STATE_ROUTE_STATUS=0
+
 "$ROOT/bin/term-pane-state" --socket /private/test.sock --session bad --print >/dev/null 2>&1
 check 'session identifiers are validated' 64 "$?"
 mkdir "$tmp/no-route"
 ln -s "$tmp/bin/tmux" "$tmp/no-route/tmux"
-export STATE_ROWS='%1 1 0 0'
+export STATE_ROWS='%1 1 0 0 0 a w'
 # shellcheck disable=SC2016 # Literal tmux session identifier.
-export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/null %1 0 0 /dev/null'
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/null %1 0 0 0 /dev/null'
 PATH="$tmp/no-route:/usr/bin:/bin" "$ROOT/bin/term-pane-state" --socket /private/test.sock \
   --client /dev/null --client-pid 12 --client-created 123 >/dev/null 2>&1
 check 'missing hierarchy owner fails closed instead of guessing tty ownership' 1 "$?"

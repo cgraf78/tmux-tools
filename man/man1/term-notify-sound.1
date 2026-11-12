@@ -1,10 +1,12 @@
-.TH TERM-NOTIFY-SOUND 1 "2026-10-23" "tmux-tools" "User Commands"
+.TH TERM-NOTIFY-SOUND 1 "2026-11-11" "tmux-tools" "User Commands"
 .SH NAME
 term-notify-sound \- emit a terminal-aware completion notification
 .SH SYNOPSIS
 .B term-notify-sound
 .RB [ \-\-owner
 .IR pid ]
+.RB [ \-\-kind
+.IR kind ]
 .RB [ \-\-exit-status
 .IR code ]
 .SH DESCRIPTION
@@ -21,8 +23,11 @@ Inside tmux, the helper also marks the pane that rang as pending with
 .BR "term-pane-mark set pending" ,
 which sets the pane user option
 .B @term_notify_pending
-to
-.BR 1 .
+to the kind of attention,
+.B done
+unless
+.B \-\-kind
+says otherwise.
 tmux records a bell against a window, not the pane that rang it, so this
 option is how a tmux configuration can show which pane wants attention. The
 helper only sets the option; the configuration that renders it owns clearing
@@ -52,6 +57,18 @@ An agent's hook passes the agent, so a program the agent launched, which
 inherits its pane but rings through the pane fallback without a terminal of
 its own, cannot mark the agent's pane. The bell still rings.
 .TP
+.BI \-\-kind " kind"
+Pass the kind of attention,
+.BR done ,
+.B waiting
+or
+.BR blocked ,
+to the pending mark; see
+.BR term-pane-mark (1).
+Any other kind is a usage error and rings nothing. Without this option the
+mark is
+.BR done .
+.TP
 .BI \-\-exit-status " code"
 Pass a decimal shell exit status from 0 through 255 to the pending mark.
 Options may appear in either order. Leading zeroes are accepted and removed.
@@ -61,6 +78,8 @@ before marking the pane pending. A zero status or no status clears any stale
 failure metadata. The terminal bell is unchanged; the tmux configuration
 renders the status and clears it along with the pending mark when visited.
 Status is accepted only through this option, not through the environment.
+It is valid only with kind
+.BR done .
 .SH ENVIRONMENT
 .TP
 .B TERM_NOTIFY_TTY

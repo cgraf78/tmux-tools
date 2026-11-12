@@ -217,6 +217,34 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
         snapshot = json.loads(printed)
         assert [snapshot["pending"], snapshot["failed"]] == expected, (snapshot, expected)
         print("PASS: print snapshot retains the server's list-panes view")
+
+        # A config older than @pane_waiting reports no waiting attention.
+        tmux("new-window", "-d", "-t", "attention:", "sleep 60")
+        waiting = tmux("display-message", "-p", "-t", "attention:2", "#{pane_id}")
+        tmux("set-option", "-p", "-t", waiting, "@term_notify_pending", "waiting")
+        tmux("set-option", "-p", "-t", waiting, "@term_busy", "1")
+        tmux("new-window", "-d", "-t", "attention:", "sleep 60")
+        busy = tmux("display-message", "-p", "-t", "attention:3", "#{pane_id}")
+        tmux("set-option", "-p", "-t", busy, "@term_busy", "1")
+        tmux("set-option", "-g", "@pane_busy", "#{@term_busy}")
+        old_config = publish()
+        assert "--waiting" not in old_config, old_config
+        assert old_config["--pending"] == "2", old_config
+        assert old_config["--working"] == "1", old_config
+        print("PASS: a config without @pane_waiting reports no waiting attention")
+
+        tmux(
+            "set-option",
+            "-g",
+            "@pane_waiting",
+            "#{&&:#{E:@pane_pending},#{==:#{@term_notify_pending},waiting}}",
+        )
+        effective = publish()
+        assert effective["--waiting"] == "1", effective
+        assert effective["--pending"] == "2", effective
+        assert effective["--failed"] == "1", effective
+        assert effective["--working"] == "1", effective
+        print("PASS: a waiting pane counts as waiting, not working")
     finally:
         try:
             tmux("kill-server")

@@ -3,12 +3,12 @@
 # Emits one standard bell (BEL), rendered by the terminal client. Falls back to
 # the current tmux pane's pty when /dev/tty is unavailable. Inside tmux it also
 # marks the notifying pane as pending so the tmux config can show which pane
-# wants attention.
+# wants attention, and with --kind which kind of attention it wants.
 
 set -u
 
 usage() {
-  printf 'usage: term-notify-sound [--owner PID] [--exit-status CODE]\n' >&2
+  printf 'usage: term-notify-sound [--owner PID] [--kind done|waiting|blocked] [--exit-status CODE]\n' >&2
   exit 64
 }
 
@@ -18,6 +18,7 @@ usage() {
 # mark then follows term-pane-mark's owner rule, so it lands only for the
 # pane terminal's foreground program. The bell itself still rings.
 owner=''
+kind=''
 exit_status=''
 mark_args=()
 while [ $# -gt 0 ]; do
@@ -26,6 +27,15 @@ while [ $# -gt 0 ]; do
     --owner)
       [ -z "$owner" ] || usage
       owner=$2
+      ;;
+    # Validate like term-pane-mark, so a bad kind rings nothing instead of
+    # ringing and then silently marking nothing.
+    --kind)
+      [ -z "$kind" ] || usage
+      case $2 in
+        done | waiting | blocked) kind=$2 ;;
+        *) usage ;;
+      esac
       ;;
     --exit-status)
       [ -z "$exit_status" ] || usage
@@ -44,7 +54,9 @@ while [ $# -gt 0 ]; do
   esac
   shift 2
 done
+[ -z "$exit_status" ] || [ "${kind:-done}" = "done" ] || usage
 [ -z "$owner" ] || mark_args+=(--owner "$owner")
+[ -z "$kind" ] || mark_args+=(--kind "$kind")
 [ -z "$exit_status" ] || mark_args+=(--exit-status "$exit_status")
 
 send_tty_notify() {
