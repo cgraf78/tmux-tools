@@ -123,8 +123,20 @@ END {
 }
 ') || true
 
+# Tell the pressing client. tmux 3.2 cannot aim a message at one client
+# (display-message takes no argument to -c there), so there it goes to the
+# client tmux picks, which may be another session's.
+notify() {
+  if [[ -n "$client" ]]; then
+    tmux display-message -c "$client" -t "$pane" "$1" 2>/dev/null ||
+      tmux display-message -t "$pane" "$1"
+  else
+    tmux display-message "$1"
+  fi
+}
+
 if [[ -z "$output" ]]; then
-  tmux display-message "No command output found"
+  notify "No command output found"
   # Both modes report it, but only a printing caller gets a status, so a
   # pipeline routes nothing while a clipboard keybinding stays quiet. Status 3
   # stays distinct from the 1 that an unexpected failure exits with.
@@ -142,7 +154,7 @@ fail_copy() {
   local details="${2:-unknown error}"
 
   details="${details//$'\n'/ }"
-  tmux display-message "Clipboard copy failed via $backend: $details"
+  notify "Clipboard copy failed via $backend: $details"
   exit 0
 }
 
@@ -161,10 +173,12 @@ if command -v clip &>/dev/null; then
   copied=true
 elif [[ -n "$client" ]]; then
   # Let tmux deliver OSC 52 to the initiating client. An implicit client lookup
-  # can select a different machine attached to this same server.
-  actual_client=$(tmux display-message -p -c "$client" '#{client_name}') ||
-    fail_copy tmux 'initiating client is no longer attached'
-  [[ "$actual_client" == "$client" ]] ||
+  # can select a different machine attached to this same server, so match the
+  # exact name among the attached clients: display-message -p -c answers for
+  # the most recently active client, and tmux 3.2 takes no argument to -c.
+  clients=$(tmux list-clients -F '#{client_name}') ||
+    fail_copy tmux 'could not list tmux clients'
+  [[ $'\n'"$clients"$'\n' == *$'\n'"$client"$'\n'* ]] ||
     fail_copy tmux 'initiating client is no longer attached'
   if ! err=$(copy_with tmux load-buffer -w -t "$client" -); then
     fail_copy tmux "$err"
@@ -199,7 +213,7 @@ if [[ "$copied" == false ]]; then
 fi
 
 if [[ "$count" == 1 ]]; then
-  tmux display-message "Copied last command + output to clipboard"
+  notify "Copied last command + output to clipboard"
 else
-  tmux display-message "Copied last $count commands + output to clipboard"
+  notify "Copied last $count commands + output to clipboard"
 fi

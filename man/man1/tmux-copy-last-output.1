@@ -64,7 +64,15 @@ remote host's clipboard. Client names identify terminal devices; this API
 does not pin a process generation across detach/reconnect and name reuse.
 The pane ID also targets the capture explicitly.
 .PP
-Without clip, an explicit client still uses tmux's OSC 52 transport. Without
+Without clip, an explicit client still uses tmux's OSC 52 transport, after
+finding that exact name among
+.BR "tmux list-clients" .
+.B display-message \-p \-c
+cannot check it: it answers for the most recently active client, and tmux
+3.2 takes no argument to
+.BR \-c .
+Messages go to the initiating client; tmux 3.2 cannot aim a message at one
+client, so there they go to the client tmux picks. Without
 an explicit client the standalone command tries
 .BR pbcopy (1)
 on macOS,

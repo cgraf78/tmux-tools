@@ -33,13 +33,18 @@ case "$1" in
     cat "$TMUX_CAPTURE_FILE"
     ;;
   display-message)
-    if [[ "${2:-}" == "-p" && "${3:-}" == "-c" ]]; then
-      printf '%s\n' "${TMUX_TEST_CLIENT_NAME:-$4}"
+    # tmux 3.2 takes no argument to -c.
+    if [[ -n "${TMUX_TEST_NO_C:-}" && " $* " == *' -c '* ]]; then
+      exit 1
     elif [[ "${2:-}" == "-p" && "${3:-}" == "#{client_tty}" ]]; then
       printf '%s\n' "${TMUX_CLIENT_TTY:-}"
     else
       printf '%s\n' "$*" >>"$TMUX_MESSAGE_LOG"
     fi
+    ;;
+  # A client of another session is attached too, and listed first.
+  list-clients)
+    printf '/dev/ttys009\n%s\n' "${TMUX_TEST_CLIENT_NAME:-/dev/ttys007}"
     ;;
   load-buffer)
     cat >"$PBCOPY_OUT"
@@ -231,6 +236,8 @@ _assert_contains "copy scoped: captures only the initiating pane" \
 _assert_file_content "copy scoped: retains command-block content" \
   '$ echo two
 two output' "$tmp/scoped-copied"
+_assert_contains "copy scoped: tells the pressing client" \
+  '-c /dev/ttys007 -t %7 Copied last command' "$(cat "$tmp/scoped-message.log")"
 
 # Restrict PATH so the installed host clip/native clipboard cannot win this
 # standalone test. The tmux stub records transport, never a real user server.
@@ -249,6 +256,25 @@ _assert_contains "copy standalone: OSC 52 targets the exact initiating client" \
 _assert_file_content "copy standalone: scoped transport gets selected content" \
   '$ echo two
 two output' "$tmp/standalone-copied"
+_assert_contains "copy standalone: finds the client among all attached clients" \
+  'list-clients -F #{client_name}' "$(cat "$tmp/standalone-tmux.log")"
+_assert_not_contains "copy standalone: never asks display-message -c for the client" \
+  'display-message -p -c' "$(cat "$tmp/standalone-tmux.log")"
+_assert_contains "copy standalone: tells the pressing client" \
+  '-c /dev/ttys007 -t %7 Copied last command' "$(cat "$tmp/standalone-message.log")"
+# tmux 3.2 takes no argument to -c: the copy still works and the message
+# still shows, on the client tmux picks.
+rm -f "$tmp/standalone-copied" "$tmp/standalone-tmux.log"
+TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/standalone-old-message.log" \
+  TMUX_CALL_LOG="$tmp/standalone-tmux.log" TMUX_TEST_NO_C=1 \
+  PBCOPY_OUT="$tmp/standalone-copied" PATH="$standalone_bin" \
+  "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007
+_assert_exit "copy standalone on tmux 3.2: succeeds" 0 "$?"
+_assert_file_content "copy standalone on tmux 3.2: copies the content" \
+  '$ echo two
+two output' "$tmp/standalone-copied"
+_assert_contains "copy standalone on tmux 3.2: the message falls back to the pane" \
+  '-t %7 Copied last command' "$(cat "$tmp/standalone-old-message.log")"
 rm -f "$tmp/standalone-copied" "$tmp/standalone-tmux.log"
 TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/standalone-missing-message.log" \
   TMUX_CALL_LOG="$tmp/standalone-tmux.log" TMUX_TEST_CLIENT_NAME=/dev/ttys008 \
