@@ -5,6 +5,7 @@
 # Usage:
 #   . "$TEST_DIR/copy-mark-helpers.sh"
 #   _assert_eq "description" "expected" "actual"
+#   _assert_not_contains "description" "unexpected" "actual"
 #   ...
 #   _test_summary  # prints results, exits 0 or 1
 
@@ -40,6 +41,15 @@ _assert_contains() {
     _pass "$desc"
   else
     _fail "$desc (expected to contain '$expected', got '$actual')"
+  fi
+}
+
+_assert_not_contains() {
+  local desc="$1" unexpected="$2" actual="$3"
+  if [[ "$actual" != *"$unexpected"* ]]; then
+    _pass "$desc"
+  else
+    _fail "$desc (should not contain '$unexpected', got '$actual')"
   fi
 }
 
