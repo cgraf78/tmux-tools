@@ -47,8 +47,9 @@ jobs:
           PREFIX="$install_prefix" /bin/bash install.sh
 
           for command in tmux-clip-paste tmux-continuum-default-server \
-            tmux-continuum-save-gate tmux-copy-last-output term-pane-mark \
-            term-notify-sound term-pane-state; do
+            tmux-continuum-save-gate tmux-copy-last-output \
+            tmux-command-palette term-pane-mark term-notify-sound \
+            term-pane-state; do
             [[ -L "$install_prefix/bin/$command" ]] || exit 1
             /bin/bash -n "$install_prefix/bin/$command"
           done
@@ -66,6 +67,7 @@ jobs:
           printf '%s\n' '#!/bin/sh' \
             'case $1 in' \
             '  capture-pane) cat "$STUB_CAPTURE" ;;' \
+            '  list-keys) [ "$4" != prefix ] || printf "%s\n" "r  Record the pane" ;;' \
             '  *) printf "%s\n" "$*" >>"$STUB_LOG" ;;' \
             'esac' >"$stub_dir/tmux"
           chmod +x "$stub_dir/tmux"
@@ -102,6 +104,14 @@ jobs:
           status=0
           /bin/bash "$install_prefix/bin/term-pane-mark" set pending \
             --kind waiting --exit-status 1 --pane %7 2>/dev/null || status=$?
+          [[ $status -eq 64 ]] || exit 1
+
+          output=$(PATH="$stub_dir:$PATH" /bin/bash \
+            "$install_prefix/bin/tmux-command-palette" --list)
+          [[ $output == $'Record the pane   prefix r\tprefix\tr' ]] || exit 1
+          status=0
+          /bin/bash "$install_prefix/bin/tmux-command-palette" 2>/dev/null ||
+            status=$?
           [[ $status -eq 64 ]] || exit 1
 
           /bin/bash test/term-pane-state-test

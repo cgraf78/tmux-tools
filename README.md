@@ -22,6 +22,9 @@ Small helpers for tmux setups that outgrow the defaults:
   workstation over SSH. It is like "copy last
   output" in Warp or iTerm2, but inside tmux. **It needs a specific two-line
   prompt; see [Prompt format](#prompt-format).**
+- **`tmux-command-palette`**: find a key binding by its description in an fzf
+  popup and run it, like an editor's command palette. It lists every root and
+  prefix binding that has a note (`bind-key -N`).
 - **`term-notify-sound`**: ring the terminal bell. Call it when a job or agent
   finishes. Inside tmux it also marks which pane rang, which plain tmux does
   not track (tmux records a bell against the window).
@@ -42,6 +45,8 @@ Small helpers for tmux setups that outgrow the defaults:
 - For `tmux-copy-last-output`'s clipboard copy: `clip` when installed; otherwise
   `pbcopy`, `wl-copy` with `WAYLAND_DISPLAY`, `xclip` with `DISPLAY`, or an
   explicitly selected tmux client whose terminal supports OSC 52.
+- For `tmux-command-palette`: `fzf`, and tmux 3.4 or newer to run the chosen
+  key itself (older tmux asks you to press it)
 
 ## Install
 
@@ -199,6 +204,24 @@ With any other prompt, the command finds no blocks: it shows a tmux message,
 "No command output found", and copies nothing. With `--print` it also exits
 with status 3. Prompt colors are fine, because tmux captures the text without
 them.
+
+### `tmux-command-palette`
+
+```tmux
+bind -n M-Space run-shell 'tmux-command-palette --client #{q:client_name}'
+```
+
+The popup lists each noted binding as its note, then its key, such as
+`Copy the last N command outputs   prefix O`, sorted by note. Enter runs the
+chosen binding and Escape closes the popup. The popup only picks: after it
+closes, the key is handed to the client as if typed (`send-keys -K`, tmux
+3.4), so the binding acts on the pane you opened the palette from, and its
+prompts and menus open over that pane. Before tmux 3.4 the palette turns the
+prefix on and names the key, so one key press runs it.
+
+Mouse bindings, tmux's `Select window N` notes on `prefix 0`-`9`, and a second
+key with an earlier key's note are left out. `tmux-command-palette --list`
+prints the entries. `man tmux-command-palette` has the details.
 
 ### `term-notify-sound` and `term-pane-mark`
 

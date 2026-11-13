@@ -23,6 +23,7 @@ commands=(
   tmux-continuum-save-gate
   tmux-clip-paste
   tmux-copy-last-output
+  tmux-command-palette
   term-pane-mark
   term-pane-state
   term-notify-sound

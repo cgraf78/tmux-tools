@@ -38,4 +38,13 @@ else
   fi
   printf 'SKIP: Python unavailable for real-client attention test\n'
 fi
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$ROOT/test/tmux-command-palette-client.py"
+else
+  if [[ ${TMUX_TOOLS_REQUIRE_TMUX:-0} == 1 ]]; then
+    printf 'FAIL: Python required for the command palette client test\n' >&2
+    exit 1
+  fi
+  printf 'SKIP: Python unavailable for the command palette client test\n'
+fi
 "$ROOT/test/term-pane-mark-token-test"
