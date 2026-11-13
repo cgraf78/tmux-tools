@@ -130,6 +130,63 @@ check 'conditional clear resolves a target to its pane' '' "$(pending)"
 check 'conditional clear leaves the selected pane alone' waiting "$(pending "$selected")"
 tmux -S "$socket" set-option -pu -t "$selected" @term_notify_pending
 
+# A mark change republishes its pane's attached session from the server, but
+# only where the config opts in with @term_pane_state_publish.
+# A failing publisher must print nothing: background run-shell output would
+# open view mode in a pane.
+mkdir "$tmp/publisher"
+cat >"$tmp/publisher/term-pane-state" <<'STUB'
+#!/bin/sh
+printf '%s\n' "$*" >>"${0%/*}/calls"
+echo noise
+echo noise >&2
+exit 1
+STUB
+chmod +x "$tmp/publisher/term-pane-state"
+tmux -S "$socket" set-environment -g PATH "$tmp/publisher:$PATH"
+published() {
+  local _
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ "$(wc -l 2>/dev/null <"$tmp/publisher/calls" | tr -d ' ')" = "$1" ] && break
+    sleep 0.1
+  done
+  wc -l 2>/dev/null <"$tmp/publisher/calls" | tr -d ' '
+}
+# A control client attaches the session; it reads commands from a FIFO this
+# test holds open, so closing it or killing the server ends the client.
+mkfifo "$tmp/control"
+tmux -S "$socket" -C attach-session <"$tmp/control" >/dev/null 2>&1 &
+exec 4>"$tmp/control"
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  [ "$(tmux -S "$socket" display-message -p -t "$pane" '#{session_attached}')" = 1 ] && break
+  sleep 0.1
+done
+mark set pending 2>/dev/null
+sleep 0.3
+check 'a config without the opt-in is not republished' '' "$(published '')"
+tmux -S "$socket" set-option -g @term_pane_state_publish off
+mark clear pending 2>/dev/null
+sleep 0.3
+check 'an opt-in of off is not republished' '' "$(published '')"
+tmux -S "$socket" set-option -g @term_pane_state_publish on
+detached=$(tmux -S "$socket" new-session -d -P -F '#{pane_id}' 'exec sleep 600') || exit 1
+"$ROOT/bin/term-pane-mark" set pending --pane "$detached" 2>/dev/null
+sleep 0.3
+check 'a detached session starts no publisher' '' "$(published '')"
+tmux -S "$socket" kill-pane -t "$detached"
+mark clear pending 2>/dev/null
+check 'a mark change republishes once' 1 "$(published 1)"
+check 'the republish names the socket and the pane'"'"'s session' \
+  "--socket $socket --session \$0" "$(cat "$tmp/publisher/calls")"
+mark set busy --token pub:1 2>/dev/null
+mark clear busy --token pub:1 2>/dev/null
+check 'busy changes republish too' 3 "$(published 3)"
+check 'a failing publisher prints into no pane' '' \
+  "$(tmux -S "$socket" list-panes -a -F '#{pane_mode}' | tr -d '\n')"
+exec 4>&-
+wait
+tmux -S "$socket" set-option -gu @term_pane_state_publish
+
 # The killed-child reset also drops sticky attention, never done or failed.
 for kind in waiting blocked; do
   mark set busy --token crashed:turn 2>/dev/null

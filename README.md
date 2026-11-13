@@ -265,6 +265,10 @@ set-hook -g after-select-window[100] 'if -F "#{||:#{==:#{@term_notify_pending},w
 ```
 
 `man term-pane-mark` explains how it decides which pane is the caller's.
+Where the config sets `@term_pane_state_publish` to `on`, each mark
+change in an attached session also starts a background `term-pane-state
+--session` run in the same tmux command queue, so the terminal sees the
+change at once (see below).
 
 Busy producers can add `--token SESSION:TURN` to both set and clear. Tokens
 keep a delayed Stop from clearing a newer turn, while `--owner PID` still
@@ -304,6 +308,18 @@ text is written. Publication requires Termnav's foreground ownership checks;
 without it the helper emits nothing. Display snapshots can briefly arrive
 out of order and reconcile on the next successful poll; they never control
 lifecycle operations. See `man term-pane-state` for activation and lifetime details.
+
+tmux reruns a status job at most once a second, and otherwise only on its
+status interval, so the terminal can lag a window switch or a focus change by
+seconds. `term-pane-state --socket SOCKET --session ID`, without `--print`,
+publishes at once to every terminal client of the session, each with its own
+focus. Run it from the hooks for those events in the background, discarding
+its output, which a background `run-shell` would print into a pane:
+
+```tmux
+set -g @term_pane_state_publish on
+set-hook -g session-window-changed[140] "run-shell -b 'term-pane-state --socket #{q:socket_path} --session #{q:session_id} >/dev/null 2>&1 || true'"
+```
 
 The WezTerm tab helpers `wezterm-switch-tab` and `wezterm-move-tab` moved to
 [termnav](https://github.com/cgraf78/termnav).

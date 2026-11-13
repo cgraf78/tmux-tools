@@ -86,6 +86,26 @@ process inside the pane can have it, so a terminal no pane owns, a missing
 terminal, or an unusable
 .B ps
 marks nothing.
+.PP
+When the server's configuration sets
+.B @term_pane_state_publish
+to
+.B on
+and the pane's session is attached, the same tmux command queue that changes
+a mark also starts a background
+.B run-shell
+of
+.B term-pane-state --session
+for that session, so the terminal sees the change at once rather than at the
+next run of a
+.BR term-pane-state (1)
+status job. The server finds
+.B term-pane-state
+on its own
+.BR PATH ;
+its output and failures are discarded, and the command does not wait for it.
+A pane given as anything other than a pane id is not republished; the status
+job still reconciles it.
 .SH OPTIONS
 .TP
 .BI \-\-pane " pane"
@@ -214,4 +234,5 @@ The arguments were invalid. The command writes a usage diagnostic before any
 tmux command is invoked.
 .SH SEE ALSO
 .BR tmux (1),
-.BR term-notify-sound (1)
+.BR term-notify-sound (1),
+.BR term-pane-state (1)

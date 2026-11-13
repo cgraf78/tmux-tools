@@ -342,7 +342,15 @@ case "$1" in
     fi
     ;;
   set-option | if-shell)
-    [[ -z ${TMUX_SET_LOG:-} ]] || printf '%s\n' "$*" >>"$TMUX_SET_LOG"
+    # A mark change ends with its republish request; log the two apart so
+    # mark assertions stay about the mark.
+    command=$*
+    republish=' ; if-shell -F -t '
+    mark=${command%"$republish"*}
+    [[ -z ${TMUX_SET_LOG:-} ]] || printf '%s\n' "$mark" >>"$TMUX_SET_LOG"
+    if [[ $mark != "$command" && -n ${TMUX_PUBLISH_LOG:-} ]]; then
+      printf '%s\n' "${command#"$mark ; "}" >>"$TMUX_PUBLISH_LOG"
+    fi
     [[ ${TMUX_SET_FAIL:-0} != 1 ]] || exit 1
     ;;
   list-panes)
@@ -797,6 +805,28 @@ done
 for condition in '' "done" any 'sticky}' waiting,blocked; do
   assert_invalid_mark "mark unknown condition '$condition'" clear pending --if "$condition"
 done
+
+# Every mark change asks the server, in the same command queue, to publish
+# the pane's attached session at once where the config opts in.
+republish="if-shell -F -t %36 #{&&:#{==:#{@term_pane_state_publish},on},#{session_attached}} run-shell -b -t %36 'term-pane-state --socket #{q:socket_path} --session #{q:session_id} >/dev/null 2>&1 || true'"
+republish_index=0
+for case in 'set pending' 'set pending --kind waiting' 'set pending --exit-status 2' \
+  'clear pending' 'clear pending --if sticky' 'set busy' 'set busy --token a:1' \
+  'clear busy' 'clear busy --token a:1'; do
+  republish_index=$((republish_index + 1))
+  log="$tmp/mark-republish-$republish_index.log"
+  # shellcheck disable=SC2086 # Each case is a word list of CLI arguments.
+  TMUX_SET_LOG="$tmp/mark-republish-set.log" TMUX_PUBLISH_LOG="$log" \
+    PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" $case --pane %36
+  _assert_file_content "mark: $case republishes in the same queue" "$republish" "$log"
+done
+log="$tmp/mark-republish-name.log"
+TMUX_SET_LOG="$tmp/mark-republish-name-set.log" TMUX_PUBLISH_LOG="$log" \
+  PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" set busy --pane 'work:1.0'
+_assert_file_content "mark: a pane name still sets the mark" \
+  'set-option -pu -t work:1.0 @term_busy_token ; set-option -p -t work:1.0 @term_busy 1' \
+  "$tmp/mark-republish-name-set.log"
+_assert_file_missing "mark: a pane name is never parsed into a republish command" "$log"
 assert_invalid_mark "mark missing condition" clear pending --if
 assert_invalid_mark "mark repeated condition" clear pending --if waiting --if sticky
 assert_invalid_mark "mark set condition" set pending --if sticky

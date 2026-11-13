@@ -39,15 +39,24 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
     root = Path(directory)
     socket = str(root / "socket")
     capture = root / "termnav-args"
+    calls = root / "termnav-calls"
     bindir = root / "bin"
     bindir.mkdir()
     termnav = bindir / "termnav"
-    termnav.write_text('#!/bin/sh\nprintf "%s\\n" "$@" >"$STATE_NATIVE_ARGS"\n')
+    termnav.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" >"$STATE_NATIVE_ARGS.tmp"\n'
+        'mv "$STATE_NATIVE_ARGS.tmp" "$STATE_NATIVE_ARGS"\n'
+        'printf "%s\\n" "$*" >>"$STATE_NATIVE_CALLS"\n'
+    )
     termnav.chmod(0o700)
+    # The server finds this checkout's term-pane-state first, so marks that
+    # republish run the code under test.
     env = dict(
         os.environ,
-        PATH=f"{bindir}:{os.environ['PATH']}",
+        PATH=f"{bindir}:{ROOT / 'bin'}:{os.environ['PATH']}",
         STATE_NATIVE_ARGS=str(capture),
+        STATE_NATIVE_CALLS=str(calls),
         TERM="xterm-256color",
     )
 
@@ -69,6 +78,7 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
 
     client_pid = None
     master = None
+    control = None
     try:
         tmux("-f", "/dev/null", "new-session", "-d", "-s", "attention", "sleep 60")
         tmux("set-option", "-g", "focus-events", "on")
@@ -245,7 +255,84 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
         assert effective["--failed"] == "1", effective
         assert effective["--working"] == "1", effective
         print("PASS: a waiting pane counts as waiting, not working")
+
+        def native_args() -> dict[str, str]:
+            try:
+                args = capture.read_text().splitlines()
+            except FileNotFoundError:
+                return {}
+            return {args[index]: args[index + 1] for index in range(0, len(args) - 1, 2)}
+
+        # Event hooks and marks publish a whole session at once. A control
+        # client attached to the same session is never a publication target.
+        control = subprocess.Popen(
+            [TMUX, "-S", socket, "-C", "attach-session", "-t", "attention"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=env,
+        )
+        poll(
+            "control client attach",
+            lambda: tmux("list-clients", "-F", "#{client_control_mode}"),
+            lambda value: sorted(value.split()) == ["0", "1"],
+        )
+        calls.unlink(missing_ok=True)
+        subprocess.run(
+            [str(ROOT / "bin/term-pane-state"), "--socket", socket, "--session", session],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
+        )
+        assert len(calls.read_text().splitlines()) == 1, calls.read_text()
+        session_wide = native_args()
+        assert session_wide["--client-name"] == name, session_wide
+        assert session_wide["--client-pid"] == pid, session_wide
+        assert session_wide["--client-created"] == created, session_wide
+        for flag in ("--working", "--pending", "--failed", "--waiting"):
+            assert session_wide.get(flag) == effective.get(flag), (flag, session_wide, effective)
+        print("PASS: a session publish reaches each terminal client with its own focus")
+
+        # A mark change republishes from the server in the background, without
+        # waiting for a status job: the selected pane's own new attention is
+        # hidden from this focused client, a background pane's is not.
+        tmux("set-option", "-g", "@term_pane_state_publish", "on")
+        background = tmux("display-message", "-p", "-t", "attention:3", "#{pane_id}")
+        mark_env = dict(env, TMUX=f"{socket},0,0", TMUX_PANE=background, TERM_PROGRAM="tmux")
+        capture.unlink(missing_ok=True)
+        subprocess.run(
+            [str(ROOT / "bin/term-pane-mark"), "set", "pending", "--kind", "waiting"],
+            check=True,
+            timeout=5,
+            env=mark_env,
+        )
+        marked = poll(
+            "republish after a mark",
+            lambda: json.dumps(native_args()),
+            lambda value: json.loads(value).get("--waiting") == "2",
+        )
+        assert json.loads(marked)["--pending"] == "3", marked
+        capture.unlink(missing_ok=True)
+        subprocess.run(
+            [str(ROOT / "bin/term-pane-mark"), "clear", "pending", "--if", "waiting"],
+            check=True,
+            timeout=5,
+            env=mark_env,
+        )
+        poll(
+            "republish after a clear",
+            lambda: json.dumps(native_args()),
+            lambda value: json.loads(value).get("--pending") == "2",
+        )
+        modes = tmux("list-panes", "-a", "-F", "#{pane_mode}")
+        assert modes.strip() == "", modes
+        print("PASS: a mark change republishes at once and prints into no pane")
     finally:
+        if control is not None:
+            control.kill()
+            control.wait()
         try:
             tmux("kill-server")
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):

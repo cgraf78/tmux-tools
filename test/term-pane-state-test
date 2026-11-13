@@ -246,8 +246,54 @@ publish
 check 'a usage error without waiting attention is not retried' 1 "$(wc -l <"$STATE_NATIVE_CALLS" | tr -d ' ')"
 export STATE_ROUTE_STATUS=0
 
+# Without --print, --session publishes to each terminal client of the session,
+# each with its own selected pane's predicates, and skips control clients.
+session_publish() {
+  rm -f "$STATE_NATIVE_ARGS" "$STATE_NATIVE_CALLS"
+  : >"$STATE_CALLS"
+  # shellcheck disable=SC2016 # tmux's literal session identifier.
+  "$ROOT/bin/term-pane-state" --socket /private/test.sock --session '$7' >/dev/null 2>&1
+}
+native_calls() { [ -f "$STATE_NATIVE_CALLS" ] && wc -l <"$STATE_NATIVE_CALLS" | tr -d ' ' || echo 0; }
+export STATE_ROWS=$'%1 0 1 0 0 a w\n%2 0 1 0 0 a w' STATE_ROUTE_STATUS=0
+# shellcheck disable=SC2016 # tmux's literal session identifiers.
+export STATE_CLIENTS=$'12 123 $7 0 xterm-256color /dev/ttys1 %1 0 0 0 /dev/ttys1\n13 124 $7 1 xterm-256color /dev/ttys2 %1 0 0 0 /dev/ttys2\n14 125 $7 0 xterm-256color /dev/ttys3 %2 0 0 0 /dev/ttys3'
+session_publish
+check 'session publish succeeds' 0 "$?"
+check 'session publish asks only for the session'"'"'s clients' 1 \
+  "$(grep -c -F -- "-S /private/test.sock list-clients -t \$7 -F " "$STATE_CALLS")"
+check 'session publish skips control clients' 2 "$(native_calls)"
+check 'session publish names each exact client' \
+  $'/dev/ttys1 12 123\n/dev/ttys3 14 125' \
+  "$(awk '{ for (i = 1; i < NF; i++) { if ($i == "--client-name") n = $(i + 1); if ($i == "--client-pid") p = $(i + 1); if ($i == "--client-created") c = $(i + 1) } print n, p, c }' "$STATE_NATIVE_CALLS")"
+check 'session publish evaluates each client'"'"'s own selected pane' \
+  $'1\n1' "$(awk '{ for (i = 1; i < NF; i++) if ($i == "--pending") print $(i + 1) }' "$STATE_NATIVE_CALLS")"
+check 'session publish never prints a snapshot' '' \
+  "$("$ROOT/bin/term-pane-state" --socket /private/test.sock --session "\$7" 2>/dev/null)"
+export STATE_CLIENTS=''
+session_publish
+check 'a session without terminal clients has nothing to do' 0 "$?"
+check 'a session without terminal clients publishes nothing' 0 "$(native_calls)"
+# shellcheck disable=SC2016 # Malformed machine data, never code.
+export STATE_CLIENTS=$'12 123 $8 0 xterm-256color /dev/ttys1 %1 0 0 0 /dev/ttys1\n13 124 $7 0 xterm-256color tty %1 0 0 0 /dev/ttys2\n14 125 $7 0 xterm-256color /dev/ttys3 %2 0 0 0 /dev/ttys3'
+session_publish
+check 'a malformed client row fails the run' 1 "$?"
+check 'a malformed client row does not stop the others' 1 "$(native_calls)"
+# shellcheck disable=SC2016 # tmux's literal session identifier.
+export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/ttys1 %1 0 0 0 /dev/ttys1' STATE_ROUTE_STATUS=1
+session_publish
+check 'a client that cannot publish fails the run' 1 "$?"
+export STATE_ROUTE_STATUS=0
+for args in "--session \$7 --client /dev/ttys1" "--session \$7 --client-pid 12" "--client /dev/ttys1 --client-pid 12 --client-created 123 --print"; do
+  # shellcheck disable=SC2086 # Each case is a word list of CLI arguments.
+  "$ROOT/bin/term-pane-state" --socket /private/test.sock $args >/dev/null 2>&1
+  check "mixed modes are rejected: $args" 64 "$?"
+done
+
 "$ROOT/bin/term-pane-state" --socket /private/test.sock --session bad --print >/dev/null 2>&1
 check 'session identifiers are validated' 64 "$?"
+"$ROOT/bin/term-pane-state" --socket /private/test.sock --session bad >/dev/null 2>&1
+check 'session identifiers are validated for publishing too' 64 "$?"
 mkdir "$tmp/no-route"
 ln -s "$tmp/bin/tmux" "$tmp/no-route/tmux"
 export STATE_ROWS='%1 1 0 0 0 a w'

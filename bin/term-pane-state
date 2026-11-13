@@ -4,10 +4,13 @@
 # waiting, then done) hides the pane's own work.
 # This is a short-lived tmux #() job: tmux serializes identical jobs and its
 # status interval reconciles missed transitions without per-pane processes.
+# tmux reruns such a job at most once a second, so events that change what a
+# client sees (a window or pane switch, a focus change, a new mark) publish at
+# once to every client of their session with --session ID and no --print.
 set -uo pipefail
 
 usage() {
-  printf '%s\n' 'usage: term-pane-state --socket SOCKET (--session ID --print | --client NAME --client-pid PID --client-created EPOCH)' >&2
+  printf '%s\n' 'usage: term-pane-state --socket SOCKET (--session ID [--print] | --client NAME --client-pid PID --client-created EPOCH)' >&2
   exit 64
 }
 
@@ -29,34 +32,67 @@ valid_pane() {
 # Use explicit -S even when called from a status job: inherited TMUX can
 # describe another server, especially for SSH and same-host nested clients.
 query() {
-  tmux -S "$socket" "$@" 2>/dev/null
+  tmux -S "$socket" "$@" </dev/null 2>/dev/null
 }
 
-# Resolve one live client, rejecting control mode and identity reuse. The tty
-# comes only from the server, never from an arbitrary path passed by a hook.
+# Some non-UTF8 tmux job locales rewrite literal tabs as underscores. Keep
+# fixed machine fields first and the terminal client name last, like tmux's
+# other exact-client adapters; no display strings determine behavior.
+# list-clients expands the selected pane and predicates for each client,
+# including tmux 3.2a where display-message -c rejects a client argument.
+# A config older than @pane_waiting expands it empty, which reads as 0.
+client_format='#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_waiting},1,0} #{?#{E:@pane_failed},1,0} #{client_name}'
+
+# Check one client row's server-owned fields, then keep its selected pane and
+# that pane's predicates. The tty comes only from the server, never from an
+# arbitrary path passed by a hook.
+accept_client() {
+  local scope=$1 tty=$2 pane=$3 pending=$4 waiting=$5 failed=$6
+  valid_session "$scope" || return 1
+  case $tty in /dev/*) ;; *) return 1 ;; esac
+  valid_pane "$pane" || return 1
+  valid_attention "$pending" "$waiting" "$failed" || return 1
+  client_pane=$pane client_pending=$pending client_waiting=$waiting
+  client_failed=$failed
+}
+
+# Resolve one live client, rejecting control mode and identity reuse.
 resolve_client() {
   local rows name pid created tty scope _term control pane pending waiting failed extra
-  # Some non-UTF8 tmux job locales rewrite literal tabs as underscores. Keep
-  # fixed machine fields first and the terminal client name last, like tmux's
-  # other exact-client adapters; no display strings determine behavior.
-  # list-clients expands the selected pane and predicates for each client,
-  # including tmux 3.2a where display-message -c rejects a client argument.
-  # A config older than @pane_waiting expands it empty, which reads as 0.
-  rows=$(query list-clients -F '#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_waiting},1,0} #{?#{E:@pane_failed},1,0} #{client_name}') || return 1
+  rows=$(query list-clients -F "$client_format") || return 1
   while read -r pid created scope control _term tty pane pending waiting failed name extra; do
     [ "$name" = "$client" ] && [ "$pid" = "$client_pid" ] &&
       [ "$created" = "$client_created" ] && [ "$control" = 0 ] &&
       [ -z "$extra" ] || continue
-    valid_session "$scope" || return 1
-    case $tty in /dev/*) ;; *) return 1 ;; esac
-    valid_pane "$pane" || return 1
-    valid_attention "$pending" "$waiting" "$failed" || return 1
+    accept_client "$scope" "$tty" "$pane" "$pending" "$waiting" "$failed" || return 1
     session=$scope
-    client_pane=$pane client_pending=$pending client_waiting=$waiting
-    client_failed=$failed
     return 0
   done <<<"$rows"
   return 1
+}
+
+# Publish to every attached non-control client of the session, each with its
+# own selected pane's predicates. A session without one has nothing to do; a
+# client that cannot publish fails the run without stopping the others.
+publish_session() {
+  local rows name pid created tty scope _term control pane pending waiting failed extra
+  local status=0
+  command -v termnav >/dev/null 2>&1 || return 1
+  rows=$(query list-clients -t "$session" -F "$client_format") || return 1
+  # The loop reads fd 3 so nothing it runs can consume the remaining rows.
+  while read -r pid created scope control _term tty pane pending waiting failed name extra <&3; do
+    [ -n "$pid$name" ] || continue
+    [ "$control" = 0 ] || continue
+    if [ "$scope" != "$session" ] || [ -z "$name" ] || [ -n "$extra" ] ||
+      ! valid_number "$pid" || [ "$pid" = 0 ] || ! valid_number "$created" ||
+      ! accept_client "$scope" "$tty" "$pane" "$pending" "$waiting" "$failed"; then
+      status=1
+      continue
+    fi
+    client=$name client_pid=$pid client_created=$created
+    if ! snapshot || ! publish; then status=1; fi
+  done 3<<<"$rows"
+  return "$status"
 }
 
 # Attention predicates: failed and waiting are subsets of pending. A pane
@@ -175,6 +211,30 @@ snapshot() {
     "$working_count" "$pending_count" "$failed_count" "$waiting_count"
 }
 
+# Termnav owns both direct tty emission and hierarchical transport. Its bounded
+# native writer is the only owner of terminal publication; legacy status 3 is
+# not permission to fall back to a shell write that can hang on backpressure.
+publish() {
+  local status=0
+  local -a attention waiting
+  command -v termnav >/dev/null 2>&1 || return 1
+  attention=(tmux attention --tmux-socket "$socket" --client-name "$client"
+    --client-pid "$client_pid" --client-created "$client_created"
+    --working "$working_count" --pending "$pending_count" --failed "$failed_count")
+  # Termnav treats an omitted --waiting as 0, so the common path stays one run
+  # even beside an older Termnav. That version rejects --waiting as a usage
+  # error (2) but still publishes the counts without it; its readers then show
+  # waiting attention as done.
+  waiting=()
+  [ "$waiting_count" = 0 ] || waiting=(--waiting "$waiting_count")
+  termnav "${attention[@]}" ${waiting[@]+"${waiting[@]}"} </dev/null >/dev/null 2>&1 || status=$?
+  if [ "$status" = 2 ] && [ "${#waiting[@]}" != 0 ]; then
+    status=0
+    termnav "${attention[@]}" </dev/null >/dev/null 2>&1 || status=$?
+  fi
+  [ "$status" = 0 ]
+}
+
 socket='' session='' client='' client_pid='' client_created='' print_only=0
 client_pane='' client_pending='' client_waiting='' client_failed=''
 while [ "$#" -gt 0 ]; do
@@ -214,13 +274,17 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 case $socket in /*) ;; *) usage ;; esac
-if [ "$print_only" = 1 ]; then
+if [ -n "$session" ]; then
   if [ -n "$client$client_pid$client_created" ] || ! valid_session "$session"; then usage; fi
-  snapshot || exit 1
-  printf '%s\n' "$payload"
+  if [ "$print_only" = 1 ]; then
+    snapshot || exit 1
+    printf '%s\n' "$payload"
+    exit 0
+  fi
+  publish_session || exit 1
   exit 0
 fi
-if [ -z "$client" ] || [ -n "$session" ] || ! valid_number "$client_pid" ||
+if [ "$print_only" = 1 ] || [ -z "$client" ] || ! valid_number "$client_pid" ||
   ! valid_number "$client_created"; then usage; fi
 [ "$client_pid" != 0 ] || usage
 resolve_client || exit 1
@@ -228,25 +292,5 @@ resolve_client || exit 1
 # focused one. Replace only this client's selected pane in the session-wide
 # result, including active panes in background windows.
 snapshot || exit 1
-
-# Termnav owns both direct tty emission and hierarchical transport. Its bounded
-# native writer is the only owner of terminal publication; legacy status 3 is
-# not permission to fall back to a shell write that can hang on backpressure.
-command -v termnav >/dev/null 2>&1 || exit 1
-attention=(tmux attention --tmux-socket "$socket" --client-name "$client"
-  --client-pid "$client_pid" --client-created "$client_created"
-  --working "$working_count" --pending "$pending_count" --failed "$failed_count")
-# Termnav treats an omitted --waiting as 0, so the common path stays one run
-# even beside an older Termnav. That version rejects --waiting as a usage
-# error (2) but still publishes the counts without it; its readers then show
-# waiting attention as done.
-waiting=()
-[ "$waiting_count" = 0 ] || waiting=(--waiting "$waiting_count")
-status=0
-termnav "${attention[@]}" ${waiting[@]+"${waiting[@]}"} >/dev/null 2>&1 || status=$?
-if [ "$status" = 2 ] && [ "${#waiting[@]}" != 0 ]; then
-  status=0
-  termnav "${attention[@]}" >/dev/null 2>&1 || status=$?
-fi
-[ "$status" = 0 ] || exit 1
+publish || exit 1
 exit 0
