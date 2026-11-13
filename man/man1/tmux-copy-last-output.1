@@ -87,7 +87,8 @@ client does not fall back to copying on the remote host.
 .PP
 With an explicit client, with or without clip, the command's messages go to
 that client. tmux 3.2 cannot aim a message at one client, so there they go
-to the client tmux picks.
+to the client tmux picks. When clip copies but reports something, such as
+history it could not record, the copied message includes that report.
 .SH EXIT STATUS
 .TP
 .B 0

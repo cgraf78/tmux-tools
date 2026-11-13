@@ -163,6 +163,7 @@ copy_with() {
 }
 
 copy_errors=()
+copy_note=''
 copied=false
 if command -v clip &>/dev/null; then
   copy_args=(copy)
@@ -170,6 +171,9 @@ if command -v clip &>/dev/null; then
   if ! err=$(copy_with clip "${copy_args[@]}"); then
     fail_copy clip "$err"
   fi
+  # clip can copy and still have something to say, such as history it could
+  # not record. The Copied message below would replace its own notice.
+  copy_note=$err
   copied=true
 elif [[ -n "$client" ]]; then
   # Let tmux deliver OSC 52 to the initiating client. An implicit client lookup
@@ -213,7 +217,9 @@ if [[ "$copied" == false ]]; then
 fi
 
 if [[ "$count" == 1 ]]; then
-  notify "Copied last command + output to clipboard"
+  message="Copied last command + output to clipboard"
 else
-  notify "Copied last $count commands + output to clipboard"
+  message="Copied last $count commands + output to clipboard"
 fi
+[[ -z "$copy_note" ]] || message+=" (${copy_note//$'\n'/ })"
+notify "$message"

@@ -69,6 +69,7 @@ cat >"$mock_bin/clip" <<'EOF'
 #!/usr/bin/env bash
 [[ -z ${CLIP_CALL_LOG:-} ]] || printf '%s\n' "$*" >>"$CLIP_CALL_LOG"
 cat >"$PBCOPY_OUT"
+[[ -z ${CLIP_TEST_NOTE:-} ]] || printf '%s\n' "$CLIP_TEST_NOTE" >&2
 EOF
 chmod +x "$mock_bin/clip"
 
@@ -238,6 +239,17 @@ _assert_file_content "copy scoped: retains command-block content" \
 two output' "$tmp/scoped-copied"
 _assert_contains "copy scoped: tells the pressing client" \
   '-c /dev/ttys007 -t %7 Copied last command' "$(cat "$tmp/scoped-message.log")"
+_assert_not_contains "copy scoped: a quiet clip adds nothing to the message" \
+  'clipboard (' "$(cat "$tmp/scoped-message.log")"
+# clip may copy and still report something; the Copied message keeps it.
+TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/noted-message.log" \
+  CLIP_TEST_NOTE='clip: history unavailable; copied without recording it' \
+  PBCOPY_OUT="$tmp/noted-copied" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007
+_assert_exit "copy noted: succeeds" 0 "$?"
+_assert_contains "copy noted: the Copied message carries clip's notice" \
+  'Copied last command + output to clipboard (clip: history unavailable; copied without recording it)' \
+  "$(cat "$tmp/noted-message.log")"
 
 # Restrict PATH so the installed host clip/native clipboard cannot win this
 # standalone test. The tmux stub records transport, never a real user server.

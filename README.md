@@ -175,7 +175,8 @@ recently active client and tmux 3.2 takes no argument to `-c`. It does not
 pin a process generation across detach/reconnect and reuse of the same
 terminal name. With `--client`, with or without `clip`, the command's messages
 go to that client, except on tmux 3.2, which cannot aim a message at one
-client.
+client. When `clip` copies but reports something, such as history it could
+not record, the copied message includes that report.
 
 #### Prompt format
 
