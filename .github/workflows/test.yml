@@ -84,6 +84,8 @@ jobs:
             "$install_prefix/bin/tmux-copy-last-output" --print || status=$?
           [[ $status -eq 3 ]] || exit 1
 
+          # Each mark change ends with the opt-in background publish.
+          publish=" ; if-shell -F -t %7 #{&&:#{==:#{@term_pane_state_publish},on},#{session_attached}} run-shell -b -t %7 'term-pane-state --socket #{q:socket_path} --session #{q:session_id} >/dev/null 2>&1 || true'"
           status=0
           /bin/bash "$install_prefix/bin/term-pane-mark" 2>/dev/null ||
             status=$?
@@ -92,15 +94,15 @@ jobs:
           PATH="$stub_dir:$PATH" TMUX=/tmp/stub,1,0 TMUX_PANE=%7 \
             TERM_PROGRAM=tmux /bin/bash "$install_prefix/bin/term-pane-mark" \
             set busy
-          grep -qx 'set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1' "$STUB_LOG"
+          grep -qxF "set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1$publish" "$STUB_LOG"
           : >"$STUB_LOG"
           PATH="$stub_dir:$PATH" /bin/bash "$install_prefix/bin/term-pane-mark" \
             set pending --kind waiting --pane %7
-          grep -qx 'set-option -pu -t %7 @term_notify_exit_status ; set-option -p -t %7 @term_notify_pending waiting' "$STUB_LOG"
+          grep -qxF "set-option -pu -t %7 @term_notify_exit_status ; set-option -p -t %7 @term_notify_pending waiting$publish" "$STUB_LOG"
           : >"$STUB_LOG"
           PATH="$stub_dir:$PATH" /bin/bash "$install_prefix/bin/term-pane-mark" \
             clear pending --if sticky --pane %7
-          grep -qxF 'if-shell -F -t %7 #{||:#{==:#{@term_notify_pending},waiting},#{==:#{@term_notify_pending},blocked}} set-option -pu -t %7 @term_notify_pending ; set-option -pu -t %7 @term_notify_exit_status ' "$STUB_LOG"
+          grep -qxF "if-shell -F -t %7 #{||:#{==:#{@term_notify_pending},waiting},#{==:#{@term_notify_pending},blocked}} set-option -pu -t %7 @term_notify_pending ; set-option -pu -t %7 @term_notify_exit_status $publish" "$STUB_LOG"
           status=0
           /bin/bash "$install_prefix/bin/term-pane-mark" set pending \
             --kind waiting --exit-status 1 --pane %7 2>/dev/null || status=$?

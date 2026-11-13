@@ -51,6 +51,13 @@ earlier history.
   Its JSON carries `waiting`, with `failed + waiting <= pending`; it passes
   `termnav tmux attention --waiting N` only when N is non-zero and retries
   once without it when an older Termnav exits 2.
+- `term-pane-mark` ends each mark change's tmux command queue with
+  `if-shell -F '#{&&:#{==:#{@term_pane_state_publish},on},#{session_attached}}'` and a
+  `run-shell -b` of `term-pane-state --session` for the pane's session, found
+  on the server's PATH. `@term_pane_state_publish` is the config's opt-in;
+  don't rename it. Keep that job's output and status discarded: a background run-shell
+  prints both into a pane. The `test/copy-mark-test` mock logs that suffix
+  apart from the mark.
 - `tmux-command-palette` replays the picked key with `send-keys -K` only
   after its popup closes, so prompts open over the pane; before tmux 3.4 it
   names the key instead. Never run a binding's command text directly: its

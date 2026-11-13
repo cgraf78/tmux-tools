@@ -140,6 +140,23 @@ resolve_pane_id() {
   [[ $pane_id =~ ^%[0-9]+$ ]]
 }
 
+# A config's term-pane-state status job publishes its session's attention to
+# the terminal, but tmux reruns that job at most once a second and otherwise
+# waits for its status interval, so a terminal tab could lag a mark by
+# seconds. Where the config sets @term_pane_state_publish to on, ask the
+# server to publish an attached session at once, in the same command queue as
+# the mark change, from a background job this command does not wait for.
+# Output and failures are discarded, or a background run-shell would print
+# them into a pane, and an older term-pane-state without session publishing
+# leaves the update to the status job. Pane ids only: anything else would be
+# parsed as tmux command text.
+republish=()
+set_republish() {
+  [[ $1 =~ ^%[0-9]+$ ]] || return 0
+  republish=(\; if-shell -F -t "$1" '#{&&:#{==:#{@term_pane_state_publish},on},#{session_attached}}'
+    "run-shell -b -t $1 'term-pane-state --socket #{q:socket_path} --session #{q:session_id} >/dev/null 2>&1 || true'")
+}
+
 [ $# -ge 2 ] || usage
 action=$1
 case $action in
@@ -227,15 +244,18 @@ fi
 if [ -n "$owner" ]; then
   in_foreground "$owner" "$pane" || exit 0
 fi
+set_republish "$pane"
 if [ "$action" = reset ]; then
   # A killed agent can no longer clear the waiting or blocked attention it
   # raised. Informational done and failed marks stay until the user looks.
   resolve_pane_id "$pane" || exit 0
   pending_condition sticky
+  set_republish "$pane_id"
   tmux set-option -pu -t "$pane_id" @term_busy \; \
     set-option -pu -t "$pane_id" @term_busy_token \; \
     if-shell -F -t "$pane_id" "$condition" \
-    "set-option -pu -t $pane_id @term_notify_pending ; set-option -pu -t $pane_id @term_notify_exit_status" '' >/dev/null 2>&1 || true
+    "set-option -pu -t $pane_id @term_notify_pending ; set-option -pu -t $pane_id @term_notify_exit_status" '' \
+    ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
 elif [ "$option" = @term_notify_pending ]; then
   # Submit each transition as one tmux command queue, so a focus hook cannot
   # acknowledge pending between the metadata and mark updates. Ordinary
@@ -244,25 +264,27 @@ elif [ "$option" = @term_notify_pending ]; then
     # Compare and clear in one server queue on the exact pane, as busy clears
     # do, so a newer notification of another kind survives a late clear.
     resolve_pane_id "$pane" || exit 0
+    set_republish "$pane_id"
     tmux if-shell -F -t "$pane_id" "$condition" \
-      "set-option -pu -t $pane_id $option ; set-option -pu -t $pane_id @term_notify_exit_status" '' >/dev/null 2>&1 || true
+      "set-option -pu -t $pane_id $option ; set-option -pu -t $pane_id @term_notify_exit_status" '' \
+      ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   elif [ "$action" = clear ]; then
     tmux set-option -pu -t "$pane" "$option" \; \
-      set-option -pu -t "$pane" @term_notify_exit_status >/dev/null 2>&1 || true
+      set-option -pu -t "$pane" @term_notify_exit_status ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   elif [ -n "$exit_status" ] && [ "$exit_status" != 0 ]; then
     tmux set-option -p -t "$pane" @term_notify_exit_status "$exit_status" \; \
-      set-option -p -t "$pane" "$option" "$kind" >/dev/null 2>&1 || true
+      set-option -p -t "$pane" "$option" "$kind" ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   else
     tmux set-option -pu -t "$pane" @term_notify_exit_status \; \
-      set-option -p -t "$pane" "$option" "$kind" >/dev/null 2>&1 || true
+      set-option -p -t "$pane" "$option" "$kind" ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   fi
 elif [ "$action" = set ]; then
   if [ -n "$token" ]; then
     tmux set-option -p -t "$pane" @term_busy_token "$token" \; \
-      set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+      set-option -p -t "$pane" "$option" 1 ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   else
     tmux set-option -pu -t "$pane" @term_busy_token \; \
-      set-option -p -t "$pane" "$option" 1 >/dev/null 2>&1 || true
+      set-option -p -t "$pane" "$option" 1 ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   fi
 else
   # Events can arrive after a newer turn starts. Compare and clear inside the
@@ -270,7 +292,9 @@ else
   # Untagged legacy stops may clear only untagged work; they cannot acknowledge
   # a newer tokenized producer's state.
   resolve_pane_id "$pane" || exit 0
+  set_republish "$pane_id"
   tmux if-shell -F -t "$pane_id" "#{==:#{@term_busy_token},$token}" \
-    "set-option -pu -t $pane_id @term_busy ; set-option -pu -t $pane_id @term_busy_token" '' >/dev/null 2>&1 || true
+    "set-option -pu -t $pane_id @term_busy ; set-option -pu -t $pane_id @term_busy_token" '' \
+    ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
 fi
 exit 0

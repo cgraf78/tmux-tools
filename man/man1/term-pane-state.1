@@ -4,6 +4,8 @@ term-pane-state \- publish per-pane effective tmux work and attention state
 .SH SYNOPSIS
 .B term-pane-state --socket SOCKET --session ID --print
 .br
+.B term-pane-state --socket SOCKET --session ID
+.br
 .B term-pane-state --socket SOCKET --client NAME --client-pid PID --client-created EPOCH
 .SH DESCRIPTION
 Summarizes the panes in exactly one session. The embedding tmux configuration
@@ -29,6 +31,12 @@ user variable to Termnav. Its payload also carries
 a changing heartbeat integer. The UI should expire state based on local time
 since receipt, not compare clocks across hosts. No status text is printed.
 .PP
+The session form, --session without --print, publishes the same way to every
+attached non-control client of the session, each evaluated with its own
+selected pane and focus. A session with no such client exits 0 with nothing
+to do. A malformed client row or a client that fails to publish makes it exit
+1 after trying the others.
+.PP
 For the client's selected pane, the embedding config's pending, waiting and
 failed predicates are evaluated with that client's focus context. The print form
 remains a session-wide snapshot. Other panes and fresh child summaries keep
@@ -46,6 +54,18 @@ Use this short-lived helper in a client-specific tmux status #() job. tmux
 serializes identical jobs; status-interval supplies bounded reconciliation
 without a resident watcher or a process per pane. A query is not acknowledgment:
 the existing pane focus policy remains authoritative.
+.PP
+tmux reruns a status job at most once a second, and otherwise only on the
+status interval, so a focus or selection change could reach the terminal
+seconds late. Run the session form from the tmux hooks for those events with
+.B run-shell -b
+and discard its output, since a background run-shell prints output and
+failures into a pane.
+.BR term-pane-mark (1)
+does the same after each mark change once the configuration sets
+.B @term_pane_state_publish
+to
+.BR on .
 .PP
 Publishing requires Termnav's tmux attention route to verify foreground
 ownership and compose state through immediate local or SSH parents, or publish
