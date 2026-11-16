@@ -409,6 +409,18 @@ _assert_eq "agent picker rejects --list with --preview" 64 \
   "$(picker_usage_status --socket /s --list --preview %1)"
 _assert_eq "agent picker needs a client to open the popup" 64 \
   "$(picker_usage_status --socket /s)"
+# Every config option the picker evaluates is documented in its man page
+# and in the README's option table, so the three cannot drift apart.
+picker_options=$(grep -o '#{E:@[a-z_]*' "$ROOT/bin/tmux-agent-picker" | sed 's/^#{E://' | LC_ALL=C sort -u)
+_assert_ne "agent picker reads config options" "" "$picker_options"
+for option in $picker_options; do
+  if grep -q -- "$option" "$ROOT/man/man1/tmux-agent-picker.1" &&
+    grep -qF -- "\`$option\`" "$ROOT/README.md"; then
+    _pass "agent picker documents $option"
+  else
+    _fail "agent picker documents $option in its man page and the README"
+  fi
+done
 # The man page's example config is the one the picker tests run.
 picker_example=$(
   awk '/A minimal example/ { found = 1 } found && /^\.nf$/ { on = 1; next }

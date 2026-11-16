@@ -48,6 +48,7 @@ cat >"$tmp/popup-bin/fzf" <<'FZF'
 #!/bin/sh
 printf '%s\n' "$@" >"$MOCK_FZF_ARGS"
 cat >"$MOCK_FZF_OFFERED"
+[ -z "$MOCK_CHOICE" ] || { printf '%s\n' "$MOCK_CHOICE"; exit 0; }
 [ -n "$MOCK_PICK" ] || exit 130
 grep -F -m 1 -- "$MOCK_PICK" "$MOCK_FZF_OFFERED" || exit 1
 FZF
@@ -63,7 +64,7 @@ export PATH="$tmp/bin:$PATH"
 export MOCK_POPUP_PATH="$tmp/popup-bin:$PATH"
 export MOCK_CALLS=$tmp/calls MOCK_STATE=$tmp/state MOCK_CAPTURE=$tmp/capture
 export MOCK_CLIENTS=$tmp/clients MOCK_HOLDERS=$tmp/holders MOCK_PS=$tmp/ps
-export MOCK_FZF_ARGS=$tmp/fzf-args MOCK_FZF_OFFERED=$tmp/fzf-offered MOCK_PICK=''
+export MOCK_FZF_ARGS=$tmp/fzf-args MOCK_FZF_OFFERED=$tmp/fzf-offered MOCK_PICK='' MOCK_CHOICE=''
 SOCKET=/private/test.sock
 CLIENT=/dev/pts/7
 failures=0
@@ -370,6 +371,19 @@ PATH=$nofzf "$PICKER" --socket "$SOCKET" --client "$CLIENT"
 check 'a missing fzf exits 0' 0 "$?"
 check 'a missing fzf says so' "-S $SOCKET display-message -c $CLIENT The agent picker needs fzf" \
   "$(cat "$MOCK_CALLS")"
+
+# A chosen line that is not one of the rows fails loudly, with no jump.
+{
+  printf 'W %s \n' '%2/@2/$1/01000/-/0'
+  text_row %2 '$1' "$(pad 'work:2.1')" '' 0 'own session'
+  printf 'C 0 %%1 %s\n' "$CLIENT"
+} >"$MOCK_STATE"
+: >"$MOCK_CALLS"
+status=0
+output=$(MOCK_CHOICE='not a row' "$PICKER" --socket "$SOCKET" --client "$CLIENT" 2>&1) || status=$?
+check 'an unexpected choice is an error' 1 "$status"
+check 'an unexpected choice says so' 'tmux-agent-picker: unexpected choice from fzf' "$output"
+check 'an unexpected choice runs no jump' '' "$(grep -E ' (select-pane|switch-client) ' "$MOCK_CALLS")"
 
 check 'nothing ran ps' '' "$(cat "$MOCK_PS" 2>/dev/null)"
 

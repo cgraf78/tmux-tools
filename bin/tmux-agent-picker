@@ -332,7 +332,12 @@ fi
 [[ -s "$work/choice" ]] || exit 0
 pane='' window='' session=''
 IFS=$'\t' read -r pane window session _ <"$work/choice" || true
-valid_id % "$pane" && valid_id @ "$window" && valid_id '$' "$session" || exit 0
+# The chosen line is one of the rows rendered above; anything else means fzf
+# or the rows went wrong, so say so rather than guess a target.
+if ! valid_id % "$pane" || ! valid_id @ "$window" || ! valid_id '$' "$session"; then
+  printf 'tmux-agent-picker: unexpected choice from fzf\n' >&2
+  exit 1
+fi
 
 # Find the exact client by name: display-message -c answers for another
 # client, and tmux 3.2 takes no argument to it. Keep its current session.
