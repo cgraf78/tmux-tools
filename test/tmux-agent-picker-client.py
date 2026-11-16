@@ -187,12 +187,15 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
         return pid, names.pop()
 
     def view(name: str) -> tuple[str, str, str]:
+        # Without a UTF-8 locale tmux prints a tab in a format as _, so the
+        # fields are space separated, with the session name (which may hold
+        # spaces) last.
         for line in tmux(
-            "list-clients", "-F", "#{client_name}\t#{session_name}\t#{window_id}\t#{pane_id}"
+            "list-clients", "-F", "#{client_name} #{window_id} #{pane_id} #{session_name}"
         ).splitlines():
-            fields = line.split("\t")
-            if fields[0] == name:
-                return fields[1], fields[2], fields[3]
+            client_name, window, pane, session = line.split(" ", 3)
+            if client_name == name:
+                return session, window, pane
         raise AssertionError(f"client {name} is not attached")
 
     def runs() -> list[str]:
