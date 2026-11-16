@@ -72,6 +72,20 @@ earlier history.
   `$N`), never names, and every command of a jump names the pane, with
   `select-pane` before `select-window` in the client's own session, so no
   bystander pane is made current (and acknowledged) on the way.
+- The picker fails loudly: a failure exits 1 through `fail`, which also
+  shows the reason on the client, because `run-shell` discards stderr. Only
+  absences (cancel, no rows, no `fzf`, a pane closed after the pick, a gone
+  client) exit 0. Query tmux through `ask`, never with `|| true`, so a lost
+  server is not read as an empty answer. `message` falls back to an
+  untargeted message only on tmux 3.2's `display-message -c` usage error,
+  never for a client that is gone. Never redirect fzf's stderr: fzf 0.27
+  draws its screen there; its exit status goes to a file instead.
+- `required_options` in the script is the one list of required config
+  options; the README's Required column and the man page's required list
+  follow it, as `test/tmux-tools-test` checks. An unset required option is
+  an error, and installs track `main`, so a new option the picker reads
+  must land in the cgraf78/dotfiles tmux config before the picker ships
+  reading it.
 - The picker's tests make stand-in agents by copying bash under the agent's
   name (`codex`). No symlinks and no scripts: those report another
   `pane_current_command`. The stand-in fzf may be a script, since the
@@ -107,9 +121,10 @@ earlier history.
   installed command `/bin/bash -n`, plus `tmux-clip-paste --help`,
   `TMUX= tmux-continuum-default-server`, `tmux-continuum-save-gate`, and
   stub-tmux smokes of `tmux-copy-last-output --print`,
-  `tmux-command-palette --list`, `tmux-agent-picker --list` (with
-  `/usr/bin/awk`), `term-pane-mark`, and `term-notify-sound`, plus
-  `test/tmux-agent-picker-test`, all run with `/bin/bash`, as the
+  `tmux-command-palette --list`, `term-pane-mark`, and `term-notify-sound`,
+  the `tmux-agent-picker` usage status, plus `test/tmux-agent-picker-test`
+  (which runs every awk it finds, `/usr/bin/awk` among them), all run with
+  `/bin/bash`, as the
   `macos-bash32` job does.
 
 ## Test isolation
@@ -119,7 +134,8 @@ earlier history.
   `TERM_PANE_MARK_PROC_ROOT`), and must stay independent of a real tmux.
 - Real-tmux cases use a private server only: `-S` on a socket under the
   suite temp root (kept short for the macOS `AF_UNIX` limit) or a unique
-  `-L` name, always with `-f /dev/null`, and killed on exit. Never touch
+  `-L` name, always with `-f /dev/null` or a fixture config under `test/`,
+  and killed on exit. Never touch
   the default server.
 - To test ownership, fake `TMUX` and `TMUX_TMPDIR`; never point them at the
   real default socket.

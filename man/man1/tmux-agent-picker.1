@@ -29,7 +29,8 @@ that need attention or run an agent, in an
 popup on
 .IR client ,
 most urgent first, with a preview of the pane under the cursor. Enter takes
-the client to the chosen pane; Escape closes the popup and changes nothing.
+the client to the chosen pane; Escape closes the popup and changes nothing
+beyond the side effect of the popup described below.
 .PP
 Bind it with the server's socket and the client that pressed the key:
 .PP
@@ -116,8 +117,7 @@ if the popup is cancelled, as for any popup. Other panes are unaffected.
 The embedding tmux config supplies the predicates; the command evaluates
 them with
 .BR #{E:...} .
-An option the config does not set expands empty, which reads as false, so a
-config without them gets fewer rows or none, never an error.
+These are required:
 .TP
 .B @pane_jump_failed\fR, \fB@pane_jump_waiting\fR, \fB@pane_jump_done
 The red, yellow and green classes. Each pane should match at most one, as
@@ -131,6 +131,19 @@ Work in progress without attention: the blue class.
 .B @pane_agent
 The pane runs an agent: listed, dimmed, when nothing else holds.
 .TP
+.B @window_counted
+The window counts for the session being walked. A window linked into
+several sessions, as grouped sessions share theirs, should count for one of
+them only; the example counts it for the first session it names, matched
+exactly even when the name holds glob characters.
+.PP
+A required option the config leaves unset is an error that names it, so a
+config written for an older picker is told what it lacks rather than shown
+an empty list. Set one to
+.B 0
+to turn it off.
+These are optional, and expand empty, which reads as false, when unset:
+.TP
 .B @pane_marked_failed
 A local failed command; only then does a red row show the exit status from
 .BR @term_notify_exit_status ,
@@ -138,16 +151,12 @@ and never for the
 .B blocked
 kind.
 .TP
-.B @window_counted
-The window counts for the session being walked. Required: without it no
-window counts.
-.TP
 .B @pane_label
 The row's label.
 .TP
 .B @pane_interactive
-Optional: an interactive pane that is not an agent also shows its
-directory's base name.
+An interactive pane that is not an agent also shows its directory's base
+name.
 .PP
 A pane is a candidate only while it has
 .BR @term_notify_pending ,
@@ -155,9 +164,9 @@ A pane is a candidate only while it has
 .B @term_busy
 or
 .BR @pane_agent ,
-so most panes are skipped after plain option reads. A minimal example, for a
-config whose hooks acknowledge a done mark when its pane is visited, as the
-tmux-tools README shows:
+so most panes are skipped after plain option reads. A minimal example, the
+predicates the tests run, for marks set by
+.BR term-pane-mark (1):
 .PP
 .RS
 .nf
@@ -220,14 +229,27 @@ id), or
 when it is gone. The popup's preview runs this, and reads
 .B FZF_PREVIEW_LINES
 (default 40).
+.SH DIAGNOSTICS
+A failure exits 1 and shows its reason on the client as a message as well
+as on standard error, since
+.B run-shell
+discards a command's standard error. Failures are: a tmux query that fails,
+a required option left unset, a quote in a quoted path (below), an fzf error
+and a jump that fails while the pane is still there. An fzf error (an option
+an older fzf does not know, say) keeps the popup open on fzf's own message
+until Enter, since older fzf draws its screen on standard error and the
+message cannot be captured.
 .SH COMPATIBILITY
 tmux 3.2 or newer, and
 .BR fzf (1)
 0.27.0 or newer, the first to accept the
 .B border-top
 preview window option (checked by hand against 0.27.0 and 0.26.0; CI runs
-the distributions' own fzf). tmux 3.2 cannot target a message at a client, so
-there a message goes to the session's most recently active client. Before
+the distributions' own fzf). tmux 3.2 cannot target a message at a client: it rejects
+.B display-message -c
+.I client
+with its usage line, and only then does a message go to the session's most
+recently active client instead. Before
 tmux 3.6 a popup sends no focus events, so opening the picker acknowledges
 nothing.
 .PP
@@ -242,14 +264,14 @@ popup's command line.
 .SH EXIT STATUS
 .TP
 .B 0
-A pane was chosen or the popup was cancelled; or the client was gone or in
-control mode, the pane had closed, or a missing
+A pane was chosen, or the popup was cancelled or matched nothing; or the
+client was gone or in control mode, the pane had closed, or a missing
 .BR fzf (1)
 or an empty list was reported through tmux.
 .TP
 .B 1
-tmux could not be queried or could not open the popup, a path or name held a
-quote, or fzf returned a line that is not one of the rows.
+A failure, as under DIAGNOSTICS, or fzf returned a line that is not one of
+the rows.
 .TP
 .B 64
 The arguments were invalid.

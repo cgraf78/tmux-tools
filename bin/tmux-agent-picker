@@ -133,10 +133,20 @@ label="#{s/[$nl$cr]/?/:#{E:@pane_label}}"
 agentish='#{?#{||:#{E:@pane_agent},#{E:@pane_interactive}},1,0}'
 text="L #{pane_id} #{session_id} $location${nl}B #{pane_id} #{session_id} $agentish $basename${nl}X #{pane_id} #{session_id} $label"
 clients='C #{client_control_mode} #{pane_id} #{client_name}'
+# The options without which the rows would be wrong or missing with no word
+# said, so their absence is an error: R lists those the config leaves unset
+# (a config can still set one to 0). The others are optional.
+required_options='@window_counted @pane_agent @pane_jump_failed @pane_jump_waiting @pane_jump_done @pane_jump_working'
+required='R'
+for option in $required_options; do
+  required+="#{?#{==:#{$option},}, $option,}"
+done
 
-# All three queries go to tmux as one invocation, so one command queue.
+# All four queries go to tmux as one invocation, so one command queue.
+# shellcheck disable=SC2329 # ask runs it.
 snapshot() {
-  tm -u display-message -p "$walk" \; \
+  tm -u display-message -p "$required" \; \
+    display-message -p "$walk" \; \
     list-panes -a -f "$candidate" -F "$text" \; \
     list-clients -F "$clients"
 }
@@ -241,17 +251,63 @@ render() {
     }'
 }
 
-if [[ $list == true ]]; then
-  snapshot | render
+# Show a message on the client, with # doubled so tmux shows it as written.
+# tmux 3.2 takes display-message's -c as a flag without a value and rejects
+# the value with its usage line: only then does the message go without -c,
+# to the session's most recently active client. Any other failure returns 1;
+# the message never goes to another client in its place.
+message() {
+  local text=${1//\#/##} error
+  error=$(tm display-message -c "$client" "$text" 2>&1) && return 0
+  [[ $error == 'usage: display-message '* ]] || return 1
+  tm display-message "$text" 2>/dev/null
+}
+
+# A notice for the client, on stderr when tmux cannot show it.
+notice() {
+  message "$1" || printf 'tmux-agent-picker: %s\n' "$1" >&2
+}
+
+# Fail loudly. run-shell discards a command's stderr unless given -E, which
+# tmux 3.2 lacks, so the client gets the reason as a message too.
+fail() {
+  printf 'tmux-agent-picker: %s\n' "$1" >&2
+  [[ -z $client ]] || message "tmux-agent-picker: $1" || true
+  exit 1
+}
+
+# Run a tmux query into $reply. A failure is fatal, in tmux's own words, so
+# a lost server is never mistaken for an empty answer.
+ask() {
+  local status=0 error
+  reply=$("$@" 2>"$work/error") || status=$?
+  if ((status != 0)); then
+    error=$(cat "$work/error")
+    fail "tmux failed (status $status): ${error//$'\n'/ }"
+  fi
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/tmux-agent-picker.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+
+# type -P finds only an executable: the popup runs fzf from PATH.
+if [[ $list == false ]] && ! type -P fzf >/dev/null 2>&1; then
+  notice 'The agent picker needs fzf'
   exit 0
 fi
 
-# Show a message on the client. tmux 3.2 parses display-message -c as a flag
-# without a value, so there the message goes to the session's latest client.
-message() {
-  tm display-message -c "$client" "$1" 2>/dev/null ||
-    tm display-message "$1" 2>/dev/null || true
-}
+ask snapshot
+state=$reply
+missing=${state%%$'\n'*}
+[[ $missing == R* ]] || fail 'tmux answered the snapshot with something unexpected'
+missing=${missing#R}
+[[ -z $missing ]] ||
+  fail "the tmux config does not set$missing (see tmux-agent-picker(1))"
+
+if [[ $list == true ]]; then
+  printf '%s\n' "$state" | render
+  exit 0
+fi
 
 # Quote a word for the popup's shell.
 shell_quote() {
@@ -263,12 +319,6 @@ shell_quote() {
   printf "'%s%s'" "$quoted" "$rest"
 }
 
-# type -P finds only an executable: the popup runs fzf from PATH.
-if ! type -P fzf >/dev/null 2>&1; then
-  message 'The agent picker needs fzf'
-  exit 0
-fi
-
 self=${BASH_SOURCE[0]}
 case $self in
   */*) ;;
@@ -278,20 +328,10 @@ case $self in
   /*) ;;
   *) self=$PWD/$self ;;
 esac
-
-work=$(mktemp -d "${TMPDIR:-/tmp}/tmux-agent-picker.XXXXXX")
-trap 'rm -rf "$work"' EXIT
 case "$work$socket$client$self" in
-  *"'"*)
-    printf 'tmux-agent-picker: a quote in the temporary path, socket, client or script path\n' >&2
-    exit 1
-    ;;
+  *"'"*) fail 'a quote in the temporary path, socket, client or script path' ;;
 esac
 
-if ! snapshot >"$work/state" 2>"$work/error"; then
-  cat "$work/error" >&2
-  exit 1
-fi
 # A detached or control-mode client gets nothing.
 attached=false
 while IFS= read -r record; do
@@ -302,45 +342,59 @@ while IFS= read -r record; do
   [[ ${record#* } == "$client" ]] || continue
   [[ $control == 0 ]] || exit 0
   attached=true
-done <"$work/state"
+done <<<"$state"
 [[ $attached == true ]] || exit 0
 
-render <"$work/state" >"$work/rows"
+printf '%s\n' "$state" | render >"$work/rows"
 if [[ ! -s "$work/rows" ]]; then
-  message 'No agent panes on this server'
+  notice 'No agent panes on this server'
   exit 0
 fi
 
-# The popup only picks: it writes the chosen line and closes, and the jump
-# runs after it has gone. fzf runs its preview and reload with SHELL, so sh
-# reads their quoting. fzf exits 1 with no match and 130 when cancelled, and
-# the popup passes that status on, so only an error tmux itself reports (an
-# unknown client, say) is a failure.
+# The popup only picks: it writes the chosen line and fzf's exit status, and
+# closes; the jump runs after it has gone. Its command runs under sh -c, so
+# no default shell changes its meaning, and fzf runs its preview and reload
+# with SHELL=sh for the same reason. fzf exits 1 with no match and 130 when
+# cancelled; any other status is an error. Older fzf draws its screen on
+# stderr, so its error text cannot be captured: instead the popup stays open
+# on it until Enter.
 preview_command="'$self' --socket '$socket' --preview {1}"
 reload="ctrl-r:reload('$self' --socket '$socket' --list --client '$client')+refresh-preview"
-popup="env SHELL=sh fzf --ansi --no-sort --reverse --no-multi --delimiter='\\t' --with-nth=4.."
-popup+=" --prompt='Agents> ' --header='Enter jump · Esc cancel · ctrl-r refresh'"
-popup+=" --preview $(shell_quote "$preview_command")"
-popup+=" --preview-window='down,60%,border-top,nowrap' --bind $(shell_quote "$reload")"
-popup+=" <'$work/rows' >'$work/choice'"
-if ! tm display-popup -c "$client" -E -w 90% -h 85% "$popup" 2>"$work/error"; then
-  if [[ -s "$work/error" ]]; then
-    cat "$work/error" >&2
-    exit 1
-  fi
+picker="env SHELL=sh fzf --ansi --no-sort --reverse --no-multi --delimiter='\\t' --with-nth=4.."
+picker+=" --prompt='Agents> ' --header='Enter jump · Esc cancel · ctrl-r refresh'"
+picker+=" --preview $(shell_quote "$preview_command")"
+picker+=" --preview-window='down,60%,border-top,nowrap' --bind $(shell_quote "$reload")"
+picker+=" <'$work/rows' >'$work/choice'"
+picker+="; status=\$?; echo \"\$status\" >'$work/status'"
+# shellcheck disable=SC2016 # The popup's sh expands these.
+picker+='; case $status in 0 | 1 | 130) ;; *) printf "\nfzf failed with status %s. Press Enter to close.\n" "$status"; read -r _ ;; esac'
+popup_status=0
+tm display-popup -c "$client" -E -w 90% -h 85% "sh -c $(shell_quote "$picker")" \
+  2>"$work/error" || popup_status=$?
+if ((popup_status != 0)); then
+  error=$(cat "$work/error")
+  fail "tmux could not open the popup (status $popup_status): ${error//$'\n'/ }"
 fi
-[[ -s "$work/choice" ]] || exit 0
+# No status means the popup closed before fzf did, as when the client
+# detaches: nothing to do.
+fzf_status=''
+[[ ! -s "$work/status" ]] || fzf_status=$(cat "$work/status")
+case $fzf_status in
+  0) ;;
+  '' | 1 | 130) exit 0 ;;
+  *) fail "fzf failed with status $fzf_status" ;;
+esac
 pane='' window='' session=''
 IFS=$'\t' read -r pane window session _ <"$work/choice" || true
 # The chosen line is one of the rows rendered above; anything else means fzf
 # or the rows went wrong, so say so rather than guess a target.
 if ! valid_id % "$pane" || ! valid_id @ "$window" || ! valid_id '$' "$session"; then
-  printf 'tmux-agent-picker: unexpected choice from fzf\n' >&2
-  exit 1
+  fail 'unexpected choice from fzf'
 fi
 
 # Find the exact client by name: display-message -c answers for another
 # client, and tmux 3.2 takes no argument to it. Keep its current session.
+ask tm list-clients -F '#{session_id} #{client_control_mode} #{client_name}'
 own=''
 attached=false
 while read -r sid control name; do
@@ -348,12 +402,12 @@ while read -r sid control name; do
   [[ $control == 0 ]] || exit 0
   own=$sid
   attached=true
-done < <(tm list-clients -F '#{session_id} #{client_control_mode} #{client_name}' 2>/dev/null || true)
+done <<<"$reply"
 [[ $attached == true ]] && valid_id '$' "$own" || exit 0
 
 # Where does the pane live now? Its session may have been killed while a
 # grouped peer still holds it, or it may have moved to a new window.
-holders=$(tm list-panes -a -F '#{pane_id} #{window_id} #{session_id} #{session_attached}' 2>/dev/null || true)
+ask tm list-panes -a -F '#{pane_id} #{window_id} #{session_id} #{session_attached}'
 here_window='' idle_session='' idle_window='' row_window='' first_session='' first_window=''
 while read -r pid wid sid attached_count _; do
   [[ $pid == "$pane" ]] || continue
@@ -374,9 +428,9 @@ while read -r pid wid sid attached_count _; do
   if [[ $sid == "$session" && -z $row_window ]]; then
     row_window=$wid
   fi
-done <<<"$holders"
+done <<<"$reply"
 if [[ -z $first_session ]]; then
-  message 'That pane has closed'
+  notice 'That pane has closed'
   exit 0
 fi
 
@@ -402,8 +456,13 @@ else
   jump=(switch-client -c "$client" -t "$target" \; select-window -t "$target" \;
     select-pane -t "$target")
 fi
-if ! tm "${jump[@]}" 2>/dev/null; then
-  tm display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 ||
-    message 'That pane has closed'
+# A jump that fails with the pane still there is an error; a pane that has
+# closed since the pick is only reported.
+if ! tm "${jump[@]}" 2>"$work/error"; then
+  if tm display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    error=$(cat "$work/error")
+    fail "could not jump to $pane: ${error//$'\n'/ }"
+  fi
+  notice 'That pane has closed'
 fi
 exit 0

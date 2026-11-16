@@ -421,6 +421,34 @@ for option in $picker_options; do
     _fail "agent picker documents $option in its man page and the README"
   fi
 done
+# The script's required_options is the one list of required options: the
+# README's Required column and the man page's required list follow it.
+picker_required=$(sed -n "s/^required_options='\(.*\)'$/\1/p" "$ROOT/bin/tmux-agent-picker")
+_assert_ne "agent picker names its required options" "" "$picker_required"
+picker_man_required=$(
+  awk '/^These are required:$/ { on = 1; next } /^These are optional/ { on = 0 }
+    on { print }' "$ROOT/man/man1/tmux-agent-picker.1"
+)
+for option in $picker_options; do
+  required=no
+  case " $picker_required " in *" $option "*) required=yes ;; esac
+  readme_required=$(
+    awk -F' [|] ' -v name="\`$option\`" '$1 == "| " name { print $2 }' "$ROOT/README.md"
+  )
+  _assert_eq "agent picker README marks $option required: $required" "$required" \
+    "$readme_required"
+  man_required=no
+  case $picker_man_required in *"$option"*) man_required=yes ;; esac
+  _assert_eq "agent picker man page lists $option as required: $required" "$required" \
+    "$man_required"
+done
+picker_options_line=" $(tr '\n' ' ' <<<"$picker_options")"
+for option in $picker_required; do
+  case $picker_options_line in
+    *" $option "*) _pass "agent picker reads required option $option" ;;
+    *) _fail "agent picker reads required option $option" ;;
+  esac
+done
 # The man page's example config is the one the picker tests run.
 picker_example=$(
   awk '/A minimal example/ { found = 1 } found && /^\.nf$/ { on = 1; next }

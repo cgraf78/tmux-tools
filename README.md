@@ -52,7 +52,7 @@ Small helpers for tmux setups that outgrow the defaults:
 - For `tmux-command-palette`: `fzf`, and tmux 3.4 or newer to run the chosen
   key itself (older tmux asks you to press it)
 - For `tmux-agent-picker`: `fzf` 0.27.0 or newer, tmux 3.2 or newer, and a
-  tmux config that defines its predicates (see below)
+  tmux config that sets its options (see below)
 
 ## Install
 
@@ -258,39 +258,32 @@ config that acknowledges attention on focus also acknowledges the current
 pane when the picker opens, as for any popup.
 
 The picker reads tmux formats only (never `ps`), and your config decides
-what each pane is. It needs these options, read with `#{E:...}`:
+what each pane is, through these options, read with `#{E:...}`. A pane is a
+candidate only while it has `@term_notify_pending`, `@termnav_child_attention`,
+`@term_busy` or `@pane_agent`; the options below then give its level and text.
 
-| Option | Meaning |
-| --- | --- |
-| `@pane_jump_failed`, `@pane_jump_waiting`, `@pane_jump_done` | the red, yellow and green classes, one per pane |
-| `@pane_jump_working` | work in progress without attention (blue) |
-| `@pane_agent` | the pane runs an agent (idle rows) |
-| `@pane_marked_failed` | a local failed command, whose red row shows its exit status |
-| `@window_counted` | the window counts for the session being walked, so a linked window lists once |
-| `@pane_label` | the row's label (`##` is shown as `#`) |
-| `@pane_interactive` | optional: also show the directory for other interactive panes |
+| Option | Required | Meaning |
+| --- | --- | --- |
+| `@pane_jump_failed` | yes | the red class |
+| `@pane_jump_waiting` | yes | the yellow class |
+| `@pane_jump_done` | yes | the green class; a pane should match at most one of the three |
+| `@pane_jump_working` | yes | work in progress without attention (blue) |
+| `@pane_agent` | yes | the pane runs an agent (idle rows) |
+| `@window_counted` | yes | the window counts for the session being walked, so a linked window lists once |
+| `@pane_marked_failed` | no | a local failed command, whose red row shows its exit status |
+| `@pane_label` | no | the row's label (`##` is shown as `#`) |
+| `@pane_interactive` | no | also show the directory for other interactive panes |
 
-For example, with [term-pane-mark](#term-notify-sound-and-term-pane-mark)
-marks:
+A required option your config leaves unset is an error that names it, never
+an empty list; set one to `0` to turn it off. `man tmux-agent-picker` has a
+complete example config, the one the tests run, and
+`tmux-agent-picker --socket SOCKET --list` prints the rows.
 
-```tmux
-set -g @agent_names 'claude|codex|gemini|grok|muse|opencode'
-set -g @pane_agent '#{m/r:^(#{@agent_names})$,#{pane_current_command}}'
-set -g @pane_marked_failed '#{&&:#{@term_notify_pending},#{||:#{==:#{@term_notify_pending},blocked},#{>:#{@term_notify_exit_status},0}}}'
-set -g @pane_jump_failed '#{E:@pane_marked_failed}'
-set -g @pane_jump_waiting '#{&&:#{!=:#{E:@pane_jump_failed},1},#{==:#{@term_notify_pending},waiting}}'
-set -g @pane_jump_done '#{&&:#{!=:#{E:@pane_jump_failed},1},#{&&:#{!=:#{E:@pane_jump_waiting},1},#{@term_notify_pending}}}'
-set -g @pane_jump_working '#{@term_busy}'
-set -g @session_name_glob '#{s/([][*?\\])/\\\1/:session_name}'
-set -g @window_counted '#{||:#{==:#{window_linked_sessions_list},#{session_name}},#{m:#{E:@session_name_glob}#,*,#{window_linked_sessions_list}}}'
-set -g @pane_label '#{pane_current_command}'
-```
-
-`@window_counted` counts a window linked into several sessions (as grouped
-sessions share theirs) only for the first session it names, matched exactly
-even when the name holds glob characters. `man tmux-agent-picker` adds nested
-tmux leases to the example, and `tmux-agent-picker --socket SOCKET --list`
-prints the rows.
+Failures are loud: the picker exits 1 and shows the reason on the client as
+well as on stderr, since `run-shell` discards stderr. That covers a tmux
+query that fails, an fzf error (the popup stays open on it until Enter) and
+a jump that fails while the pane is still there. Cancelling, no rows, a
+missing `fzf` and a pane that closed after the pick are not failures.
 
 ### `term-notify-sound` and `term-pane-mark`
 

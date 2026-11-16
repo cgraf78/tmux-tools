@@ -66,14 +66,12 @@ jobs:
           mkdir -p "$stub_dir"
           printf '%s\n' '#!/bin/sh' \
             'case $1 in' \
-            '  -S) cat "$STUB_SNAPSHOT" ;;' \
             '  capture-pane) cat "$STUB_CAPTURE" ;;' \
             '  list-keys) [ "$4" != prefix ] || printf "%s\n" "r  Record the pane" ;;' \
             '  *) printf "%s\n" "$*" >>"$STUB_LOG" ;;' \
             'esac' >"$stub_dir/tmux"
           chmod +x "$stub_dir/tmux"
           export STUB_CAPTURE="$stub_dir/capture" STUB_LOG="$stub_dir/log"
-          export STUB_SNAPSHOT="$stub_dir/snapshot"
 
           printf '%s\n' '[0] me@host:~' '$ echo hi' 'hi' '[0] me@host:~' '$' \
             >"$STUB_CAPTURE"
@@ -118,24 +116,15 @@ jobs:
             status=$?
           [[ $status -eq 64 ]] || exit 1
 
-          # The picker's rows from stock awk, with a multibyte session name.
-          awk_dir="$RUNNER_TEMP/stock-awk"
-          mkdir -p "$awk_dir"
-          ln -s /usr/bin/awk "$awk_dir/awk"
-          location="ünï:1.1$(printf '%17s' '')"
-          printf '%s\n' 'W %1/@1/$1/01000/-/0 ' \
-            "L %1 \$1 $location" 'B %1 $1 1 api' 'X %1 $1 codex' >"$STUB_SNAPSHOT"
-          output=$(PATH="$awk_dir:$stub_dir:$PATH" /bin/bash \
-            "$install_prefix/bin/tmux-agent-picker" --socket /tmp/stub --list)
-          expected=$'%1\t@1\t$1\t\033[33m●\033[0m  '"$location"$'  codex   \033[90mapi\033[0m'
-          [[ $output == "$expected" ]] || exit 1
+          # The picker's rows come from its mock suite below, which runs
+          # every awk it finds, /usr/bin/awk among them.
           status=0
           /bin/bash "$install_prefix/bin/tmux-agent-picker" --list \
             2>/dev/null || status=$?
           [[ $status -eq 64 ]] || exit 1
 
           /bin/bash test/term-pane-state-test
-          PATH="$awk_dir:$PATH" /bin/bash test/tmux-agent-picker-test
+          /bin/bash test/tmux-agent-picker-test
           /bin/bash test/term-pane-mark-token-test
 
           bell="$RUNNER_TEMP/bell"

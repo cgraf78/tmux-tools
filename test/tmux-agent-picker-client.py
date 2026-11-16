@@ -26,8 +26,12 @@ if TMUX is None:
     raise SystemExit(0)
 VERSION = subprocess.run([TMUX, "-V"], text=True, capture_output=True, check=False).stdout
 MATCH = re.search(r"(\d+)\.(\d+)", VERSION)
-# tmux 3.6 sends focus events to the pane as a popup opens and closes.
-POPUP_FOCUS = MATCH is not None and (int(MATCH[1]), int(MATCH[2])) >= (3, 6)
+# tmux 3.6 sends focus events to the pane as a popup opens and closes. A
+# build from git says "tmux master", newer than any release, and a release
+# candidate "tmux next-3.7"; anything else unparsed fails rather than guess.
+if MATCH is None and "master" not in VERSION:
+    raise SystemExit(f"FAIL: unrecognised tmux version {VERSION!r}")
+POPUP_FOCUS = MATCH is None or (int(MATCH[1]), int(MATCH[2])) >= (3, 6)
 
 # The fixture config: the man page's example predicates and acknowledgement
 # hooks. The binding runs the picker through run-picker (below).
@@ -36,12 +40,14 @@ CONFIG = ROOT / "test/tmux-agent-picker.conf"
 # The popup runs this stand-in instead of fzf. It records its arguments and
 # the rows it was offered, optionally changes the server between the pick and
 # the jump, then prints the first row containing $PICKER_PICK, or exits 130
-# (fzf's cancel status) when that is empty.
+# (fzf's cancel status) when that is empty. With $PICKER_FAIL set it fails
+# as fzf does on a bad option.
 STUB_FZF = r"""#!/bin/sh
 printf '%s\n' "$@" >"$PICKER_LOG.args.tmp" && mv "$PICKER_LOG.args.tmp" "$PICKER_LOG.args"
 cat >"$PICKER_LOG.offered.tmp"
 [ -z "$PICKER_HOLD" ] || while [ ! -e "$PICKER_HOLD" ]; do sleep 0.05; done
 mv "$PICKER_LOG.offered.tmp" "$PICKER_LOG.offered"
+[ -z "$PICKER_FAIL" ] || { echo 'fzf: unknown option' >&2; exit 2; }
 [ -n "$PICKER_PICK" ] || exit 130
 row=$(grep -F -m 1 -- "$PICKER_PICK" "$PICKER_LOG.offered") || exit 1
 pane=$(printf '%s\n' "$row" | cut -f1)
@@ -296,6 +302,7 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
         tmux("set-environment", "-g", "PICKER_LOG", str(log))
         tmux("set-environment", "-g", "PICKER_RECORD", str(record))
         tmux("set-environment", "-g", "PICKER_SOCKET", socket)
+        tmux("set-environment", "-g", "PICKER_FAIL", "")
         # Sessions out of name order; zeta is the client's.
         home = tmux("display-message", "-p", "-t", "zeta:", "#{pane_id}")
         zeta_agent = split(home, agent_command())
@@ -586,8 +593,46 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
         assert closed == b"(pane closed)\n", closed
         print("PASS: the preview keeps colours and drops trailing blank lines")
 
-        # No rows: a message, no view mode.
-        tmux("set-option", "-g", "@window_counted", "")
+        # Failures are loud: run-shell shows the failed status in view mode,
+        # and the picker says why on the client.
+        def failed_run(why: str) -> None:
+            poll("the failed run finishes", lambda: len(runs()), lambda n: n > count)
+            assert runs()[-1] == "1", runs()
+            poll(
+                "the failure is reported",
+                lambda: tmux("show-messages", "-t", me),
+                lambda v: why in str(v),
+            )
+            current = view(me)[2]
+            poll(
+                "run-shell shows the failure",
+                lambda: tmux("display-message", "-p", "-t", current, "#{pane_mode}"),
+                lambda v: v == "view-mode",
+            )
+            tmux("send-keys", "-t", current, "-X", "cancel")
+
+        # An fzf error holds the popup on its text until Enter.
+        tmux("set-environment", "-g", "PICKER_FAIL", "1")
+        count = len(runs())
+        open_picker(master, "")
+        pump(0.3)
+        assert len(runs()) == count, "the popup waits for Enter"
+        os.write(master, b"\r")
+        failed_run("fzf failed with status 2")
+        tmux("set-environment", "-g", "PICKER_FAIL", "")
+        print("PASS: an fzf error holds the popup, then fails and says so")
+
+        # A required option the config leaves unset is named, not taken as
+        # no rows.
+        tmux("set-option", "-gu", "@window_counted")
+        count = len(runs())
+        os.write(master, b"\x1b[15~")
+        failed_run("does not set @window_counted")
+        print("PASS: an unset required option fails and is named")
+
+        # No rows: a message, no view mode. A config can set a required
+        # option to 0.
+        tmux("set-option", "-g", "@window_counted", "0")
         count = len(runs())
         os.write(master, b"\x1b[15~")
         poll("the empty run finishes", lambda: len(runs()), lambda n: n > count)

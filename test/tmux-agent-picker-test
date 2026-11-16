@@ -24,30 +24,44 @@ printf '%s\n' "${args//$'\n'/\\n}" >>"$MOCK_CALLS"
 case "$1 $2" in
   'display-message -p')
     case $3 in
-      'W '*) cat "$MOCK_STATE" ;;
+      R*)
+        [ -z "${MOCK_SNAPSHOT_ERROR:-}" ] || { printf '%s\n' "$MOCK_SNAPSHOT_ERROR" >&2; exit 1; }
+        printf 'R%s\n' "${MOCK_MISSING:-}"
+        cat "$MOCK_STATE"
+        ;;
       *) [ "${MOCK_PANE_GONE:-0}" = 1 ] && exit 1 ;;
     esac
+    ;;
+  'display-message -c')
+    # tmux 3.2 takes -c as a flag and rejects its value with the usage line.
+    [ "${MOCK_OLD_C:-0}" = 1 ] && { echo 'usage: display-message [-aINpv] [-c target-client]' >&2; exit 1; }
+    [ "${MOCK_MESSAGE_FAIL:-0}" = 1 ] && { echo "can't find client" >&2; exit 1; }
     ;;
   'capture-pane -e')
     [ "${MOCK_CAPTURE_FAIL:-0}" = 1 ] && exit 1
     cat "$MOCK_CAPTURE"
     ;;
-  'list-clients -F') cat "$MOCK_CLIENTS" ;;
+  'list-clients -F')
+    [ "${MOCK_CLIENTS_FAIL:-0}" = 1 ] && { echo 'server exited unexpectedly' >&2; exit 1; }
+    cat "$MOCK_CLIENTS"
+    ;;
   'list-panes -a') cat "$MOCK_HOLDERS" ;;
   display-popup*)
     shift $(($# - 1))
     PATH="$MOCK_POPUP_PATH" sh -c "$1"
     ;;
-  *) [ "${MOCK_JUMP_FAIL:-0}" = 1 ] && exit 1 ;;
+  *) [ "${MOCK_JUMP_FAIL:-0}" = 1 ] && { echo "can't find window" >&2; exit 1; } ;;
 esac
 exit 0
 MOCK
 # The stand-in fzf records its arguments and the rows it was offered, then
-# prints the first row containing $MOCK_PICK, or exits 130 (cancel).
+# exits with $MOCK_FZF_STATUS if set, or prints the first row containing
+# $MOCK_PICK, or exits 130 (cancel).
 cat >"$tmp/popup-bin/fzf" <<'FZF'
 #!/bin/sh
 printf '%s\n' "$@" >"$MOCK_FZF_ARGS"
 cat >"$MOCK_FZF_OFFERED"
+[ -z "$MOCK_FZF_STATUS" ] || { echo 'fzf: unknown option' >&2; exit "$MOCK_FZF_STATUS"; }
 [ -z "$MOCK_CHOICE" ] || { printf '%s\n' "$MOCK_CHOICE"; exit 0; }
 [ -n "$MOCK_PICK" ] || exit 130
 grep -F -m 1 -- "$MOCK_PICK" "$MOCK_FZF_OFFERED" || exit 1
@@ -64,7 +78,7 @@ export PATH="$tmp/bin:$PATH"
 export MOCK_POPUP_PATH="$tmp/popup-bin:$PATH"
 export MOCK_CALLS=$tmp/calls MOCK_STATE=$tmp/state MOCK_CAPTURE=$tmp/capture
 export MOCK_CLIENTS=$tmp/clients MOCK_HOLDERS=$tmp/holders MOCK_PS=$tmp/ps
-export MOCK_FZF_ARGS=$tmp/fzf-args MOCK_FZF_OFFERED=$tmp/fzf-offered MOCK_PICK='' MOCK_CHOICE=''
+export MOCK_FZF_ARGS=$tmp/fzf-args MOCK_FZF_OFFERED=$tmp/fzf-offered MOCK_PICK='' MOCK_CHOICE='' MOCK_FZF_STATUS=''
 SOCKET=/private/test.sock
 CLIENT=/dev/pts/7
 failures=0
@@ -94,8 +108,8 @@ pad() {
 e=$'\033'
 
 # A snapshot: query 1's walk, query 2's text and the clients, as tmux prints
-# them. Each pane's text is three records: location, agent flag and
-# basename, and label.
+# them; the mock adds the line of unset required options before them. Each
+# pane's text is three records: location, agent flag and basename, and label.
 text_row() {
   local pane=$1 session=$2 location=$3 base=$4 agent=$5 label=$6
   printf 'L %s %s %s\nB %s %s %s %s\nX %s %s %s\n' "$pane" "$session" "$location" \
@@ -122,13 +136,25 @@ text_row() {
 } >"$MOCK_STATE"
 : >"$MOCK_CALLS"
 check 'rows go by level, each level in walk order' '%3 %7 %2 %4 %8 %5 %1 ' "$(panes)"
-check 'one tmux invocation runs all three queries' 1 "$(wc -l <"$MOCK_CALLS" | tr -d ' ')"
+check 'one tmux invocation runs all four queries' 1 "$(wc -l <"$MOCK_CALLS" | tr -d ' ')"
 call=$(cat "$MOCK_CALLS")
 case $call in
-  "-S $SOCKET -u display-message -p W "*' ; list-panes -a -f '*' -F L '*' ; list-clients -F C '*) result=ok ;;
+  "-S $SOCKET -u display-message -p R"*' ; display-message -p W '*' ; list-panes -a -f '*' -F L '*' ; list-clients -F C '*) result=ok ;;
   *) result=$call ;;
 esac
-check 'the walk, the text and the clients are one queued call' ok "$result"
+check 'the options, the walk, the text and the clients are one queued call' ok "$result"
+# Every required option is checked, as set or not: 0 still counts as set.
+required=$(sed -n "s/^required_options='\(.*\)'$/\1/p" "$PICKER")
+read -r -a required_list <<<"$required"
+check 'the picker names its required options' 6 "${#required_list[@]}"
+unchecked=''
+for option in "${required_list[@]}"; do
+  case $call in
+    *"#{?#{==:#{$option},}, $option,}"*) ;;
+    *) unchecked="$unchecked $option" ;;
+  esac
+done
+check 'the snapshot reports each required option left unset' '' "$unchecked"
 case $call in
   *'#{S:#{W:#{?#{E:@window_counted},#{P:'*) result=ok ;;
   *) result=$call ;;
@@ -259,8 +285,9 @@ check 'control bytes and ## are sanitised' \
 printf '%s\n' 'one' "${e}[31mHELLO${e}[0m" 'three' '' "${e}[0m" "  ${e}[44m  ${e}[0m" '' >"$MOCK_CAPTURE"
 check 'the preview tails without trailing blank lines' "${e}[31mHELLO${e}[0m"$'\nthree' \
   "$(FZF_PREVIEW_LINES=2 "$PICKER" --socket "$SOCKET" --preview %3)"
-check 'the preview defaults to 40 lines' 3 \
-  "$(env -u FZF_PREVIEW_LINES "$PICKER" --socket "$SOCKET" --preview %3 | wc -l | tr -d ' ')"
+seq 1 45 >"$MOCK_CAPTURE"
+check 'the preview defaults to the last 40 lines' "$(seq 6 45)" \
+  "$(env -u FZF_PREVIEW_LINES "$PICKER" --socket "$SOCKET" --preview %3)"
 check 'a failing capture shows the pane closed' '(pane closed)' \
   "$(MOCK_CAPTURE_FAIL=1 "$PICKER" --socket "$SOCKET" --preview %3)"
 : >"$MOCK_CALLS"
@@ -283,7 +310,7 @@ printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
 pick() {
   : >"$MOCK_CALLS"
   rm -f "$MOCK_FZF_ARGS" "$MOCK_FZF_OFFERED"
-  MOCK_PICK=$1 "$PICKER" --socket "$SOCKET" --client "$CLIENT"
+  MOCK_PICK=$1 "$PICKER" --socket "$SOCKET" --client "$CLIENT" </dev/null
 }
 # The jump queue: the calls after the popup.
 jumped() {
@@ -384,6 +411,116 @@ output=$(MOCK_CHOICE='not a row' "$PICKER" --socket "$SOCKET" --client "$CLIENT"
 check 'an unexpected choice is an error' 1 "$status"
 check 'an unexpected choice says so' 'tmux-agent-picker: unexpected choice from fzf' "$output"
 check 'an unexpected choice runs no jump' '' "$(grep -E ' (select-pane|switch-client) ' "$MOCK_CALLS")"
+
+# Failures are loud: each exits 1, says why on stderr and on the client, and
+# runs no jump.
+no_jump() {
+  grep -E ' (select-pane|switch-client) ' "$MOCK_CALLS"
+}
+client_messages() {
+  grep -F " display-message -c $CLIENT " "$MOCK_CALLS"
+}
+status=0
+output=$(MOCK_MISSING=' @window_counted @pane_agent' listing 2>&1) || status=$?
+check 'an unset required option fails --list' 1 "$status"
+check 'an unset required option is named' \
+  'tmux-agent-picker: the tmux config does not set @window_counted @pane_agent (see tmux-agent-picker(1))' \
+  "$output"
+status=0
+output=$(MOCK_MISSING=' @pane_jump_done' pick 'own session' 2>&1) || status=$?
+check 'an unset required option fails the picker' 1 "$status"
+check 'an unset required option is shown on the client' \
+  "-S $SOCKET display-message -c $CLIENT tmux-agent-picker: the tmux config does not set @pane_jump_done (see tmux-agent-picker(1))" \
+  "$(client_messages)"
+check 'an unset required option opens no popup' '' "$(grep -F display-popup "$MOCK_CALLS")"
+
+status=0
+output=$(MOCK_SNAPSHOT_ERROR='no server running on #{x}' pick 'own session' 2>&1) || status=$?
+check 'a failed snapshot is an error' 1 "$status"
+check 'a failed snapshot says why' 'tmux-agent-picker: tmux failed (status 1): no server running on #{x}' \
+  "$output"
+check 'a failed snapshot is shown on the client as written' \
+  "-S $SOCKET display-message -c $CLIENT tmux-agent-picker: tmux failed (status 1): no server running on ##{x}" \
+  "$(client_messages)"
+
+printf '%s\n' '%2 @2 $1 1' >"$MOCK_HOLDERS"
+status=0
+output=$(MOCK_CLIENTS_FAIL=1 pick 'own session' 2>&1) || status=$?
+check 'a failed client query after the pick is an error' 1 "$status"
+check 'a failed client query says why' \
+  'tmux-agent-picker: tmux failed (status 1): server exited unexpectedly' "$output"
+check 'a failed client query runs no jump' '' "$(no_jump)"
+
+status=0
+output=$(MOCK_JUMP_FAIL=1 pick 'own session' 2>&1) || status=$?
+check 'a failed jump to a pane still there is an error' 1 "$status"
+check 'a failed jump says why' "tmux-agent-picker: could not jump to %2: can't find window" "$output"
+status=0
+output=$(MOCK_JUMP_FAIL=1 MOCK_PANE_GONE=1 pick 'own session' 2>&1) || status=$?
+check 'a failed jump to a pane closed since the pick exits 0' 0 "$status"
+check 'a failed jump to a pane closed since the pick says so' \
+  "-S $SOCKET display-message -c $CLIENT That pane has closed" "$(client_messages)"
+
+status=0
+output=$(MOCK_FZF_STATUS=2 pick 'own session' 2>&1) || status=$?
+check 'an fzf error is an error' 1 "$status"
+case $output in
+  *'fzf failed with status 2. Press Enter to close.'*'tmux-agent-picker: fzf failed with status 2') result=ok ;;
+  *) result=$output ;;
+esac
+check 'an fzf error holds the popup until Enter, then says so' ok "$result"
+check 'an fzf error runs no jump' '' "$(no_jump)"
+status=0
+output=$(MOCK_FZF_STATUS=1 pick 'own session' 2>&1) || status=$?
+check 'no match (fzf status 1) is not an error' 0 "$status"
+check 'no match prints nothing and runs no jump' '' "$output$(no_jump)"
+
+# Messages go to the client only. tmux 3.2 rejects a value after
+# display-message -c with its usage line, and only that falls back to an
+# untargeted message.
+printf 'W \nC 0 %%1 %s\n' "$CLIENT" >"$MOCK_STATE"
+: >"$MOCK_CALLS"
+MOCK_OLD_C=1 "$PICKER" --socket "$SOCKET" --client "$CLIENT" </dev/null
+check 'without a value for -c the message goes untargeted' \
+  "-S $SOCKET display-message No agent panes on this server" \
+  "$(grep -F ' display-message No ' "$MOCK_CALLS")"
+: >"$MOCK_CALLS"
+output=$(MOCK_MESSAGE_FAIL=1 "$PICKER" --socket "$SOCKET" --client "$CLIENT" 2>&1 </dev/null)
+check 'a message the client cannot show goes to stderr' \
+  'tmux-agent-picker: No agent panes on this server' "$output"
+check 'a message the client cannot show goes to no other client' '' \
+  "$(grep -F ' display-message No ' "$MOCK_CALLS")"
+
+# A quote in a path the popup's command line quotes is refused.
+{
+  printf 'W %s \n' '%2/@2/$1/01000/-/0'
+  text_row %2 '$1' "$(pad 'work:2.1')" '' 0 'own session'
+  printf 'C 0 %%1 %s\n' "$CLIENT"
+  printf "C 0 %%1 %s'\n" "$CLIENT"
+} >"$MOCK_STATE"
+quoted=$tmp/it\'s
+mkdir "$quoted"
+ln -s "$PICKER" "$quoted/tmux-agent-picker"
+: >"$MOCK_CALLS"
+statuses=''
+for run in "socket:$PICKER --socket /private/it's.sock --client $CLIENT" \
+  "client:$PICKER --socket $SOCKET --client $CLIENT'" \
+  "script:$quoted/tmux-agent-picker --socket $SOCKET --client $CLIENT" \
+  "temp:$PICKER --socket $SOCKET --client $CLIENT"; do
+  status=0
+  label=${run%%:*}
+  read -r -a command <<<"${run#*:}"
+  if [ "$label" = temp ]; then
+    output=$(TMPDIR=$quoted MOCK_PICK='own session' "${command[@]}" 2>&1 </dev/null) || status=$?
+  else
+    output=$(MOCK_PICK='own session' "${command[@]}" 2>&1 </dev/null) || status=$?
+  fi
+  statuses="$statuses $label=$status"
+  check "a quote in the $label path says so" \
+    'tmux-agent-picker: a quote in the temporary path, socket, client or script path' "$output"
+done
+check 'a quote in any popup path is refused' ' socket=1 client=1 script=1 temp=1' "$statuses"
+check 'a quote in any popup path opens no popup' '' "$(grep -F display-popup "$MOCK_CALLS")"
 
 check 'nothing ran ps' '' "$(cat "$MOCK_PS" 2>/dev/null)"
 
