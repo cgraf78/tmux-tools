@@ -119,12 +119,18 @@ pane=''
 server_args=()
 buffers=()
 cleanup() {
-  local b
+  local b left
   # Only this run's buffers, by exact name: -d deletes a buffer only when
-  # its paste succeeds, and a glob could take someone else's.
-  for b in ${buffers[@]+"${buffers[@]}"}; do
-    tmux -u ${server_args[@]+"${server_args[@]}"} delete-buffer -b "$b" >/dev/null 2>&1 || true
-  done
+  # its paste succeeds, and a glob could take someone else's. Delete only
+  # names that still exist: tmux 3.2 turns delete-buffer -b on a missing
+  # name into deleting the newest buffer, which is someone else's.
+  if [ "${#buffers[@]}" -gt 0 ]; then
+    left=$(tmux -u ${server_args[@]+"${server_args[@]}"} list-buffers -F '#{buffer_name}' 2>/dev/null) || left=''
+    for b in "${buffers[@]}"; do
+      printf '%s\n' "$left" | grep -qxF -- "$b" || continue
+      tmux -u ${server_args[@]+"${server_args[@]}"} delete-buffer -b "$b" >/dev/null 2>&1 || true
+    done
+  fi
   [ -z "$work" ] || rm -rf "$work"
 }
 trap cleanup EXIT
@@ -997,6 +1003,12 @@ cmd_send() {
         else
           printf '%s' "${vals[$i]}" >"$seg"
           prepare_segment "$seg" "$([ "$type" = 1 ] && echo 0 || echo 1)" 0
+        fi
+        # tmux makes no buffer from an empty file, and there is nothing to
+        # paste anyway.
+        if [ ! -s "$seg" ]; then
+          first=0
+          continue
         fi
         if [ "$first" = 1 ]; then
           # shellcheck disable=SC2046 # Two fields, split on purpose.

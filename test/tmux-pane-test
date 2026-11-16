@@ -299,6 +299,13 @@ settle_file() { # wait until FILE stops growing
     sleep 0.1
   done
 }
+await_size() { # await_size FILE BYTES: wait (up to 20 s) until FILE holds BYTES
+  local n=0
+  while [ "$(wc -c <"$1" | tr -d ' ')" -lt "$2" ] && [ "$n" -lt 200 ]; do
+    n=$((n + 1))
+    sleep 0.1
+  done
+}
 hexof() { od -An -tx1 | tr -d ' \n'; }
 hexfile() { hexof <"$1"; }
 # shellcheck disable=SC2059 # The argument is a printf format by design.
@@ -643,8 +650,10 @@ bpid=$!
   sleep 0.5
   cat "$tmp/a1"
 } | tp send -t "$ap" - --keys Enter 2>/dev/null
+check 'rg_x3 the slow sender succeeds' 0 "$?"
 wait "$bpid"
-settle_file "$ao"
+# Both senders' bytes: 16384 A, one CR, 12 x 2048 B.
+await_size "$ao" 40961
 span=$(tr -d '\n' <"$ao" | sed 's/^B*//; s/B*$//')
 check 'rg_x3 the slow sender arrives contiguous, with its Enter' \
   "$(awk 'BEGIN { while (n++ < 16384) printf "A"; printf "\r" }' | hexof)" "$(printf '%s' "$span" | hexof)"
@@ -657,6 +666,13 @@ SHIM_FAIL_ON=paste-buffer tps "$tmp/fail.log" send -t "$sp" 'never' >/dev/null 2
 left=$(T list-buffers -F '#{buffer_name}' | grep '^tmux-pane\.' | grep -v '^tmux-pane\.other$' || true)
 check 'rg_x8 a failed send leaves no buffers of its own' '' "$left"
 check 'rg_x8 a similar user buffer survives' keep "$(T show-buffer -b tmux-pane.other)"
+# A send's own pasted buffers are gone by its exit; tmux 3.2 would turn a
+# delete-buffer -b of a missing name into deleting the newest buffer, here
+# the user's.
+T set-buffer -b user-newest mine
+tp send -t "$sp" 'pasted' 2>/dev/null
+check 'rg_x8 a successful send leaves the newest user buffer' mine "$(T show-buffer -b user-newest 2>/dev/null)"
+T delete-buffer -b user-newest
 T delete-buffer -b tmux-pane.other
 
 # rg_x17: input disabled with select-pane -d: exit 0 and a warning.
