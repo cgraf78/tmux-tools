@@ -207,15 +207,17 @@ has_paste_S() {
 
 # --- target validation ----------------------------------------------------------
 
-# Fields are separated by the unit separator: a whitespace IFS such as tab
-# would merge the empty fields unset marks produce.
-tab=$(printf '\037')
-geom_format="#{pane_id}${tab}#{pane_dead}${tab}#{pane_in_mode}${tab}#{synchronize-panes}${tab}#{history_size}${tab}#{history_limit}${tab}#{cursor_x}${tab}#{cursor_y}${tab}#{pane_width}${tab}#{pane_height}${tab}#{alternate_on}${tab}#{scroll-on-clear}${tab}#{pane_key_mode}${tab}#{keypad_cursor_flag}${tab}#{keypad_flag}${tab}#{pane_input_off}${tab}#{@term_busy}${tab}#{@term_busy_seq}${tab}#{@term_notify_pending}${tab}#{window_activity}${tab}#{history_collected}${tab}#{history_generation}${tab}#{pane_output_generation}${tab}#{pid}.#{start_time}${tab}#{pane_title}"
+# Fields are separated by a printable, non-whitespace character: a whitespace
+# IFS such as tab would merge the empty fields unset marks produce, and tmux
+# 3.5 prints a control character such as \037 as the text \037. No field but
+# the title, which comes last and keeps any | it holds, contains a |.
+fs='|'
+geom_format="#{pane_id}${fs}#{pane_dead}${fs}#{pane_in_mode}${fs}#{synchronize-panes}${fs}#{history_size}${fs}#{history_limit}${fs}#{cursor_x}${fs}#{cursor_y}${fs}#{pane_width}${fs}#{pane_height}${fs}#{alternate_on}${fs}#{scroll-on-clear}${fs}#{pane_key_mode}${fs}#{keypad_cursor_flag}${fs}#{keypad_flag}${fs}#{pane_input_off}${fs}#{@term_busy}${fs}#{@term_busy_seq}${fs}#{@term_notify_pending}${fs}#{window_activity}${fs}#{history_collected}${fs}#{history_generation}${fs}#{pane_output_generation}${fs}#{pid}.#{start_time}${fs}#{pane_title}"
 
 # Parse one geometry row into g_* variables. Fails if it is not our pane.
 parse_geom() {
   local id rest
-  IFS="$tab" read -r id g_dead _ g_sync g_hsize g_hlimit g_cx g_cy g_w g_h g_alt \
+  IFS="$fs" read -r id g_dead _ g_sync g_hsize g_hlimit g_cx g_cy g_w g_h g_alt \
     g_soc g_keymode g_kcf g_kf g_inputoff g_busy g_seq g_pending g_activity \
     g_collected g_generation _ g_srv g_title <<<"$1" || true
   [ "$id" = "$pane" ] || return 1
