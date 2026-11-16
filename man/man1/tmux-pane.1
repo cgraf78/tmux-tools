@@ -57,6 +57,8 @@ tmux-pane \- type into one exact tmux pane, read it, and wait on it
 .B tmux-pane
 .RI [ subcommand ]
 .B \-\-help
+.br
+.B tmux-pane \-\-interface
 .PP
 .I SERVER
 is
@@ -475,6 +477,13 @@ The wait timed out.
 .TP
 .BR 130 ", " 143
 Interrupted; this run's buffers and temporary files are removed.
+.SH INTERFACE LIST
+.B tmux-pane \-\-interface
+prints one line per subcommand with every option it accepts, then
+.B exit
+and the exit statuses. The script keeps this list in one place; its tests
+check the parsers, the usage text, this page and the README against it, and
+other documentation can do the same.
 .SH ENVIRONMENT
 .TP
 .B TMUX

@@ -95,6 +95,136 @@ check 'rg_p16 parser identity rejects a missing region' 1 "$?"
 # seconds, so the tool never uses it.
 check 'rg_i7 the tool never waits with read -t' '' "$(grep -nE 'read +(-[a-zA-Z]+ +)*-[a-zA-Z]*t +[0-9$]' "$TOOL" || true)"
 
+# --- drift: one interface list, checked against parsers, text and docs ----------
+
+# The tool's own list (bin/tmux-pane "interface"): subcommands, options, exit
+# statuses. Everything below must agree with it.
+iface=$("$BASH" "$TOOL" --interface)
+check 'drift: --interface exits 0' 0 "$?"
+subs=$(printf '%s\n' "$iface" | awk '$1 != "exit" && $1 != "top" { print $1 }' | tr '\n' ' ')
+all_opts=$(printf '%s\n' "$iface" | awk '$1 != "exit" { for (i = 2; i <= NF; i++) print $i }' | sort -u)
+sub_opts() { printf '%s\n' "$iface" | awk -v s="$1" '$1 == s { for (i = 2; i <= NF; i++) print $i }' | sort -u; }
+exit_codes=$(printf '%s\n' "$iface" | awk '$1 == "exit" { for (i = 2; i <= NF; i++) print $i }')
+
+# The top-level dispatch and each parser's case labels are exactly their
+# options.
+top_labels=$(awk '/^case \$sub in$/ { on = 1; next } on && /^esac/ { exit }
+  on && /^  [^ ].*\)/ { l = $0; sub(/^ +/, "", l); sub(/\).*/, "", l)
+    n = split(l, a, / \| /); for (i = 1; i <= n; i++) if (a[i] ~ /^-/) print a[i] }' "$TOOL" | sort -u)
+check 'drift: the dispatch accepts exactly the top-level options' "$(sub_opts top)" "$top_labels"
+for sub in $subs; do
+  labels=$(awk -v f="cmd_$sub()" '
+    $1 == f { on = 1; next }
+    on && /^}/ { exit }
+    on && /^      [^ #].*\)/ {
+      l = $0; sub(/^ +/, "", l); sub(/\).*/, "", l)
+      n = split(l, a, / \| /)
+      for (i = 1; i <= n; i++) if (a[i] ~ /^-/ && a[i] !~ /[*?]/) print a[i]
+    }' "$TOOL" | sort -u)
+  check "drift: cmd_$sub parses exactly its listed options" "$(sub_opts "$sub")" "$labels"
+done
+
+# Option words a text uses: -x or --word, outside quotes, at a word start.
+opt_words() {
+  sed "s/'[^']*'//g; s/\\\\-/-/g; s/\\\\f[BIRP]//g" "$@" |
+    grep -oE '(^|[][ (|,`])--?[A-Za-z][A-Za-z-]*' | sed 's/^[^-]*//' | sort -u
+}
+not_listed() { # words in $1 that $2 does not list
+  printf '%s\n' "$1" | while IFS= read -r w; do
+    [ -z "$w" ] || printf '%s\n' "$2" | grep -qxF -- "$w" || printf '%s ' "$w"
+  done
+}
+missing_from() { # options in $1 absent from the text $2
+  printf '%s\n' "$1" | while IFS= read -r w; do
+    case $w in '' | - | -- | -h | --help) continue ;; esac
+    case $2 in *"$w"*) ;; *) printf '%s ' "$w" ;; esac
+  done
+}
+
+# Usage and help: every option word is listed for the subcommand whose lines
+# use it, and every listed option is shown. Lines naming tmux's own commands
+# (the pane-id hint) are skipped; ACTION lines belong to send.
+"$BASH" "$TOOL" >"$tmp/usage.txt" 2>&1
+"$BASH" "$TOOL" --help >"$tmp/help.txt"
+cat "$tmp/usage.txt" "$tmp/help.txt" | grep -v 'tmux list-panes' >"$tmp/text.txt"
+for sub in $subs top; do
+  awk -v s="$sub" '
+    /^ACTION/ { cur = "send" }
+    match($0, /tmux-pane [a-z]+/) { cur = substr($0, RSTART + 10, RLENGTH - 10) }
+    /tmux-pane --/ { cur = "top" }
+    cur == s' "$tmp/text.txt" >"$tmp/block.txt"
+  check "drift: usage and help use only $sub's options" '' \
+    "$(not_listed "$(opt_words "$tmp/block.txt")" "$(sub_opts "$sub")")"
+done
+check 'drift: usage shows every option' '' "$(missing_from "$all_opts" "$(cat "$tmp/usage.txt")")"
+
+# tmux-pane(1): every --word is an option, every option is documented, and
+# the EXIT STATUS entries are the exit list.
+man_page="$ROOT/man/man1/tmux-pane.1"
+sed 's/\\-/-/g; s/\\f[BIRP]//g' "$man_page" >"$tmp/man.txt"
+check 'drift: tmux-pane(1) uses only listed --options' '' \
+  "$(not_listed "$(opt_words "$man_page" | grep -- '^--')" "$all_opts")"
+check 'drift: tmux-pane(1) documents every option' '' "$(missing_from "$all_opts" "$(cat "$tmp/man.txt")")"
+man_codes=$(awk '/^\.SH EXIT STATUS/ { on = 1; next } /^\.SH/ { on = 0 }
+  on && /^\.BR? [0-9]/ { gsub(/[^0-9 ]/, " "); for (i = 1; i <= NF; i++) print $i }' "$man_page" |
+  sort -n | tr '\n' ' ')
+check 'drift: tmux-pane(1) EXIT STATUS lists the exit codes' "$(printf '%s\n' "$exit_codes" | sort -n | tr '\n' ' ')" "$man_codes"
+used=$(grep -oE '(die|exit|wait_end|wait_result_error) [0-9]+' "$TOOL" | awk '{ print $2 }' | sort -un)
+check 'drift: every literal exit status is listed' '' "$(not_listed "$used" "$(printf '%s\n' "$exit_codes")")"
+
+# Every `tmux-pane SUB ...` reference in the docs names a real subcommand and
+# only that subcommand's options (alternatives such as send|read are split).
+ref_check() { # ref_check FILE...: prints bad references
+  sed 's/\\-/-/g; s/\\f[BIRP]//g; s/`/ ` /g' "$@" | awk -v iface="$iface" '
+    BEGIN {
+      n = split(iface, L, "\n")
+      for (i = 1; i <= n; i++) {
+        m = split(L[i], f, " ")
+        if (f[1] == "exit" || f[1] == "top") continue
+        sub_ok[f[1]] = 1
+        for (j = 2; j <= m; j++) opt[f[1], f[j]] = 1
+      }
+    }
+    {
+      w = split($0, t, " ")
+      for (i = 1; i < w; i++) {
+        if (t[i] != "tmux-pane") continue
+        s = t[i + 1]; gsub(/[][(),.;:]/, "", s)
+        # Prose ("tmux-pane drives ...") is not a reference; a real one
+        # names a subcommand, and an unknown word only counts before -t.
+        if (s !~ /^[a-z]+(\|[a-z]+)*$/) continue
+        if (t[i + 2] != "-t") { ns = split(s, alt, "|"); known = 1
+          for (a = 1; a <= ns; a++) if (!(alt[a] in sub_ok)) known = 0
+          if (!known) continue }
+        ns = split(s, alt, "|"); bad = 0
+        for (a = 1; a <= ns; a++) if (!(alt[a] in sub_ok)) { print "subcommand " alt[a]; bad = 1 }
+        if (bad) continue
+        q = 0
+        for (k = i + 2; k <= w; k++) {
+          x = t[k]
+          if (x == "`" || x == "#" || x == "|" || x == "--" || x ~ /^\$/) break
+          nq = gsub(/\x27/, "&", x); if (q || nq % 2 == 1 && x ~ /^\x27/) { if (nq % 2 == 1) q = !q; continue }
+          if (x !~ /^-/) continue
+          gsub(/[][(),.;:"]/, "", x); sub(/=.*/, "", x)
+          no = split(x, alt2, "|")
+          for (b = 1; b <= no; b++) {
+            if (alt2[b] == "" || alt2[b] ~ /^-[0-9]/) continue
+            okk = 0
+            for (a = 1; a <= ns; a++) if ((alt[a], alt2[b]) in opt) okk = 1
+            if (!okk) print s " " alt2[b]
+          }
+        }
+      }
+    }'
+}
+for doc in README.md AGENTS.md man/man1/tmux-pane.1 man/man1/term-pane-mark.1 man/man1/tmux-copy-last-output.1; do
+  check "drift: $doc names only real tmux-pane subcommands and options" '' "$(ref_check "$ROOT/$doc" | sort -u | tr '\n' ';')"
+done
+check 'drift: help and usage examples use real options' '' "$(ref_check "$tmp/text.txt" | sort -u | tr '\n' ';')"
+# The checker itself catches a wrong option and a wrong subcommand.
+printf '%s\n' 'run `tmux-pane send -t %1 --enterr` or `tmux-pane bogus -t %1`' >"$tmp/bad.md"
+check 'drift: the reference check flags bad references' 'send --enterr;subcommand bogus;' "$(ref_check "$tmp/bad.md" | sort -u | tr '\n' ';')"
+
 if ! command -v tmux >/dev/null 2>&1; then
   if [ "${TMUX_TOOLS_REQUIRE_TMUX:-0}" = 1 ]; then
     printf 'FAIL: tmux required for tmux-pane-test\n' >&2
@@ -1044,7 +1174,15 @@ T clear-history -t "$sh"
 waitp 'rg_p8 a clear that rebuilds the screen ends (rule d)' 0 "printf '\\033[H\\033[2J\\033[3J'" --timeout 8
 killpane "$sh"
 # rg_p10: a line-1 redraw before the command runs does not end the wait.
+# Send only after the first redraw: like zle, the fixture redraws while it
+# waits at the prompt, and one landing after Enter would overwrite the echo.
 sh=$(shellpane FAKE_REDRAW=1)
+n=0
+until T capture-pane -p -t "$sh" | grep -q '(main) +$' || [ "$n" -ge 50 ]; do
+  n=$((n + 1))
+  sleep 0.1
+done
+sleep 0.4
 waitp 'rg_p10 an async redraw does not end the wait early' 0 'sleep 1; echo LATE' --timeout 10
 check_contains 'rg_p10 the capture has the late output' LATE "$(cat "$tmp/w.out")"
 killpane "$sh"

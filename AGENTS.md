@@ -85,6 +85,13 @@ earlier history.
   `result=<kind> exact=yes|no|- status=N|unknown [reason=R] [marker=M]` are
   read by scripts and agents; change them only with their man page. Exit 4
   belongs to a standalone `read --since` alone.
+- `tmux-pane`'s subcommands, options and exit statuses live once, in the
+  interface block at the top of the script (`tmux-pane --interface` prints
+  it). Add or rename one there first: `test/tmux-pane-test` fails until the
+  parser's case labels, the usage and help text, `tmux-pane.1`, and every
+  `tmux-pane SUB ...` reference in the README, AGENTS.md and the man pages
+  agree with it. The only version gate is `tp_tmux_floor`; newer behaviour is
+  detected from tmux (the "Capabilities" comment lists each detection).
 - Every `bin/` command needs a `man/man1/<cmd>.1` with `.SH NAME`, a row in
   `commands=()` in `support/install-checkout.sh`, and a ShellCheck inventory
   row; `test/tmux-tools-test` checks the first two.

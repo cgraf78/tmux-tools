@@ -250,7 +250,7 @@ current pane. Find one with `tmux list-panes -a -F '#{pane_id}
 #{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'`.
 `man tmux-pane` has the details: markers and when `--since` is exact, key
 encoding under `synchronize-panes`, the agent and prompt waits, and the exit
-codes.
+codes. `tmux-pane --interface` prints every subcommand, option and exit code.
 
 ### `tmux-command-palette`
 
