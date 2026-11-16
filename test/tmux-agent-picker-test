@@ -16,7 +16,9 @@ mkdir "$tmp/bin" "$tmp/popup-bin"
 # runs a popup's command with the stand-in fzf, and logs every call.
 cat >"$tmp/bin/tmux" <<'MOCK'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"$MOCK_CALLS"
+# One line per call: the text query's newlines are logged as \n.
+args="$*"
+printf '%s\n' "${args//$'\n'/\\n}" >>"$MOCK_CALLS"
 [ "$1" = -S ] && shift 2
 [ "$1" = -u ] && shift
 case "$1 $2" in
@@ -91,12 +93,12 @@ pad() {
 e=$'\033'
 
 # A snapshot: query 1's walk, query 2's text and the clients, as tmux prints
-# them. Text rows carry the byte lengths of the location and basename.
+# them. Each pane's text is three records: location, agent flag and
+# basename, and label.
 text_row() {
   local pane=$1 session=$2 location=$3 base=$4 agent=$5 label=$6
-  local LC_ALL=C
-  printf 'T %s %s %s %s %s %s%s%s\n' "$pane" "$session" "${#location}" \
-    "${#base}" "$agent" "$location" "$base" "$label"
+  printf 'L %s %s %s\nB %s %s %s %s\nX %s %s %s\n' "$pane" "$session" "$location" \
+    "$pane" "$session" "$agent" "$base" "$pane" "$session" "$label"
 }
 
 # Walk order: %5 in session $3 comes before %1 in $1, unlike name order.
@@ -122,7 +124,7 @@ check 'rows go by level, each level in walk order' '%3 %7 %2 %4 %8 %5 %1 ' "$(pa
 check 'one tmux invocation runs all three queries' 1 "$(wc -l <"$MOCK_CALLS" | tr -d ' ')"
 call=$(cat "$MOCK_CALLS")
 case $call in
-  "-S $SOCKET -u display-message -p W "*' ; list-panes -a -f '*' -F T '*' ; list-clients -F C '*) result=ok ;;
+  "-S $SOCKET -u display-message -p W "*' ; list-panes -a -f '*' -F L '*' ; list-clients -F C '*) result=ok ;;
   *) result=$call ;;
 esac
 check 'the walk, the text and the clients are one queued call' ok "$result"
@@ -141,6 +143,13 @@ case $call in
   *) result=none ;;
 esac
 check 'no query format holds a tab' none "$result"
+# The mock logs the format's newlines as \n; the carriage return is raw.
+sanitised='/?/:'
+case $call in
+  *"}\\nB #{pane_id} #{session_id} "*" #{s/[\\n"$'\r'"]$sanitised#{b:pane_current_path}}\\nX #{pane_id} #{session_id} #{s/[\\n"$'\r'"]$sanitised#{E:@pane_label}}"*) result=ok ;;
+  *) result=$call ;;
+esac
+check 'newlines in a directory or label cannot start a record' ok "$result"
 check 'a pane matching no predicate is dropped' '' "$(listing | grep -F "%6$(printf '\t')")"
 
 # Dots and columns: every row's location starts in the same column, with or
@@ -177,8 +186,9 @@ check 'every row has three hidden id fields' '%3	@2	$1' "$(printf '%s\n' "$raw" 
 } >"$MOCK_STATE"
 check 'malformed tokens are skipped' '%10 ' "$(panes)"
 
-# Byte splitting: tmux truncates a long or wide name by display width and
-# reports byte lengths, so the split lands on character boundaries.
+# Multibyte text: tmux truncates a long or wide name by display width, and
+# each field is its own record, so no awk measures it. Some awks count
+# characters even under LC_ALL=C (Termux's gawk), others bytes.
 wide='ünïcødé:1.1'
 long='release-candidate-build…'
 {
@@ -197,20 +207,32 @@ done
 if type -P busybox >/dev/null 2>&1 && busybox awk 'BEGIN {}' 2>/dev/null; then
   awks+=(busybox)
 fi
+# A gawk forced into a UTF-8 locale counts characters, as Termux's does.
+gawk_path=$(type -P gawk 2>/dev/null) || gawk_path=''
+for locale in C.UTF-8 en_US.UTF-8; do
+  [ -n "$gawk_path" ] || break
+  if LC_ALL=$locale "$gawk_path" 'BEGIN { exit length("\303\251") != 1 }' 2>/dev/null; then
+    awks+=("characters:$locale")
+    break
+  fi
+done
 for awk_path in "${awks[@]}"; do
   shim=$tmp/awk-$(printf '%s' "$awk_path" | tr '/' '_')
   mkdir -p "$shim"
   if [ "$awk_path" = busybox ]; then
     printf '#!/bin/sh\nexec busybox awk "$@"\n' >"$shim/awk"
     chmod +x "$shim/awk"
+  elif [ "${awk_path#characters:}" != "$awk_path" ]; then
+    printf '#!/bin/sh\nLC_ALL=%s exec %s "$@"\n' "${awk_path#characters:}" "$gawk_path" >"$shim/awk"
+    chmod +x "$shim/awk"
   else
     ln -sf "$awk_path" "$shim/awk"
   fi
   rows=$(PATH="$shim:$PATH" visible)
-  check "multibyte text splits on byte lengths ($awk_path)" \
+  check "multibyte text keeps its fields ($awk_path)" \
     "$expected_wide"$'\n'"$expected_long" "$rows"
 done
-check 'at least one awk ran the byte-splitting case' 1 "$([ "${#awks[@]}" -gt 0 ] && echo 1)"
+check 'at least one awk ran the multibyte case' 1 "$([ "${#awks[@]}" -gt 0 ] && echo 1)"
 
 # A pane in a grouped session or linked window has text once per session:
 # the row takes the text of the session query 1 walked it in.

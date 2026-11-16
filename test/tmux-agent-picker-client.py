@@ -24,12 +24,10 @@ if TMUX is None:
         raise SystemExit("FAIL: real tmux is required")
     print("SKIP: real tmux unavailable")
     raise SystemExit(0)
-BASH = shutil.which("bash")
 VERSION = subprocess.run([TMUX, "-V"], text=True, capture_output=True, check=False).stdout
 MATCH = re.search(r"(\d+)\.(\d+)", VERSION)
 # tmux 3.6 sends focus events to the pane as a popup opens and closes.
 POPUP_FOCUS = MATCH is not None and (int(MATCH[1]), int(MATCH[2])) >= (3, 6)
-assert BASH, "bash is required for stand-in agents"
 
 # The fixture config: the man page's example predicates and acknowledgement
 # hooks. The binding runs the picker through run-picker (below).
@@ -64,6 +62,33 @@ status=$?
 echo "$status" >>"$PICKER_RECORD"
 exit "$status"
 """
+
+
+def copy_bash(target: Path) -> None:
+    """Copy a bash that runs from TARGET, so it reports TARGET's name.
+
+    Only the bytes and mode are copied: shutil.copy2 also copies file flags,
+    which macOS refuses for its system-protected /bin/bash. Each bash on PATH
+    is tried in turn, in case a copy cannot run where it lands.
+    """
+    candidates = [
+        str(Path(directory) / "bash")
+        for directory in os.environ.get("PATH", "").split(os.pathsep)
+        if directory and os.access(Path(directory) / "bash", os.X_OK)
+    ]
+    for source in dict.fromkeys(candidates + ["/bin/bash"]):
+        if not os.access(source, os.X_OK):
+            continue
+        shutil.copyfile(source, target)
+        target.chmod(0o755)
+        try:
+            ran = subprocess.run([str(target), "-c", ":"], timeout=10, check=False)
+        except OSError:
+            continue
+        if ran.returncode == 0:
+            return
+    raise SystemExit(f"FAIL: no copy of bash runs as a stand-in agent from {target.parent}")
+
 
 masters: dict[int, int] = {}
 
@@ -108,7 +133,7 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
     # codex. A symlink or a script would report bash or sh instead.
     agent = root / "agents" / "codex"
     agent.parent.mkdir()
-    shutil.copy2(BASH, agent)
+    copy_bash(agent)
     log = root / "fzf"
     record = root / "record"
     # The caller's environment, without TMUX or shell startup files that
@@ -196,6 +221,13 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
             client_name, window, pane, session = line.split(" ", 3)
             if client_name == name:
                 return session, window, pane
+        raise AssertionError(f"client {name} is not attached")
+
+    def session_id_of(name: str) -> str:
+        for line in tmux("list-clients", "-F", "#{client_name} #{session_id}").splitlines():
+            client_name, _, session = line.partition(" ")
+            if client_name == name:
+                return session
         raise AssertionError(f"client {name} is not attached")
 
     def runs() -> list[str]:
@@ -301,6 +333,31 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
             lambda value: value == "codex",
         )
 
+        # A directory name holding a newline cannot forge a record: here it
+        # would give the nested pane a label, unless tmux replaced it with ?.
+        nested_session = tmux("display-message", "-p", "-t", nested, "#{session_id}")
+        forged_dir = root / f"lf\nX {nested} {nested_session} forged"
+        forged_dir.mkdir()
+        forger = pane_id(
+            tmux(
+                "new-session",
+                "-d",
+                "-s",
+                "lf",
+                "-c",
+                str(forged_dir),
+                "-P",
+                "-F",
+                "#{pane_id}",
+                agent_command(),
+            )
+        )
+        mark(forger, "waiting")
+        poll(
+            "the forging agent runs as codex",
+            lambda: tmux("display-message", "-p", "-t", forger, "#{pane_current_command}"),
+            lambda value: value == "codex",
+        )
         listing = subprocess.run(
             [str(PICKER), "--socket", socket, "--list"],
             check=True,
@@ -315,6 +372,9 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
             "codex · fix # the [*] test   " + root.name
         ), listing
         assert home not in offered_panes(listing), "an unmarked shell is not listed"
+        assert "forged" not in row_text(listing, nested), listing
+        assert row_text(listing, forger).endswith(f"lf?X {nested} {nested_session} forged"), listing
+        tmux("kill-session", "-t", "=lf")
         print("PASS: --list shows exit codes only for local failures, and agents' labels")
 
         # A grouped session repeats its panes; the first visit counts.
@@ -429,15 +489,40 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
         gone = new_session("gone", agent_command())
         tmux("new-session", "-d", "-t", "gone", "-s", "gone-peer")
         mark(gone, "waiting")
-        run_picker(master, pick_of(gone), "kill-session")
-        poll("the jump survives a killed session", lambda: view(me)[2], lambda v: v == gone)
-        assert view(me)[0] in ("gone", "gone-peer")
-        assert (
-            tmux("has-session", "-t", "=gone", check=False) == ""
-            and view(me)[0] == "gone-peer"
-            or True
+        rows = run_picker(master, pick_of(gone), "kill-session")
+        killed = next(
+            row.split("\t")[2] for row in rows.splitlines() if row.startswith(pick_of(gone))
         )
+        poll("the jump survives a killed session", lambda: view(me)[2], lambda v: v == gone)
+        survivors = tmux("list-sessions", "-F", "#{session_id}").split()
+        assert killed not in survivors, (killed, survivors)
+        assert session_id_of(me) in survivors, (session_id_of(me), survivors)
         print("PASS: a killed row session falls back to a grouped session holding the pane")
+
+        # Every session holding the pane is attached by another client: the
+        # jump goes to the session the row was walked in. apair sorts first by
+        # name, so a fallback to the first holder would go there instead.
+        tmux("switch-client", "-c", me, "-t", "zeta")
+        poll("back in zeta", lambda: view(me)[0], lambda v: v == "zeta")
+        paired = new_session("zpair", agent_command())
+        tmux("new-session", "-d", "-t", "zpair", "-s", "apair")
+        mark(paired, "waiting")
+        for session in ("zpair", "apair"):
+            clients.append(attach(session)[0])
+        rows = run_picker(master, pick_of(paired))
+        walked = next(
+            row.split("\t")[2] for row in rows.splitlines() if row.startswith(pick_of(paired))
+        )
+        holders = [
+            line.split()[1]
+            for line in tmux("list-panes", "-a", "-F", "#{pane_id} #{session_id}").splitlines()
+            if line.split()[0] == paired
+        ]
+        poll("the jump lands on the pane", lambda: view(me)[2], lambda v: v == paired)
+        assert session_id_of(me) == walked, (session_id_of(me), walked, holders)
+        if walked == holders[0]:
+            print("note: the walked session is also the first holder here")
+        print("PASS: with every holder attached, the jump goes to the walked session")
 
         # break-pane after the pick: the client lands in the pane's new window.
         tmux("switch-client", "-c", me, "-t", "zeta")

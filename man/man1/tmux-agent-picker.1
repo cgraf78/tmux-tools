@@ -225,7 +225,8 @@ tmux 3.2 or newer, and
 .BR fzf (1)
 0.27.0 or newer, the first to accept the
 .B border-top
-preview window option. tmux 3.2 cannot target a message at a client, so
+preview window option (checked by hand against 0.27.0 and 0.26.0; CI runs
+the distributions' own fzf). tmux 3.2 cannot target a message at a client, so
 there a message goes to the session's most recently active client. Before
 tmux 3.6 a popup sends no focus events, so opening the picker acknowledges
 nothing.

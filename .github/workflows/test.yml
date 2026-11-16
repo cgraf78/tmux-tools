@@ -118,14 +118,13 @@ jobs:
             status=$?
           [[ $status -eq 64 ]] || exit 1
 
-          # The picker splits tmux's text by byte lengths: check that
-          # stock awk counts bytes, on a multibyte session name.
+          # The picker's rows from stock awk, with a multibyte session name.
           awk_dir="$RUNNER_TEMP/stock-awk"
           mkdir -p "$awk_dir"
           ln -s /usr/bin/awk "$awk_dir/awk"
           location="ünï:1.1$(printf '%17s' '')"
           printf '%s\n' 'W %1/@1/$1/01000/-/0 ' \
-            "T %1 \$1 26 3 1 ${location}apicodex" >"$STUB_SNAPSHOT"
+            "L %1 \$1 $location" 'B %1 $1 1 api' 'X %1 $1 codex' >"$STUB_SNAPSHOT"
           output=$(PATH="$awk_dir:$stub_dir:$PATH" /bin/bash \
             "$install_prefix/bin/tmux-agent-picker" --socket /tmp/stub --list)
           expected=$'%1\t@1\t$1\t\033[33m●\033[0m  '"$location"$'  codex   \033[90mapi\033[0m'

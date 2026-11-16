@@ -115,15 +115,23 @@ exit_field='#{?#{&&:#{E:@pane_marked_failed},#{&&:#{!=:#{@term_notify_pending},b
 token="#{pane_id}/#{window_id}/#{session_id}/$bits/$exit_field/#{?pane_in_mode,1,0} "
 walk="W #{S:#{W:#{?#{E:@window_counted},#{P:#{?$candidate,$token,}},}}}"
 # Query 2 carries the display text, keyed by pane and session id: a pane in a
-# grouped session or a linked window repeats here, once per session. Fixed
-# fields come first, then the free text with the byte lengths of its first two
-# parts in front, so awk splits it without guessing. tmux truncates and pads
-# the location by display width (the ellipsis is its 24th column), so awk,
-# which counts bytes, never cuts inside a character. Neither format contains a
-# tab: some non-UTF-8 job locales rewrite them.
+# grouped session or a linked window repeats here, once per session. Each pane
+# prints three records, one per free-text field, each after its fixed fields:
+# L (location), B (agent flag, directory base name) and X (label). awk takes
+# the rest of each line, so it never measures text: awks disagree on bytes
+# against characters (Termux's gawk counts characters even under LC_ALL=C).
+# tmux truncates and pads the location by display width (the ellipsis is its
+# 24th column). The newlines between records are the only control characters
+# in the format; a directory or title could hold a newline or carriage return
+# of its own, so tmux replaces those with ? before printing. -u keeps tmux
+# from rewriting control characters for a non-UTF-8 client.
+nl=$'\n'
+cr=$'\r'
 location='#{p24:#{=/23/…:#{session_name}:#{window_index}.#{pane_index}}}'
-basename='#{b:pane_current_path}'
-text="T #{pane_id} #{session_id} #{n:$location} #{n:$basename} #{?#{||:#{E:@pane_agent},#{E:@pane_interactive}},1,0} $location$basename#{E:@pane_label}"
+basename="#{s/[$nl$cr]/?/:#{b:pane_current_path}}"
+label="#{s/[$nl$cr]/?/:#{E:@pane_label}}"
+agentish='#{?#{||:#{E:@pane_agent},#{E:@pane_interactive}},1,0}'
+text="L #{pane_id} #{session_id} $location${nl}B #{pane_id} #{session_id} $agentish $basename${nl}X #{pane_id} #{session_id} $label"
 clients='C #{client_control_mode} #{pane_id} #{client_name}'
 
 # All three queries go to tmux as one invocation, so one command queue.
@@ -136,7 +144,7 @@ snapshot() {
 # Turn a snapshot into rows: pane, window and session ids, then the visible
 # text, separated by tabs. awk adds the tabs and colours only after removing
 # control bytes from the text, and turns @pane_label's ## (doubled for tmux's
-# renderer) back into #. LC_ALL=C makes substr count bytes, as #{n:} does.
+# renderer) back into #. LC_ALL=C keeps the byte ranges below byte ranges.
 render() {
   TMUX_AGENT_PICKER_CLIENT=$client LC_ALL=C awk '
     function clean(s) {
@@ -162,20 +170,27 @@ render() {
       for (i = 1; i <= n; i++) token[++tokens] = t[i]
       next
     }
-    /^T / {
-      if ($2 !~ /^%[0-9]+$/ || $3 !~ /^\$[0-9]+$/ || $4 !~ /^[0-9]+$/ ||
-        $5 !~ /^[0-9]+$/ || $6 !~ /^[01]$/) next
+    # A pane linked into several sessions keeps the first record of each
+    # kind for each session.
+    /^[LBX] %[0-9]+ \$[0-9]+ / {
       key = $2 " " $3
-      if (key in loc) next
       rest = $0
-      if (!sub(/^T [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ /, "", rest)) next
-      if (length(rest) < $4 + $5) next
-      loc[key] = clean(substr(rest, 1, $4))
-      base[key] = clean(substr(rest, $4 + 1, $5))
-      text = clean(substr(rest, $4 + $5 + 1))
-      gsub(/##/, "#", text)
-      label[key] = text
-      agentish[key] = $6
+      if ($1 == "L") {
+        if (key in loc) next
+        sub(/^L [^ ]+ [^ ]+ /, "", rest)
+        loc[key] = clean(rest)
+      } else if ($1 == "B") {
+        if (key in base || $4 !~ /^[01]$/) next
+        if (!sub(/^B [^ ]+ [^ ]+ [01] /, "", rest)) rest = ""
+        base[key] = clean(rest)
+        agentish[key] = $4
+      } else {
+        if (key in label) next
+        sub(/^X [^ ]+ [^ ]+ /, "", rest)
+        rest = clean(rest)
+        gsub(/##/, "#", rest)
+        label[key] = rest
+      }
       next
     }
     /^C / {

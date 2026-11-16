@@ -31,12 +31,37 @@ if FZF is None:
         raise SystemExit("FAIL: real fzf is required")
     print("SKIP: real fzf unavailable")
     raise SystemExit(0)
-BASH = shutil.which("bash")
-assert BASH, "bash is required for stand-in agents"
 
 # The fixture config: the man page's example predicates and acknowledgement
 # hooks.
 CONFIG = ROOT / "test/tmux-agent-picker.conf"
+
+
+def copy_bash(target: Path) -> None:
+    """Copy a bash that runs from TARGET, so it reports TARGET's name.
+
+    Only the bytes and mode are copied: shutil.copy2 also copies file flags,
+    which macOS refuses for its system-protected /bin/bash. Each bash on PATH
+    is tried in turn, in case a copy cannot run where it lands.
+    """
+    candidates = [
+        str(Path(directory) / "bash")
+        for directory in os.environ.get("PATH", "").split(os.pathsep)
+        if directory and os.access(Path(directory) / "bash", os.X_OK)
+    ]
+    for source in dict.fromkeys(candidates + ["/bin/bash"]):
+        if not os.access(source, os.X_OK):
+            continue
+        shutil.copyfile(source, target)
+        target.chmod(0o755)
+        try:
+            ran = subprocess.run([str(target), "-c", ":"], timeout=10, check=False)
+        except OSError:
+            continue
+        if ran.returncode == 0:
+            return
+    raise SystemExit(f"FAIL: no copy of bash runs as a stand-in agent from {target.parent}")
+
 
 CSI = re.compile(
     rb"\x1b\[[0-9;?:<=>]*[ -/]*[@-~]|\x1b[()][0-9A-Za-z]|\x1b[=>78]|\x1b\][^\x07]*\x07"
@@ -88,7 +113,7 @@ with tempfile.TemporaryDirectory(prefix="tap-fzf-") as directory:
     (bindir / "tmux-agent-picker").symlink_to(PICKER)
     agent = root / "agents" / "codex"
     agent.parent.mkdir()
-    shutil.copy2(BASH, agent)
+    copy_bash(agent)
     flag = root / "refresh"
     env = {
         name: value
