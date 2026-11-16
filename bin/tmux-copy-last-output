@@ -221,5 +221,5 @@ if [[ "$count" == 1 ]]; then
 else
   message="Copied last $count commands + output to clipboard"
 fi
-[[ -z "$copy_note" ]] || message+=" (${copy_note//$'\n'/ })"
+[[ -z "$copy_note" ]] || message+=" (${copy_note//$'\n'/; })"
 notify "$message"
