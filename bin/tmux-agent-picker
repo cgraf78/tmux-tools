@@ -72,6 +72,37 @@ tm() {
   tmux -S "$socket" "$@"
 }
 
+# Is the client gone? Only when tmux answers and does not list it attached
+# (outside control mode); a tmux that cannot answer is not taken as an answer.
+client_gone() {
+  local clients sid control name
+  [[ -n $client ]] || return 1
+  clients=$(tm list-clients -F '#{session_id} #{client_control_mode} #{client_name}' 2>/dev/null) ||
+    return 1
+  while read -r sid control name; do
+    [[ $name == "$client" && $control == 0 ]] && return 1
+  done <<<"$clients"
+  return 0
+}
+
+# The one guard on a failing exit. tmux 3.2a crashes its server when a
+# blocking run-shell from a key binding exits non-zero after the client that
+# pressed the key has detached, so a failure for a client that has gone
+# exits 0, quietly: there is nobody left to tell. fail() asks first, before
+# any message could reach another client; this trap covers every other way
+# out, and removes the popup's temporary directory.
+work=''
+# shellcheck disable=SC2329 # The EXIT trap runs it.
+on_exit() {
+  local status=$?
+  [[ -z $work ]] || rm -rf "$work"
+  if ((status != 0)) && client_gone; then
+    exit 0
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
+
 # The preview is the pane's visible screen with its colours, read from the
 # pane's grid rather than from a copy-mode view. Lines that are blank once
 # their SGR codes are gone are dropped from the end, and the last lines that
@@ -254,8 +285,10 @@ render() {
 # Show a message on the client, with # doubled so tmux shows it as written.
 # tmux 3.2 takes display-message's -c as a flag without a value and rejects
 # the value with its usage line: only then does the message go without -c,
-# to the session's most recently active client. Any other failure returns 1;
-# the message never goes to another client in its place.
+# to the session's most recently active client. tmux 3.3 and later drop a
+# message for a client that has gone, silently. Any other failure, such as a
+# server that cannot be reached, returns 1; the message never goes to
+# another client in its place.
 message() {
   local text=${1//\#/##} error
   error=$(tm display-message -c "$client" "$text" 2>&1) && return 0
@@ -263,7 +296,7 @@ message() {
   tm display-message "$text" 2>/dev/null
 }
 
-# A notice for the client, on stderr when tmux cannot show it.
+# A notice for the client, on stderr when tmux cannot be reached.
 notice() {
   message "$1" || printf 'tmux-agent-picker: %s\n' "$1" >&2
 }
@@ -271,24 +304,21 @@ notice() {
 # Fail loudly. run-shell discards a command's stderr unless given -E, which
 # tmux 3.2 lacks, so the client gets the reason as a message too.
 fail() {
+  client_gone && exit 0
   printf 'tmux-agent-picker: %s\n' "$1" >&2
   [[ -z $client ]] || message "tmux-agent-picker: $1" || true
   exit 1
 }
 
 # Run a tmux query into $reply. A failure is fatal, in tmux's own words, so
-# a lost server is never mistaken for an empty answer.
+# a lost server is never mistaken for an empty answer. tmux writes nothing to
+# stderr when a query succeeds, so stderr joins the reply rather than going
+# to a temporary file, which --list (every ctrl-r) would pay for.
 ask() {
-  local status=0 error
-  reply=$("$@" 2>"$work/error") || status=$?
-  if ((status != 0)); then
-    error=$(cat "$work/error")
-    fail "tmux failed (status $status): ${error//$'\n'/ }"
-  fi
+  local status=0
+  reply=$("$@" 2>&1) || status=$?
+  ((status == 0)) || fail "tmux failed (status $status): ${reply//$'\n'/ }"
 }
-
-work=$(mktemp -d "${TMPDIR:-/tmp}/tmux-agent-picker.XXXXXX")
-trap 'rm -rf "$work"' EXIT
 
 # type -P finds only an executable: the popup runs fzf from PATH.
 if [[ $list == false ]] && ! type -P fzf >/dev/null 2>&1; then
@@ -308,6 +338,8 @@ if [[ $list == true ]]; then
   printf '%s\n' "$state" | render
   exit 0
 fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/tmux-agent-picker.XXXXXX")
 
 # Quote a word for the popup's shell.
 shell_quote() {
@@ -355,9 +387,10 @@ fi
 # closes; the jump runs after it has gone. Its command runs under sh -c, so
 # no default shell changes its meaning, and fzf runs its preview and reload
 # with SHELL=sh for the same reason. fzf exits 1 with no match and 130 when
-# cancelled; any other status is an error. Older fzf draws its screen on
-# stderr, so its error text cannot be captured: instead the popup stays open
-# on it until Enter.
+# cancelled, and 129 or 143 when the popup closes under it (a detach, or
+# display-popup -C); any other status is an error. Older fzf draws its screen
+# on stderr, so its error text cannot be captured: instead the popup stays
+# open on it until Enter.
 preview_command="'$self' --socket '$socket' --preview {1}"
 reload="ctrl-r:reload('$self' --socket '$socket' --list --client '$client')+refresh-preview"
 picker="env SHELL=sh fzf --ansi --no-sort --reverse --no-multi --delimiter='\\t' --with-nth=4.."
@@ -367,21 +400,26 @@ picker+=" --preview-window='down,60%,border-top,nowrap' --bind $(shell_quote "$r
 picker+=" <'$work/rows' >'$work/choice'"
 picker+="; status=\$?; echo \"\$status\" >'$work/status'"
 # shellcheck disable=SC2016 # The popup's sh expands these.
-picker+='; case $status in 0 | 1 | 130) ;; *) printf "\nfzf failed with status %s. Press Enter to close.\n" "$status"; read -r _ ;; esac'
+picker+='; case $status in 0 | 1 | 129 | 130 | 143) ;; *) printf "\nfzf failed with status %s. Press Enter to close.\n" "$status"; read -r _ ;; esac'
 popup_status=0
 tm display-popup -c "$client" -E -w 90% -h 85% "sh -c $(shell_quote "$picker")" \
   2>"$work/error" || popup_status=$?
-if ((popup_status != 0)); then
-  error=$(cat "$work/error")
-  fail "tmux could not open the popup (status $popup_status): ${error//$'\n'/ }"
-fi
-# No status means the popup closed before fzf did, as when the client
-# detaches: nothing to do.
+# fzf's status, when it wrote one, says what happened. Without it the popup
+# closed before fzf finished: display-popup returns 129 for a detach or
+# display-popup -C, and that is nothing to report. Only an error tmux printed
+# means the popup could not open.
 fzf_status=''
 [[ ! -s "$work/status" ]] || fzf_status=$(cat "$work/status")
+if [[ -z $fzf_status ]]; then
+  if ((popup_status != 0)) && [[ -s "$work/error" ]]; then
+    error=$(cat "$work/error")
+    fail "tmux could not open the popup (status $popup_status): ${error//$'\n'/ }"
+  fi
+  exit 0
+fi
 case $fzf_status in
   0) ;;
-  '' | 1 | 130) exit 0 ;;
+  1 | 129 | 130 | 143) exit 0 ;;
   *) fail "fzf failed with status $fzf_status" ;;
 esac
 pane='' window='' session=''

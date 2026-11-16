@@ -241,7 +241,7 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
 
     def open_picker(master: int, pick: str, before: str = "", hold: bool = False) -> None:
         """Press F5, wait for the popup to be offered rows."""
-        for suffix in (".offered", ".args"):
+        for suffix in (".offered", ".offered.tmp", ".args"):
             Path(f"{log}{suffix}").unlink(missing_ok=True)
         tmux("set-environment", "-g", "PICKER_PICK", pick)
         tmux("set-environment", "-g", "PICKER_BEFORE", before)
@@ -624,6 +624,7 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
 
         # A required option the config leaves unset is named, not taken as
         # no rows.
+        window_counted = tmux("show-options", "-gv", "@window_counted")
         tmux("set-option", "-gu", "@window_counted")
         count = len(runs())
         os.write(master, b"\x1b[15~")
@@ -665,6 +666,44 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
             lambda v: "needs fzf" in str(v),
         )
         print("PASS: a missing fzf is reported as a message")
+
+        # A detach or display-popup -C mid-pick closes the popup under fzf:
+        # the run exits 0 and says nothing, to that client or another. A
+        # failing run-shell for a gone client crashes a tmux 3.2a server.
+        tmux("set-environment", "-g", "PATH", env["PATH"])
+        tmux("set-option", "-g", "@window_counted", window_counted)
+        witness_pid, witness = attach("zeta")
+        clients.append(witness_pid)
+        for closer in ("detach-client", "display-popup -C"):
+            closing_pid, closing = attach("zeta")
+            clients.append(closing_pid)
+            count = len(runs())
+            # tmux logs messages server-wide; only new message lines count.
+            logged = set(tmux("show-messages", "-t", witness).splitlines())
+            open_picker(masters[closing_pid], pick_of(two_waiting), hold=True)
+            if closer == "detach-client":
+                tmux("detach-client", "-t", closing)
+            else:
+                tmux("display-popup", "-C", "-c", closing)
+            poll(
+                f"the run after {closer} finishes",
+                lambda: len(runs()),
+                lambda n, before=count: n > before,
+            )
+            (root / "release").touch()
+            pump(0.3)
+            survived = tmux("list-sessions", "-F", "#{session_name}", check=False)
+            assert survived, f"the server survives {closer}"
+            assert runs()[-1] == "0", (closer, runs())
+            heard = [
+                line
+                for line in tmux("show-messages", "-t", witness).splitlines()
+                if line not in logged and " message: " in line
+            ]
+            assert not heard, (closer, heard)
+            if closer != "detach-client":
+                tmux("detach-client", "-t", closing)
+        print("PASS: a detach or a closed popup mid-pick exits 0, quietly, and the server lives")
     finally:
         try:
             tmux("kill-server", check=False)

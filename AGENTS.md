@@ -75,7 +75,12 @@ earlier history.
 - The picker fails loudly: a failure exits 1 through `fail`, which also
   shows the reason on the client, because `run-shell` discards stderr. Only
   absences (cancel, no rows, no `fzf`, a pane closed after the pick, a gone
-  client) exit 0. Query tmux through `ask`, never with `|| true`, so a lost
+  client, a popup closed by a detach or `display-popup -C`) exit 0. Every
+  failing exit first asks `client_gone`, in `fail` and in the EXIT trap, and
+  exits 0 quietly when the client has gone: tmux 3.2a crashes its server when
+  a binding's blocking `run-shell` exits non-zero after its client detached.
+  Read fzf's status file before the popup's status, which is 129 for a
+  detach. Query tmux through `ask`, never with `|| true`, so a lost
   server is not read as an empty answer. `message` falls back to an
   untargeted message only on tmux 3.2's `display-message -c` usage error,
   never for a client that is gone. Never redirect fzf's stderr: fzf 0.27

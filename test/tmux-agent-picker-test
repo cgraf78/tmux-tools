@@ -26,16 +26,18 @@ case "$1 $2" in
     case $3 in
       R*)
         [ -z "${MOCK_SNAPSHOT_ERROR:-}" ] || { printf '%s\n' "$MOCK_SNAPSHOT_ERROR" >&2; exit 1; }
-        printf 'R%s\n' "${MOCK_MISSING:-}"
+        if [ "${MOCK_GARBLE:-0}" = 1 ]; then echo 'garbled'; else printf 'R%s\n' "${MOCK_MISSING:-}"; fi
         cat "$MOCK_STATE"
         ;;
       *) [ "${MOCK_PANE_GONE:-0}" = 1 ] && exit 1 ;;
     esac
     ;;
   'display-message -c')
-    # tmux 3.2 takes -c as a flag and rejects its value with the usage line.
+    # tmux 3.2 takes -c as a flag and rejects its value with the usage line;
+    # later tmux drops a message for a gone client silently, so only a server
+    # it cannot reach fails.
     [ "${MOCK_OLD_C:-0}" = 1 ] && { echo 'usage: display-message [-aINpv] [-c target-client]' >&2; exit 1; }
-    [ "${MOCK_MESSAGE_FAIL:-0}" = 1 ] && { echo "can't find client" >&2; exit 1; }
+    [ "${MOCK_SERVER_LOST:-0}" = 1 ] && { echo 'no server running' >&2; exit 1; }
     ;;
   'capture-pane -e')
     [ "${MOCK_CAPTURE_FAIL:-0}" = 1 ] && exit 1
@@ -47,6 +49,9 @@ case "$1 $2" in
     ;;
   'list-panes -a') cat "$MOCK_HOLDERS" ;;
   display-popup*)
+    [ -z "${MOCK_POPUP_ERROR:-}" ] || { printf '%s\n' "$MOCK_POPUP_ERROR" >&2; exit 1; }
+    # display-popup returns 129 when the client detaches or -C closes it.
+    [ -z "${MOCK_POPUP_STATUS:-}" ] || exit "$MOCK_POPUP_STATUS"
     shift $(($# - 1))
     PATH="$MOCK_POPUP_PATH" sh -c "$1"
     ;;
@@ -55,12 +60,14 @@ esac
 exit 0
 MOCK
 # The stand-in fzf records its arguments and the rows it was offered, then
-# exits with $MOCK_FZF_STATUS if set, or prints the first row containing
+# detaches the client if $MOCK_FZF_DETACH is set, exits with $MOCK_FZF_STATUS
+# if set, or prints the first row containing
 # $MOCK_PICK, or exits 130 (cancel).
 cat >"$tmp/popup-bin/fzf" <<'FZF'
 #!/bin/sh
 printf '%s\n' "$@" >"$MOCK_FZF_ARGS"
 cat >"$MOCK_FZF_OFFERED"
+[ -z "$MOCK_FZF_DETACH" ] || : >"$MOCK_CLIENTS"
 [ -z "$MOCK_FZF_STATUS" ] || { echo 'fzf: unknown option' >&2; exit "$MOCK_FZF_STATUS"; }
 [ -z "$MOCK_CHOICE" ] || { printf '%s\n' "$MOCK_CHOICE"; exit 0; }
 [ -n "$MOCK_PICK" ] || exit 130
@@ -78,7 +85,7 @@ export PATH="$tmp/bin:$PATH"
 export MOCK_POPUP_PATH="$tmp/popup-bin:$PATH"
 export MOCK_CALLS=$tmp/calls MOCK_STATE=$tmp/state MOCK_CAPTURE=$tmp/capture
 export MOCK_CLIENTS=$tmp/clients MOCK_HOLDERS=$tmp/holders MOCK_PS=$tmp/ps
-export MOCK_FZF_ARGS=$tmp/fzf-args MOCK_FZF_OFFERED=$tmp/fzf-offered MOCK_PICK='' MOCK_CHOICE='' MOCK_FZF_STATUS=''
+export MOCK_FZF_ARGS=$tmp/fzf-args MOCK_FZF_OFFERED=$tmp/fzf-offered MOCK_PICK='' MOCK_CHOICE='' MOCK_FZF_STATUS='' MOCK_FZF_DETACH=''
 SOCKET=/private/test.sock
 CLIENT=/dev/pts/7
 failures=0
@@ -475,6 +482,53 @@ output=$(MOCK_FZF_STATUS=1 pick 'own session' 2>&1) || status=$?
 check 'no match (fzf status 1) is not an error' 0 "$status"
 check 'no match prints nothing and runs no jump' '' "$output$(no_jump)"
 
+# A popup that closes under fzf (a detach, display-popup -C) is nothing to
+# report; only an error tmux prints is.
+for closed in 'popup:MOCK_POPUP_STATUS=129' 'fzf:MOCK_FZF_STATUS=129' 'fzf:MOCK_FZF_STATUS=143'; do
+  status=0
+  output=$(env "${closed#*:}" "$PICKER" --socket "$SOCKET" --client "$CLIENT" 2>&1 </dev/null) ||
+    status=$?
+  check "a closed popup ($closed) exits 0" 0 "$status"
+  check "a closed popup ($closed) prints nothing" '' "$output"
+done
+status=0
+output=$(MOCK_POPUP_ERROR='open terminal failed: not a terminal' pick 'own session' 2>&1) ||
+  status=$?
+check 'a popup tmux cannot open is an error' 1 "$status"
+check 'a popup tmux cannot open says why' \
+  'tmux-agent-picker: tmux could not open the popup (status 1): open terminal failed: not a terminal' \
+  "$output"
+check 'a popup tmux cannot open is shown on the client' \
+  "-S $SOCKET display-message -c $CLIENT tmux-agent-picker: tmux could not open the popup (status 1): open terminal failed: not a terminal" \
+  "$(client_messages)"
+
+# A failure after the client detached exits 0 with no word (tmux 3.2a would
+# crash its server on a failing run-shell for a gone client).
+status=0
+output=$(MOCK_FZF_DETACH=1 MOCK_FZF_STATUS=2 pick 'own session' 2>&1) || status=$?
+check 'a failure after a detach exits 0' 0 "$status"
+case $output in *'tmux-agent-picker:'*) result=$output ;; *) result=quiet ;; esac
+check 'a failure after a detach reports nothing' quiet "$result"
+check 'a failure after a detach sends no message' '' "$(client_messages)$(grep -F ' display-message tmux' "$MOCK_CALLS")"
+printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
+# Any other failing exit passes the same guard: here mktemp fails.
+status=0
+MOCK_PICK='own session' TMPDIR=$tmp/missing "$PICKER" --socket "$SOCKET" --client "$CLIENT" \
+  </dev/null >/dev/null 2>&1 || status=$?
+check 'an unexpected error for an attached client fails' 1 "$status"
+: >"$MOCK_CLIENTS"
+status=0
+MOCK_PICK='own session' TMPDIR=$tmp/missing "$PICKER" --socket "$SOCKET" --client "$CLIENT" \
+  </dev/null >/dev/null 2>&1 || status=$?
+check 'an unexpected error after a detach exits 0' 0 "$status"
+printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
+
+status=0
+output=$(MOCK_GARBLE=1 listing 2>&1) || status=$?
+check 'a snapshot without its R line is an error' 1 "$status"
+check 'a snapshot without its R line says so' \
+  'tmux-agent-picker: tmux answered the snapshot with something unexpected' "$output"
+
 # Messages go to the client only. tmux 3.2 rejects a value after
 # display-message -c with its usage line, and only that falls back to an
 # untargeted message.
@@ -485,10 +539,10 @@ check 'without a value for -c the message goes untargeted' \
   "-S $SOCKET display-message No agent panes on this server" \
   "$(grep -F ' display-message No ' "$MOCK_CALLS")"
 : >"$MOCK_CALLS"
-output=$(MOCK_MESSAGE_FAIL=1 "$PICKER" --socket "$SOCKET" --client "$CLIENT" 2>&1 </dev/null)
-check 'a message the client cannot show goes to stderr' \
+output=$(MOCK_SERVER_LOST=1 "$PICKER" --socket "$SOCKET" --client "$CLIENT" 2>&1 </dev/null)
+check 'a message tmux cannot deliver goes to stderr' \
   'tmux-agent-picker: No agent panes on this server' "$output"
-check 'a message the client cannot show goes to no other client' '' \
+check 'a message tmux cannot deliver goes to no other client' '' \
   "$(grep -F ' display-message No ' "$MOCK_CALLS")"
 
 # A quote in a path the popup's command line quotes is refused.
@@ -498,6 +552,7 @@ check 'a message the client cannot show goes to no other client' '' \
   printf 'C 0 %%1 %s\n' "$CLIENT"
   printf "C 0 %%1 %s'\n" "$CLIENT"
 } >"$MOCK_STATE"
+printf '$1 0 %s\n' "$CLIENT" "$CLIENT'" >"$MOCK_CLIENTS"
 quoted=$tmp/it\'s
 mkdir "$quoted"
 ln -s "$PICKER" "$quoted/tmux-agent-picker"

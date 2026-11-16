@@ -233,12 +233,22 @@ when it is gone. The popup's preview runs this, and reads
 A failure exits 1 and shows its reason on the client as a message as well
 as on standard error, since
 .B run-shell
-discards a command's standard error. Failures are: a tmux query that fails,
-a required option left unset, a quote in a quoted path (below), an fzf error
-and a jump that fails while the pane is still there. An fzf error (an option
-an older fzf does not know, say) keeps the popup open on fzf's own message
-until Enter, since older fzf draws its screen on standard error and the
-message cannot be captured.
+discards a command's standard error. Failures are: a tmux query that fails
+or answers the snapshot with something unexpected, a required option left
+unset, a quote in a quoted path (below), a popup tmux could not open, an fzf
+error, a chosen line that is not one of the rows, and a jump that fails while
+the pane is still there. An fzf error (an option an older fzf does not know,
+say) keeps the popup open on fzf's own message until Enter, since older fzf
+draws its screen on standard error and the message cannot be captured.
+.PP
+A client that detaches while the popup is open, or a popup closed under fzf
+(as by
+.BR "display-popup -C" ),
+is not a failure: the command exits 0 and says nothing. Neither does any
+failure once the client has gone, since nobody is left to tell, and since
+tmux 3.2a crashes its server when a key binding's blocking
+.B run-shell
+exits non-zero after its client has detached.
 .SH COMPATIBILITY
 tmux 3.2 or newer, and
 .BR fzf (1)
@@ -264,8 +274,9 @@ popup's command line.
 .SH EXIT STATUS
 .TP
 .B 0
-A pane was chosen, or the popup was cancelled or matched nothing; or the
-client was gone or in control mode, the pane had closed, or a missing
+A pane was chosen, or the popup was cancelled, matched nothing or closed
+under fzf; or the client was gone, detached or in control mode, the pane had
+closed, or a missing
 .BR fzf (1)
 or an empty list was reported through tmux.
 .TP
