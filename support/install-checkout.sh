@@ -24,6 +24,7 @@ commands=(
   tmux-clip-paste
   tmux-copy-last-output
   tmux-command-palette
+  tmux-agent-picker
   term-pane-mark
   term-pane-state
   term-notify-sound

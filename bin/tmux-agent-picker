@@ -1,0 +1,519 @@
+#!/usr/bin/env bash
+# tmux-agent-picker -- pick an agent pane anywhere on this tmux server and jump
+# to it.
+#
+# Lists every pane the embedding config marks for attention or as an agent,
+# most urgent first (red, yellow, green, blue, then idle agents), in an fzf
+# popup with a preview of the pane's screen. Enter jumps the client there;
+# Escape closes the popup. The rows come from tmux formats alone, never from
+# ps or /proc: the config's predicates decide what each pane is.
+#
+# Usage: tmux-agent-picker --socket SOCKET --client CLIENT
+#        tmux-agent-picker --socket SOCKET --list [--client CLIENT]
+#        tmux-agent-picker --socket SOCKET --preview PANE
+
+set -euo pipefail
+
+usage() {
+  printf '%s\n' 'usage: tmux-agent-picker --socket SOCKET --client CLIENT' \
+    '       tmux-agent-picker --socket SOCKET --list [--client CLIENT]' \
+    '       tmux-agent-picker --socket SOCKET --preview PANE' >&2
+  exit 64
+}
+
+# tmux ids are machine data: check their shape before they reach a target.
+valid_id() {
+  local prefix=$1 value=$2 digits
+  [[ $value == "$prefix"* ]] || return 1
+  digits=${value#"$prefix"}
+  [[ -n $digits && $digits != *[!0-9]* && ${#digits} -le 20 ]]
+}
+
+socket='' client='' preview='' list=false
+while (($#)); do
+  case $1 in
+    --socket | --client | --preview)
+      (($# >= 2)) && [[ -n $2 ]] || usage
+      case $1 in
+        --socket)
+          [[ -z $socket ]] || usage
+          socket=$2
+          ;;
+        --client)
+          [[ -z $client ]] || usage
+          client=$2
+          ;;
+        --preview)
+          [[ -z $preview ]] || usage
+          preview=$2
+          ;;
+      esac
+      shift 2
+      ;;
+    --list)
+      [[ $list == false ]] || usage
+      list=true
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+# An inherited TMUX can name another server (SSH, or a nested client on the
+# same host), so every mode names the socket, and every call uses it.
+[[ $socket == /* ]] || usage
+if [[ -n $preview ]]; then
+  [[ $list == false && -z $client ]] || usage
+  valid_id % "$preview" || usage
+elif [[ $list == false ]]; then
+  [[ -n $client ]] || usage
+fi
+
+tm() {
+  tmux -S "$socket" "$@"
+}
+
+# Look the client up by its exact name. Returns 0 while it is attached
+# outside control mode, with its session id in $own; 1 when tmux lists it
+# otherwise or not at all; 2 when tmux cannot answer, with tmux's words in
+# $reply and its status in $reply_status.
+find_client() {
+  local sid control name
+  own='' reply_status=0
+  reply=$(tm list-clients -F '#{session_id} #{client_control_mode} #{client_name}' 2>&1) ||
+    reply_status=$?
+  ((reply_status == 0)) || return 2
+  while read -r sid control name; do
+    if [[ $name == "$client" && $control == 0 ]] && valid_id '$' "$sid"; then
+      own=$sid
+      return 0
+    fi
+  done <<<"$reply"
+  return 1
+}
+
+# Is the client gone? Only when tmux answers without it; a tmux that cannot
+# answer is not taken as an answer, and preview mode has no client.
+client_gone() {
+  local status=0
+  [[ -n $client ]] || return 1
+  find_client || status=$?
+  ((status == 1))
+}
+
+# The one guard on a failing exit. tmux 3.2a crashes its server when a
+# blocking run-shell from a key binding exits non-zero after the client that
+# pressed the key has detached, so a failure for a client that has gone
+# exits 0, quietly: there is nobody left to tell. fail() asks first, before
+# any message could reach another client; this trap covers every other way
+# out, and removes the popup's temporary directory.
+work=''
+# shellcheck disable=SC2329 # The EXIT trap runs it.
+on_exit() {
+  local status=$?
+  [[ -z $work ]] || rm -rf "$work"
+  if ((status != 0)) && client_gone; then
+    exit 0
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
+
+# The preview is the pane's visible screen with its colours, read from the
+# pane's grid rather than from a copy-mode view. Lines that are blank once
+# their SGR codes are gone are dropped from the end, and the last lines that
+# fit are shown, where agents draw their prompt and approval box.
+if [[ -n $preview ]]; then
+  keep=${FZF_PREVIEW_LINES:-40}
+  case $keep in '' | *[!0-9]*) keep=40 ;; esac
+  if ! screen=$(tm capture-pane -e -p -t "$preview" 2>/dev/null); then
+    printf '(pane closed)\n'
+    exit 0
+  fi
+  printf '%s\n' "$screen" | LC_ALL=C awk -v keep="$keep" '
+    {
+      line[NR] = $0
+      bare = $0
+      gsub(/\033\[[0-9;:]*m/, "", bare)
+      if (bare ~ /[^ \t]/) last = NR
+    }
+    END {
+      first = last - keep + 1
+      if (first < 1) first = 1
+      for (i = first; i <= last; i++) print line[i]
+    }'
+  exit 0
+fi
+
+# Query 1 walks sessions, windows and panes exactly as the config's
+# @attention_panes does, so it shares its order and its @window_counted
+# dedupe of windows linked into several sessions. Each candidate emits one
+# space-terminated token of machine fields only:
+#   pane/window/session/BITS/EXIT/MODE
+# BITS are the config's failed, waiting, done, working and agent predicates;
+# the first that holds is the row's level. EXIT is the exit status of a local
+# failed command (as the border shows it, never for blocked), else -. MODE is
+# 1 while the pane is in a mode such as copy mode.
+# Most unmarked panes fall out after plain option reads; only @pane_agent's
+# match runs on every pane without a mark.
+candidate='#{||:#{@term_notify_pending},#{||:#{@termnav_child_attention},#{||:#{@term_busy},#{E:@pane_agent}}}}'
+bits='#{?#{E:@pane_jump_failed},1,0}#{?#{E:@pane_jump_waiting},1,0}#{?#{E:@pane_jump_done},1,0}#{?#{E:@pane_jump_working},1,0}#{?#{E:@pane_agent},1,0}'
+exit_field='#{?#{&&:#{E:@pane_marked_failed},#{&&:#{!=:#{@term_notify_pending},blocked},#{m/r:^[0-9]+$,#{@term_notify_exit_status}}}},#{@term_notify_exit_status},-}'
+token="#{pane_id}/#{window_id}/#{session_id}/$bits/$exit_field/#{?pane_in_mode,1,0} "
+walk="W #{S:#{W:#{?#{E:@window_counted},#{P:#{?$candidate,$token,}},}}}"
+# Query 2 carries the display text, keyed by pane and session id: a pane in a
+# grouped session or a linked window repeats here, once per session. Each pane
+# prints three records, one per free-text field, each after its fixed fields:
+# L (location), B (agent flag, directory base name) and X (label). awk takes
+# the rest of each line, so it never measures text: awks disagree on bytes
+# against characters (Termux's gawk counts characters even under LC_ALL=C).
+# tmux truncates and pads the location by display width (the ellipsis is its
+# 24th column). The newlines between records are the only control characters
+# in the format; a directory or title could hold a newline or carriage return
+# of its own, so tmux replaces those with ? before printing. -u keeps tmux
+# from rewriting control characters for a non-UTF-8 client.
+nl=$'\n'
+cr=$'\r'
+location='#{p24:#{=/23/…:#{session_name}:#{window_index}.#{pane_index}}}'
+basename="#{s/[$nl$cr]/?/:#{b:pane_current_path}}"
+label="#{s/[$nl$cr]/?/:#{E:@pane_label}}"
+agentish='#{?#{||:#{E:@pane_agent},#{E:@pane_interactive}},1,0}'
+text="L #{pane_id} #{session_id} $location${nl}B #{pane_id} #{session_id} $agentish $basename${nl}X #{pane_id} #{session_id} $label"
+clients='C #{client_control_mode} #{pane_id} #{client_name}'
+# The options without which the rows would be wrong or missing with no word
+# said, so their absence is an error: R lists those the config leaves unset
+# (a config can still set one to 0). The others are optional.
+required_options='@window_counted @pane_agent @pane_jump_failed @pane_jump_waiting @pane_jump_done @pane_jump_working'
+required='R'
+for option in $required_options; do
+  required+="#{?#{==:#{$option},}, $option,}"
+done
+
+# All four queries go to tmux as one invocation, so one command queue.
+# shellcheck disable=SC2329 # ask runs it.
+snapshot() {
+  tm -u display-message -p "$required" \; \
+    display-message -p "$walk" \; \
+    list-panes -a -f "$candidate" -F "$text" \; \
+    list-clients -F "$clients"
+}
+
+# Turn a snapshot into rows: pane, window and session ids, then the visible
+# text, separated by tabs. awk adds the tabs and colours only after removing
+# control bytes from the text, and turns @pane_label's ## (doubled for tmux's
+# renderer) back into #. LC_ALL=C keeps the byte ranges below byte ranges.
+render() {
+  TMUX_AGENT_PICKER_CLIENT=$client LC_ALL=C awk '
+    function clean(s) {
+      gsub(/[\001-\037\177]/, "?", s)
+      return s
+    }
+    function spaces(n,    s) {
+      s = ""
+      while (n-- > 0) s = s " "
+      return s
+    }
+    BEGIN {
+      client = ENVIRON["TMUX_AGENT_PICKER_CLIENT"]
+      e = "\033"
+      dot[0] = e "[31m●" e "[0m"
+      dot[1] = e "[33m●" e "[0m"
+      dot[2] = e "[32m●" e "[0m"
+      dot[3] = e "[34m●" e "[0m"
+      dot[4] = "○"
+    }
+    /^W / {
+      n = split(substr($0, 3), t, " ")
+      for (i = 1; i <= n; i++) token[++tokens] = t[i]
+      next
+    }
+    # A pane linked into several sessions keeps the first record of each
+    # kind for each session.
+    /^[LBX] %[0-9]+ \$[0-9]+ / {
+      key = $2 " " $3
+      rest = $0
+      if ($1 == "L") {
+        if (key in loc) next
+        sub(/^L [^ ]+ [^ ]+ /, "", rest)
+        loc[key] = clean(rest)
+      } else if ($1 == "B") {
+        if (key in base || $4 !~ /^[01]$/) next
+        if (!sub(/^B [^ ]+ [^ ]+ [01] /, "", rest)) rest = ""
+        base[key] = clean(rest)
+        agentish[key] = $4
+      } else {
+        if (key in label) next
+        sub(/^X [^ ]+ [^ ]+ /, "", rest)
+        rest = clean(rest)
+        gsub(/##/, "#", rest)
+        label[key] = rest
+      }
+      next
+    }
+    /^C / {
+      name = $0
+      if (sub(/^C [^ ]+ [^ ]+ /, "", name) && client != "" && name == client) here = $3
+      next
+    }
+    END {
+      width = 1
+      for (i = 1; i <= tokens; i++) {
+        tk = token[i]
+        if (tk !~ /^%[0-9]+\/@[0-9]+\/\$[0-9]+\/[01][01][01][01][01]\/([0-9]+|-)\/[01]$/) continue
+        split(tk, f, "/")
+        if (f[1] in seen) continue
+        seen[f[1]] = 1
+        level = index(f[4], "1") - 1
+        if (level < 0) continue
+        rows++
+        pane[rows] = f[1]
+        window[rows] = f[2]
+        session[rows] = f[3]
+        rank[rows] = level
+        status[rows] = dot[level]
+        shown[rows] = 1
+        if (level == 0 && f[5] != "-") {
+          status[rows] = status[rows] " exit " f[5]
+          shown[rows] = 7 + length(f[5])
+        }
+        mode[rows] = f[6]
+        if (shown[rows] > width) width = shown[rows]
+      }
+      # Each level keeps the walk order.
+      for (level = 0; level <= 4; level++) {
+        for (r = 1; r <= rows; r++) {
+          if (rank[r] != level) continue
+          key = pane[r] " " session[r]
+          line = status[r] spaces(width - shown[r]) "  "
+          line = line ((key in loc) ? loc[key] : spaces(24)) "  " label[key]
+          if (agentish[key] == 1 && base[key] != "") {
+            line = line "   " (level == 4 ? base[key] : e "[90m" base[key] e "[0m")
+          }
+          if (mode[r] == 1) line = line "   [COPY]"
+          if (pane[r] == here) line = line "   here"
+          if (level == 4) line = e "[90m" line e "[0m"
+          print pane[r] "\t" window[r] "\t" session[r] "\t" line
+        }
+      }
+    }'
+}
+
+# Show a message on the client, with # doubled so tmux shows it as written.
+# tmux 3.2 takes display-message's -c as a flag without a value and rejects
+# the value with its usage line: only then does the message go without -c,
+# to the session's most recently active client. tmux 3.3 and later drop a
+# message for a client that has gone, silently. Any other failure, such as a
+# server that cannot be reached, returns 1; the message never goes to
+# another client in its place.
+message() {
+  local text=${1//\#/##} error
+  error=$(tm display-message -c "$client" "$text" 2>&1) && return 0
+  [[ $error == 'usage: display-message '* ]] || return 1
+  tm display-message "$text" 2>/dev/null
+}
+
+# A notice for the client, on stderr when tmux cannot be reached.
+notice() {
+  message "$1" || printf 'tmux-agent-picker: %s\n' "$1" >&2
+}
+
+# Fail loudly. run-shell discards a command's stderr unless given -E, which
+# tmux 3.2 lacks, so the client gets the reason as a message too.
+fail() {
+  client_gone && exit 0
+  printf 'tmux-agent-picker: %s\n' "$1" >&2
+  [[ -z $client ]] || message "tmux-agent-picker: $1" || true
+  exit 1
+}
+
+# Run a tmux query into $reply. A failure is fatal, in tmux's own words, so
+# a lost server is never mistaken for an empty answer. tmux writes nothing to
+# stderr when a query succeeds, so stderr joins the reply rather than going
+# to a temporary file, which --list (every ctrl-r) would pay for.
+ask() {
+  local status=0
+  reply=$("$@" 2>&1) || status=$?
+  ((status == 0)) || fail "tmux failed (status $status): ${reply//$'\n'/ }"
+}
+
+# type -P finds only an executable: the popup runs fzf from PATH.
+if [[ $list == false ]] && ! type -P fzf >/dev/null 2>&1; then
+  notice 'The agent picker needs fzf'
+  exit 0
+fi
+
+ask snapshot
+state=$reply
+missing=${state%%$'\n'*}
+[[ $missing == R* ]] || fail 'tmux answered the snapshot with something unexpected'
+missing=${missing#R}
+[[ -z $missing ]] ||
+  fail "the tmux config does not set$missing (see tmux-agent-picker(1))"
+
+if [[ $list == true ]]; then
+  printf '%s\n' "$state" | render
+  exit 0
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/tmux-agent-picker.XXXXXX")
+
+# Quote a word for the popup's shell.
+shell_quote() {
+  local rest=$1 quoted=''
+  while [[ $rest == *"'"* ]]; do
+    quoted="$quoted${rest%%"'"*}'\\''"
+    rest=${rest#*"'"}
+  done
+  printf "'%s%s'" "$quoted" "$rest"
+}
+
+self=${BASH_SOURCE[0]}
+case $self in
+  */*) ;;
+  *) self=$(type -P "$self") ;;
+esac
+case $self in
+  /*) ;;
+  *) self=$PWD/$self ;;
+esac
+case "$work$socket$client$self" in
+  *"'"*) fail 'a quote in the temporary path, socket, client or script path' ;;
+esac
+
+# A detached or control-mode client gets nothing.
+attached=false
+while IFS= read -r record; do
+  case $record in "C "*) ;; *) continue ;; esac
+  record=${record#C }
+  control=${record%% *}
+  record=${record#* }
+  [[ ${record#* } == "$client" ]] || continue
+  [[ $control == 0 ]] || exit 0
+  attached=true
+done <<<"$state"
+[[ $attached == true ]] || exit 0
+
+printf '%s\n' "$state" | render >"$work/rows"
+if [[ ! -s "$work/rows" ]]; then
+  notice 'No agent panes on this server'
+  exit 0
+fi
+
+# The popup only picks: it writes the chosen line and fzf's exit status, and
+# closes; the jump runs after it has gone. Its command runs under sh -c, so
+# no default shell changes its meaning, and fzf runs its preview and reload
+# with SHELL=sh for the same reason. fzf exits 1 with no match and 130 when
+# cancelled, and 129 or 143 when the popup closes under it (a detach, or
+# display-popup -C): quiet_statuses, which the popup's sh and the bash below
+# both read. Any other status is an error. Older fzf draws its screen on
+# stderr, so its error text cannot be captured: instead the popup stays open
+# on it until Enter.
+quiet_statuses='1 129 130 143'
+preview_command="'$self' --socket '$socket' --preview {1}"
+reload="ctrl-r:reload('$self' --socket '$socket' --list --client '$client')+refresh-preview"
+picker="env SHELL=sh fzf --ansi --no-sort --reverse --no-multi --delimiter='\\t' --with-nth=4.."
+picker+=" --prompt='Agents> ' --header='Enter jump · Esc cancel · ctrl-r refresh'"
+picker+=" --preview $(shell_quote "$preview_command")"
+picker+=" --preview-window='down,60%,border-top,nowrap' --bind $(shell_quote "$reload")"
+picker+=" <'$work/rows' >'$work/choice'"
+picker+="; status=\$?; echo \"\$status\" >'$work/status'"
+# shellcheck disable=SC2016 # The popup's sh expands these.
+picker+='; case " 0 '"$quiet_statuses"' " in *" $status "*) ;; *) printf "\nfzf failed with status %s. Press Enter to close.\n" "$status"; read -r _ ;; esac'
+popup_status=0
+tm display-popup -c "$client" -E -w 90% -h 85% "sh -c $(shell_quote "$picker")" \
+  2>"$work/error" || popup_status=$?
+# fzf's status, when it wrote one, says what happened. Without it the popup
+# closed before fzf finished: display-popup returns 129 for a detach or
+# display-popup -C, and that is nothing to report. Only an error tmux printed
+# means the popup could not open.
+fzf_status=''
+[[ ! -s "$work/status" ]] || fzf_status=$(<"$work/status")
+if [[ -z $fzf_status ]]; then
+  if ((popup_status != 0)) && [[ -s "$work/error" ]]; then
+    error=$(<"$work/error")
+    fail "tmux could not open the popup (status $popup_status): ${error//$'\n'/ }"
+  fi
+  exit 0
+fi
+if [[ $fzf_status != 0 ]]; then
+  case " $quiet_statuses " in *" $fzf_status "*) exit 0 ;; esac
+  fail "fzf failed with status $fzf_status"
+fi
+pane='' window='' session=''
+IFS=$'\t' read -r pane window session _ <"$work/choice" || true
+# The chosen line is one of the rows rendered above; anything else means fzf
+# or the rows went wrong, so say so rather than guess a target.
+if ! valid_id % "$pane" || ! valid_id @ "$window" || ! valid_id '$' "$session"; then
+  fail 'unexpected choice from fzf'
+fi
+
+# Find the exact client as it is now, and keep its current session:
+# display-message -c answers for another client, and tmux 3.2 takes no
+# argument to it. A client that has gone or turned control mode gets nothing.
+client_status=0
+find_client || client_status=$?
+case $client_status in
+  1) exit 0 ;;
+  2) fail "tmux failed (status $reply_status): ${reply//$'\n'/ }" ;;
+esac
+
+# Where does the pane live now? Its session may have been killed while a
+# grouped peer still holds it, or it may have moved to a new window.
+ask tm list-panes -a -F '#{pane_id} #{window_id} #{session_id} #{session_attached}'
+here_window='' idle_session='' idle_window='' row_window='' first_session='' first_window=''
+while read -r pid wid sid attached_count _; do
+  [[ $pid == "$pane" ]] || continue
+  if ! valid_id @ "$wid" || ! valid_id '$' "$sid"; then
+    continue
+  fi
+  if [[ -z $first_session ]]; then
+    first_session=$sid
+    first_window=$wid
+  fi
+  if [[ $sid == "$own" && -z $here_window ]]; then
+    here_window=$wid
+  fi
+  if [[ $attached_count == 0 && -z $idle_session ]]; then
+    idle_session=$sid
+    idle_window=$wid
+  fi
+  if [[ $sid == "$session" && -z $row_window ]]; then
+    row_window=$wid
+  fi
+done <<<"$reply"
+if [[ -z $first_session ]]; then
+  notice 'That pane has closed'
+  exit 0
+fi
+
+# Every target names the pane, so no command makes a bystander pane current
+# on the way, which would acknowledge its mark through the config's hooks.
+# In the client's own session, select-pane goes first: it makes the pane its
+# window's active pane before select-window makes the window current, so the
+# window's old active pane is never current. Elsewhere, switch-client takes
+# the client straight to the pane. A session no client is attached to is
+# preferred there: switching into a grouped peer another client sits in would
+# move that client's view with it.
+if [[ -n $here_window ]]; then
+  target="$own:$here_window.$pane"
+  jump=(select-pane -t "$target" \; select-window -t "$target")
+else
+  if [[ -n $idle_session ]]; then
+    target="$idle_session:$idle_window.$pane"
+  elif [[ -n $row_window ]]; then
+    target="$session:$row_window.$pane"
+  else
+    target="$first_session:$first_window.$pane"
+  fi
+  jump=(switch-client -c "$client" -t "$target" \; select-window -t "$target" \;
+    select-pane -t "$target")
+fi
+# A jump that fails with the pane still there is an error; a pane that has
+# closed since the pick is only reported.
+if ! tm "${jump[@]}" 2>"$work/error"; then
+  if tm display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
+    error=$(<"$work/error")
+    fail "could not jump to $pane: ${error//$'\n'/ }"
+  fi
+  notice 'That pane has closed'
+fi
+exit 0

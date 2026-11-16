@@ -48,8 +48,8 @@ jobs:
 
           for command in tmux-clip-paste tmux-continuum-default-server \
             tmux-continuum-save-gate tmux-copy-last-output \
-            tmux-command-palette term-pane-mark term-notify-sound \
-            term-pane-state; do
+            tmux-command-palette tmux-agent-picker term-pane-mark \
+            term-notify-sound term-pane-state; do
             [[ -L "$install_prefix/bin/$command" ]] || exit 1
             /bin/bash -n "$install_prefix/bin/$command"
           done
@@ -116,7 +116,15 @@ jobs:
             status=$?
           [[ $status -eq 64 ]] || exit 1
 
+          # The picker's rows come from its mock suite below, which runs
+          # every awk it finds, /usr/bin/awk among them.
+          status=0
+          /bin/bash "$install_prefix/bin/tmux-agent-picker" --list \
+            2>/dev/null || status=$?
+          [[ $status -eq 64 ]] || exit 1
+
           /bin/bash test/term-pane-state-test
+          /bin/bash test/tmux-agent-picker-test
           /bin/bash test/term-pane-mark-token-test
 
           bell="$RUNNER_TEMP/bell"
@@ -124,23 +132,62 @@ jobs:
             /bin/bash "$install_prefix/bin/term-notify-sound"
           [[ $(cat "$bell") == $'\a' ]] || exit 1
 
+      - name: Smoke-test the agent picker with the real fzf
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |-
+          brew install tmux fzf
+          TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_REQUIRE_FZF=1 \
+            python3 test/tmux-agent-picker-fzf.py
+
+  fzf:
+    name: Real fzf (Ubuntu)
+    runs-on: ubuntu-24.04
+    # The shared platform matrix installs no fzf, so the real-fzf picker test
+    # would skip there. This job installs it and makes the skip a failure.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        # Name checkout's throwaway initial branch so Git skips its hint.
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: init.defaultBranch
+          GIT_CONFIG_VALUE_0: main
+        with:
+          persist-credentials: false
+
+      - name: Install tmux and fzf
+        timeout-minutes: 10
+        run: |-
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends tmux fzf python3
+
+      - name: Smoke-test the agent picker with the real fzf
+        run: |-
+          TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_REQUIRE_FZF=1 \
+            python3 test/tmux-agent-picker-fzf.py
+
   required:
     name: Required
     if: ${{ always() }}
-    needs: [shell, macos-bash32]
+    needs: [shell, macos-bash32, fzf]
     runs-on: ubuntu-24.04
     env:
       SHELL_RESULT: ${{ needs.shell.result }}
       BASH32_RESULT: ${{ needs.macos-bash32.result }}
+      FZF_RESULT: ${{ needs.fzf.result }}
     steps:
       - name: Require all tmux-tools compatibility checks
         shell: bash
         run: |-
           printf 'Shared shell CI: %s\n' "$SHELL_RESULT"
           printf 'Stock macOS Bash 3.2: %s\n' "$BASH32_RESULT"
+          printf 'Real fzf: %s\n' "$FZF_RESULT"
 
           test "$SHELL_RESULT" = success
           test "$BASH32_RESULT" = success
+          test "$FZF_RESULT" = success
 
   actions-sync:
     name: cgraf78/actions sync

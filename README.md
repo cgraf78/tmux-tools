@@ -25,6 +25,10 @@ Small helpers for tmux setups that outgrow the defaults:
 - **`tmux-command-palette`**: find a key binding by its description in an fzf
   popup and run it, like an editor's command palette. It lists every root and
   prefix binding that has a note (`bind-key -N`).
+- **`tmux-agent-picker`**: list every agent pane on the server, most urgent
+  first (failed, waiting, done, working, then idle agents), in an fzf popup
+  with a preview of each pane's screen, and jump to the one you pick, in any
+  session.
 - **`term-notify-sound`**: ring the terminal bell. Call it when a job or agent
   finishes. Inside tmux it also marks which pane rang, which plain tmux does
   not track (tmux records a bell against the window).
@@ -47,6 +51,8 @@ Small helpers for tmux setups that outgrow the defaults:
   explicitly selected tmux client whose terminal supports OSC 52.
 - For `tmux-command-palette`: `fzf`, and tmux 3.4 or newer to run the chosen
   key itself (older tmux asks you to press it)
+- For `tmux-agent-picker`: `fzf` 0.27.0 or newer, tmux 3.2 or newer, and a
+  tmux config that sets its options (see below)
 
 ## Install
 
@@ -229,6 +235,54 @@ Mouse bindings, tmux's `Select window N` notes on `prefix 0`-`9`, and a second
 key with an earlier key's note are left out. `tmux-command-palette --list`
 prints the entries. `man tmux-command-palette` has the details.
 
+### `tmux-agent-picker`
+
+```tmux
+bind -N "Pick an agent pane across sessions" W run-shell 'tmux-agent-picker --socket #{q:socket_path} --client #{q:client_name}'
+```
+
+The popup lists every pane on the server that needs attention or runs an
+agent, one row each, most urgent first: red, yellow and green for
+attention, blue for work in progress, then idle agents, dimmed. Within a
+level the rows follow tmux's session, window and pane order. A row shows the
+pane's `session:window.pane`, its label and, for agents, its directory's
+base name; a failed command adds its exit status, as in
+`● exit 1  dev:1.2  zsh · ~/src`. The preview shows the bottom of the pane's
+screen in colour, and ctrl-r reloads both. Enter takes the client to the
+pane, switching sessions when it lives elsewhere; Escape closes the popup.
+
+The jump names the pane in every command, so no other pane becomes current
+on the way and the config's acknowledgement hooks see only the pane you
+chose. From tmux 3.6 a popup sends focus events to the pane beneath it, so a
+config that acknowledges attention on focus also acknowledges the current
+pane when the picker opens, as for any popup.
+
+The picker reads tmux formats only (never `ps`), and your config decides
+what each pane is, through these options, read with `#{E:...}`. A pane is a
+candidate only while it has `@term_notify_pending`, `@termnav_child_attention`,
+`@term_busy` or `@pane_agent`; the options below then give its level and text.
+
+| Option | Required | Meaning |
+| --- | --- | --- |
+| `@pane_jump_failed` | yes | the red class |
+| `@pane_jump_waiting` | yes | the yellow class |
+| `@pane_jump_done` | yes | the green class; a pane should match at most one of the three |
+| `@pane_jump_working` | yes | work in progress without attention (blue) |
+| `@pane_agent` | yes | the pane runs an agent (idle rows) |
+| `@window_counted` | yes | the window counts for the session being walked, so a linked window lists once |
+| `@pane_marked_failed` | no | a local failed command, whose red row shows its exit status |
+| `@pane_label` | no | the row's label (`##` is shown as `#`) |
+| `@pane_interactive` | no | also show the directory for other interactive panes |
+
+A required option your config leaves unset is an error that names it, never
+an empty list; set one to `0` to turn it off. `man tmux-agent-picker` has a
+complete example config, the one the tests run, and
+`tmux-agent-picker --socket SOCKET --list` prints the rows.
+
+Failures are loud: the picker exits 1 and says why on the client and on
+stderr, while cancelling or detaching is not a failure; DIAGNOSTICS and EXIT
+STATUS in `man tmux-agent-picker` list them.
+
 ### `term-notify-sound` and `term-pane-mark`
 
 - `term-notify-sound [--owner PID] [--kind KIND] [--exit-status CODE]`:
@@ -344,6 +398,9 @@ Or run the focused command test directly:
 test/tmux-tools-test
 test/tmux-continuum-test
 test/copy-mark-test
+test/tmux-agent-picker-test
 ```
 
 If `tmux` is not installed, the test suite skips tmux server integration cases.
+The real-fzf picker test skips without `fzf`; `TMUX_TOOLS_REQUIRE_FZF=1`
+turns that skip into a failure, as CI does where it installs `fzf`.
