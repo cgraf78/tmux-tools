@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# Exercise tmux-agent-picker against a mock tmux, without a real server.
+# shellcheck disable=SC2016 # tmux ids ($1, %1) are literal text here.
+set -uo pipefail
+unset BASH_ENV ENV
+ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+PICKER=$ROOT/bin/tmux-agent-picker
+tmp=$(
+  umask 077
+  mktemp -d "${TMPDIR:-/tmp}/tap.XXXXXXXX"
+) || exit 1
+trap 'rm -rf "$tmp"' EXIT
+mkdir "$tmp/bin" "$tmp/popup-bin"
+
+# The mock serves the snapshot, captures, clients and pane holders from files,
+# runs a popup's command with the stand-in fzf, and logs every call.
+cat >"$tmp/bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$MOCK_CALLS"
+[ "$1" = -S ] && shift 2
+[ "$1" = -u ] && shift
+case "$1 $2" in
+  'display-message -p')
+    case $3 in
+      'W '*) cat "$MOCK_STATE" ;;
+      *) [ "${MOCK_PANE_GONE:-0}" = 1 ] && exit 1 ;;
+    esac
+    ;;
+  'capture-pane -e')
+    [ "${MOCK_CAPTURE_FAIL:-0}" = 1 ] && exit 1
+    cat "$MOCK_CAPTURE"
+    ;;
+  'list-clients -F') cat "$MOCK_CLIENTS" ;;
+  'list-panes -a') cat "$MOCK_HOLDERS" ;;
+  display-popup*)
+    shift $(($# - 1))
+    PATH="$MOCK_POPUP_PATH" sh -c "$1"
+    ;;
+  *) [ "${MOCK_JUMP_FAIL:-0}" = 1 ] && exit 1 ;;
+esac
+exit 0
+MOCK
+# The stand-in fzf records its arguments and the rows it was offered, then
+# prints the first row containing $MOCK_PICK, or exits 130 (cancel).
+cat >"$tmp/popup-bin/fzf" <<'FZF'
+#!/bin/sh
+printf '%s\n' "$@" >"$MOCK_FZF_ARGS"
+cat >"$MOCK_FZF_OFFERED"
+[ -n "$MOCK_PICK" ] || exit 130
+grep -F -m 1 -- "$MOCK_PICK" "$MOCK_FZF_OFFERED" || exit 1
+FZF
+# Any ps call fails the suite: the picker reads tmux formats only.
+cat >"$tmp/bin/ps" <<'PS'
+#!/bin/sh
+printf 'ps %s\n' "$*" >>"$MOCK_PS"
+exit 1
+PS
+chmod +x "$tmp/bin/tmux" "$tmp/popup-bin/fzf" "$tmp/bin/ps"
+ln -s "$tmp/popup-bin/fzf" "$tmp/bin/fzf"
+export PATH="$tmp/bin:$PATH"
+export MOCK_POPUP_PATH="$tmp/popup-bin:$PATH"
+export MOCK_CALLS=$tmp/calls MOCK_STATE=$tmp/state MOCK_CAPTURE=$tmp/capture
+export MOCK_CLIENTS=$tmp/clients MOCK_HOLDERS=$tmp/holders MOCK_PS=$tmp/ps
+export MOCK_FZF_ARGS=$tmp/fzf-args MOCK_FZF_OFFERED=$tmp/fzf-offered MOCK_PICK=''
+SOCKET=/private/test.sock
+CLIENT=/dev/pts/7
+failures=0
+check() {
+  local label=$1 expected=$2 actual=$3
+  if [ "$expected" = "$actual" ]; then
+    printf 'PASS: %s\n' "$label"
+  else
+    printf 'FAIL: %s: expected %q, got %q\n' "$label" "$expected" "$actual" >&2
+    failures=$((failures + 1))
+  fi
+}
+listing() {
+  "$PICKER" --socket "$SOCKET" --list "$@"
+}
+# The rows' pane ids, in order.
+panes() {
+  listing | cut -f1 | tr '\n' ' '
+}
+# The visible part of each row, without colours.
+visible() {
+  listing "$@" | cut -f4- | sed $'s/\033\\[[0-9;]*m//g'
+}
+pad() {
+  printf '%-24s' "$1"
+}
+e=$'\033'
+
+# A snapshot: query 1's walk, query 2's text and the clients, as tmux prints
+# them. Text rows carry the byte lengths of the location and basename.
+text_row() {
+  local pane=$1 session=$2 location=$3 base=$4 agent=$5 label=$6
+  local LC_ALL=C
+  printf 'T %s %s %s %s %s %s%s%s\n' "$pane" "$session" "${#location}" \
+    "${#base}" "$agent" "$location" "$base" "$label"
+}
+
+# Walk order: %5 in session $3 comes before %1 in $1, unlike name order.
+# Levels come from the first bit set: failed, waiting, done, working, agent.
+{
+  printf 'W'
+  printf ' %s' '%5/@5/$3/00010/-/0' '%1/@1/$1/00001/-/0' '%2/@1/$1/01000/-/1' \
+    '%3/@2/$1/10010/1/0' '%4/@3/$2/00100/-/0' '%6/@4/$2/00000/-/0' \
+    '%7/@6/$3/10000/-/0' '%8/@6/$3/00100/-/0'
+  printf ' \n'
+  text_row %1 '$1' "$(pad 'work:1.1')" proj 1 'codex'
+  text_row %2 '$1' "$(pad 'work:1.2')" tools 1 'claude · fix the test'
+  text_row %3 '$1' "$(pad 'work:2.1')" home 0 'zsh · ~'
+  text_row %4 '$2' "$(pad 'dev:1.1')" '' 0 ''
+  text_row %5 '$3' "$(pad 'zeta:1.1')" api 1 'muse'
+  text_row %7 '$3' "$(pad 'zeta:2.1')" '' 0 'make · ~/src'
+  text_row %8 '$3' "$(pad 'zeta:2.2')" '' 0 'sleep · ~'
+  printf 'C 0 %%2 %s\n' "$CLIENT"
+  printf 'C 1 %%5 control\n'
+} >"$MOCK_STATE"
+: >"$MOCK_CALLS"
+check 'rows go by level, each level in walk order' '%3 %7 %2 %4 %8 %5 %1 ' "$(panes)"
+check 'one tmux invocation runs all three queries' 1 "$(wc -l <"$MOCK_CALLS" | tr -d ' ')"
+call=$(cat "$MOCK_CALLS")
+case $call in
+  "-S $SOCKET -u display-message -p W "*' ; list-panes -a -f '*' -F T '*' ; list-clients -F C '*) result=ok ;;
+  *) result=$call ;;
+esac
+check 'the walk, the text and the clients are one queued call' ok "$result"
+case $call in
+  *'#{S:#{W:#{?#{E:@window_counted},#{P:'*) result=ok ;;
+  *) result=$call ;;
+esac
+check 'the walk dedupes linked windows as @attention_panes does' ok "$result"
+case $call in
+  *'#{?#{&&:#{E:@pane_marked_failed},#{&&:#{!=:#{@term_notify_pending},blocked},'*) result=ok ;;
+  *) result=$call ;;
+esac
+check 'the exit field shows only for a local failed command' ok "$result"
+case $call in
+  *$'\t'*) result=tab ;;
+  *) result=none ;;
+esac
+check 'no query format holds a tab' none "$result"
+check 'a pane matching no predicate is dropped' '' "$(listing | grep -F "%6$(printf '\t')")"
+
+# Dots and columns: every row's location starts in the same column, with or
+# without an exit status and a label.
+rows=$(visible --client "$CLIENT")
+check 'a failed command shows its exit status' "● exit 1  $(pad 'work:2.1')  zsh · ~" \
+  "$(printf '%s\n' "$rows" | sed -n 1p)"
+check 'other rows pad the status column' "●         $(pad 'zeta:2.1')  make · ~/src" \
+  "$(printf '%s\n' "$rows" | sed -n 2p)"
+check 'an agent row adds its basename, and here marks the client pane' \
+  "●         $(pad 'work:1.2')  claude · fix the test   tools   [COPY]   here" \
+  "$(printf '%s\n' "$rows" | sed -n 3p)"
+check 'an empty label keeps the columns' "●         $(pad 'dev:1.1')  " \
+  "$(printf '%s\n' "$rows" | sed -n 4p)"
+check 'idle agents are listed last with a hollow dot' "○         $(pad 'work:1.1')  codex   proj" \
+  "$(printf '%s\n' "$rows" | sed -n 7p)"
+check 'here needs the client' '' "$(visible | grep -c 'here$' | grep -v '^0$')"
+raw=$(listing)
+colours=''
+for expected in "1 ${e}[31m●" "3 ${e}[33m●" "4 ${e}[32m●" "6 ${e}[34m●" "7 ${e}[90m○"; do
+  field=$(printf '%s\n' "$raw" | sed -n "${expected%% *}p" | cut -f4)
+  case $field in "${expected#* }"*) ;; *) colours="$colours row ${expected%% *}: $field" ;; esac
+done
+check 'level colours are the basic ANSI ones' '' "$colours"
+check 'every row has three hidden id fields' '%3	@2	$1' "$(printf '%s\n' "$raw" | sed -n 1p | cut -f1-3)"
+
+# Malformed tokens are skipped, and a repeated pane keeps its first token.
+{
+  printf 'W'
+  printf ' %s' '%x/@1/$1/10000/-/0' '%5/@1/$1/10000/-' '%6/@1/$1/10000/-/0/x' \
+    '%7/@1/$1/1000/-/0' '%8/@1/1/10000/-/0' '%9/@1/$1/10000/e/0' \
+    '%10/@1/$1/00100/-/0' '%10/@1/$1/10000/-/0' '%11/@1/$1/12000/-/0'
+  printf ' \n'
+} >"$MOCK_STATE"
+check 'malformed tokens are skipped' '%10 ' "$(panes)"
+
+# Byte splitting: tmux truncates a long or wide name by display width and
+# reports byte lengths, so the split lands on character boundaries.
+wide='ünïcødé:1.1'
+long='release-candidate-build…'
+{
+  printf 'W %s %s \n' '%1/@1/$1/00010/-/0' '%2/@2/$2/00010/-/0'
+  text_row %1 '$1' "$wide$(printf '%13s' '')" 'dïr' 1 'codex · ✓ done'
+  text_row %2 '$2' "$long" 'x' 1 'claude'
+} >"$MOCK_STATE"
+expected_wide="●  $wide$(printf '%13s' '')  codex · ✓ done   dïr"
+expected_long="●  $long  claude   x"
+awks=()
+for candidate in gawk mawk nawk original-awk /usr/bin/awk awk; do
+  found=$(type -P "$candidate" 2>/dev/null) || continue
+  case " ${awks[*]-} " in *" $found "*) continue ;; esac
+  awks+=("$found")
+done
+if type -P busybox >/dev/null 2>&1 && busybox awk 'BEGIN {}' 2>/dev/null; then
+  awks+=(busybox)
+fi
+for awk_path in "${awks[@]}"; do
+  shim=$tmp/awk-$(printf '%s' "$awk_path" | tr '/' '_')
+  mkdir -p "$shim"
+  if [ "$awk_path" = busybox ]; then
+    printf '#!/bin/sh\nexec busybox awk "$@"\n' >"$shim/awk"
+    chmod +x "$shim/awk"
+  else
+    ln -sf "$awk_path" "$shim/awk"
+  fi
+  rows=$(PATH="$shim:$PATH" visible)
+  check "multibyte text splits on byte lengths ($awk_path)" \
+    "$expected_wide"$'\n'"$expected_long" "$rows"
+done
+check 'at least one awk ran the byte-splitting case' 1 "$([ "${#awks[@]}" -gt 0 ] && echo 1)"
+
+# A pane in a grouped session or linked window has text once per session:
+# the row takes the text of the session query 1 walked it in.
+{
+  printf 'W %s \n' '%4/@3/$2/01000/-/0'
+  text_row %4 '$1' "$(pad 'build:1.1')" '' 0 'wrong'
+  text_row %4 '$2' "$(pad 'build-peer:1.1')" '' 0 'right'
+  text_row %4 '$2' "$(pad 'repeat:1.1')" '' 0 'repeat'
+} >"$MOCK_STATE"
+check 'grouped text joins on pane and session' "●  $(pad 'build-peer:1.1')  right" "$(visible)"
+
+# Hostile text is sanitised: control bytes become ?, and ## (doubled by the
+# config for tmux's renderer) becomes #. Spaces and glob characters stay.
+{
+  printf 'W %s \n' '%9/@9/$9/01000/-/0'
+  text_row %9 '$9' "$(pad 'w[1] *?:1.1')" "a${e}b" 1 "claude · x${e}[31my	z ## [*] ?"
+} >"$MOCK_STATE"
+check 'control bytes and ## are sanitised' \
+  "●  $(pad 'w[1] *?:1.1')  claude · x?[31my?z # [*] ?   a?b" "$(visible)"
+
+# The preview drops trailing lines that are blank once SGR codes are gone,
+# then shows the last FZF_PREVIEW_LINES lines.
+printf '%s\n' 'one' "${e}[31mHELLO${e}[0m" 'three' '' "${e}[0m" "  ${e}[44m  ${e}[0m" '' >"$MOCK_CAPTURE"
+check 'the preview tails without trailing blank lines' "${e}[31mHELLO${e}[0m"$'\nthree' \
+  "$(FZF_PREVIEW_LINES=2 "$PICKER" --socket "$SOCKET" --preview %3)"
+check 'the preview defaults to 40 lines' 3 \
+  "$(env -u FZF_PREVIEW_LINES "$PICKER" --socket "$SOCKET" --preview %3 | wc -l | tr -d ' ')"
+check 'a failing capture shows the pane closed' '(pane closed)' \
+  "$(MOCK_CAPTURE_FAIL=1 "$PICKER" --socket "$SOCKET" --preview %3)"
+: >"$MOCK_CALLS"
+"$PICKER" --socket "$SOCKET" --preview %3 >/dev/null
+check 'the preview captures the pane by id with colours' \
+  "-S $SOCKET capture-pane -e -p -t %3" "$(cat "$MOCK_CALLS")"
+
+# The popup and the jump. The client's session is $1; the stand-in fzf picks
+# the row containing $MOCK_PICK.
+{
+  printf 'W %s %s %s %s \n' '%2/@2/$1/01000/-/0' '%4/@4/$2/00100/-/0' \
+    '%5/@5/$3/00100/-/0' '%6/@6/$4/00100/-/0'
+  text_row %2 '$1' "$(pad 'work:2.1')" '' 0 'own session'
+  text_row %4 '$2' "$(pad 'w[1]:1.1')" '' 0 'grouped peer'
+  text_row %5 '$3' "$(pad 'other:1.1')" '' 0 'other session'
+  text_row %6 '$4' "$(pad 'gone:1.1')" '' 0 'killed session'
+  printf 'C 0 %%1 %s\n' "$CLIENT"
+} >"$MOCK_STATE"
+printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
+pick() {
+  : >"$MOCK_CALLS"
+  rm -f "$MOCK_FZF_ARGS" "$MOCK_FZF_OFFERED"
+  MOCK_PICK=$1 "$PICKER" --socket "$SOCKET" --client "$CLIENT"
+}
+# The jump queue: the calls after the popup.
+jumped() {
+  awk 'found { print } / display-popup / { found = 1 }' "$MOCK_CALLS" |
+    grep -v -e ' list-clients ' -e ' list-panes -a -F '
+}
+printf '%s\n' '%2 @2 $1 1' '%2 @2 $5 0' >"$MOCK_HOLDERS"
+output=$(pick 'own session' 2>&1)
+check 'a jump prints nothing' '' "$output"
+check 'in its own session the pane is selected before its window' \
+  "-S $SOCKET select-pane -t \$1:@2.%2 ; select-window -t \$1:@2.%2" "$(jumped)"
+args=$(cat "$MOCK_FZF_ARGS")
+for arg in --ansi --no-sort --reverse --no-multi --with-nth=4.. '--prompt=Agents> ' \
+  '--header=Enter jump · Esc cancel · ctrl-r refresh' \
+  '--preview-window=down,60%,border-top,nowrap' \
+  "'$PICKER' --socket '$SOCKET' --preview {1}" \
+  "ctrl-r:reload('$PICKER' --socket '$SOCKET' --list --client '$CLIENT')+refresh-preview"; do
+  check "fzf gets $arg" 1 "$(grep -cxF -- "$arg" "$MOCK_FZF_ARGS")"
+done
+check 'fzf is offered the rows' "$(MOCK_PICK='' listing --client "$CLIENT")" "$(cat "$MOCK_FZF_OFFERED")"
+case $args in *'--delimiter=\t'*) result=ok ;; *) result=$args ;; esac
+check 'fzf splits fields on tabs' ok "$result"
+
+# The row's own session $2 is attached by another client; $7 is not.
+printf '%s\n' '%4 @4 $6 1' '%4 @4 $2 1' '%4 @4 $7 0' >"$MOCK_HOLDERS"
+pick 'grouped peer'
+check 'elsewhere an unattached holder wins over an attached peer' \
+  "-S $SOCKET switch-client -c $CLIENT -t \$7:@4.%4 ; select-window -t \$7:@4.%4 ; select-pane -t \$7:@4.%4" \
+  "$(jumped)"
+
+printf '%s\n' '%5 @5 $8 1' '%5 @9 $3 1' >"$MOCK_HOLDERS"
+pick 'other session'
+check 'with every holder attached, the row session wins, in the window found now' \
+  "-S $SOCKET switch-client -c $CLIENT -t \$3:@9.%5 ; select-window -t \$3:@9.%5 ; select-pane -t \$3:@9.%5" \
+  "$(jumped)"
+
+printf '%s\n' '%6 @6 $8 1' '%6 @6 $9 2' >"$MOCK_HOLDERS"
+pick 'killed session'
+check 'a killed row session falls back to the first holder' \
+  "-S $SOCKET switch-client -c $CLIENT -t \$8:@6.%6 ; select-window -t \$8:@6.%6 ; select-pane -t \$8:@6.%6" \
+  "$(jumped)"
+check 'no target names a session or window by name' '' \
+  "$(grep -oE -- '-t [^ ]+' "$MOCK_CALLS" | grep -vE -- '^-t (%[0-9]+|\$[0-9]+:@[0-9]+\.%[0-9]+)$')"
+
+printf '%s\n' '%7 @7 $1 1' >"$MOCK_HOLDERS"
+output=$(pick 'own session' 2>&1)
+check 'a closed pane says so' "-S $SOCKET display-message -c $CLIENT That pane has closed" "$(jumped)"
+check 'a closed pane prints nothing' '' "$output"
+
+: >"$MOCK_CALLS"
+output=$(pick '' 2>&1)
+status=$?
+check 'cancelling exits 0' 0 "$status"
+check 'cancelling prints nothing and runs no jump' '' "$output$(jumped)"
+
+printf '%s\n' '$1 1 '"$CLIENT" >"$MOCK_CLIENTS"
+printf '%s\n' '%2 @2 $1 1' >"$MOCK_HOLDERS"
+pick 'own session'
+check 'a client in control mode by the jump is left alone' '' "$(jumped)"
+printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
+
+sed -i.bak 's/^C 0 /C 1 /' "$MOCK_STATE"
+pick 'own session'
+check 'a control-mode client gets no popup' '' "$(grep -c display-popup "$MOCK_CALLS" | grep -v '^0$')"
+sed -i.bak '/^C /d' "$MOCK_STATE"
+pick 'own session'
+check 'a detached client gets no popup' '' "$(grep -c display-popup "$MOCK_CALLS" | grep -v '^0$')"
+
+printf 'W \nC 0 %%1 %s\n' "$CLIENT" >"$MOCK_STATE"
+output=$(pick 'own session' 2>&1)
+check 'no rows says so' "-S $SOCKET display-message -c $CLIENT No agent panes on this server" \
+  "$(grep -F 'display-message -c' "$MOCK_CALLS")"
+check 'no rows prints nothing' '' "$output"
+
+# Without fzf on PATH the picker says so and exits 0.
+nofzf=$tmp/nofzf
+mkdir "$nofzf"
+for tool in bash env sh awk cat mktemp rm; do
+  found=$(type -P "$tool") || continue
+  ln -s "$found" "$nofzf/$tool"
+done
+ln -s "$tmp/bin/tmux" "$nofzf/tmux"
+: >"$MOCK_CALLS"
+PATH=$nofzf "$PICKER" --socket "$SOCKET" --client "$CLIENT"
+check 'a missing fzf exits 0' 0 "$?"
+check 'a missing fzf says so' "-S $SOCKET display-message -c $CLIENT The agent picker needs fzf" \
+  "$(cat "$MOCK_CALLS")"
+
+check 'nothing ran ps' '' "$(cat "$MOCK_PS" 2>/dev/null)"
+
+if [ "$failures" -gt 0 ]; then
+  printf '%s failure(s)\n' "$failures" >&2
+  exit 1
+fi
+printf 'all tmux-agent-picker mock tests passed\n'

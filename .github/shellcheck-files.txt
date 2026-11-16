@@ -3,6 +3,7 @@
 program	bin/term-notify-sound
 program	bin/term-pane-mark
 program	bin/term-pane-state
+program	bin/tmux-agent-picker
 program	bin/tmux-clip-paste
 program	bin/tmux-command-palette
 program	bin/tmux-continuum-default-server
@@ -19,3 +20,4 @@ program	test/tmux-tools-harness-test
 program	test/tmux-tools-test
 program	test/term-pane-state-test
 program	test/term-pane-mark-token-test
+program	test/tmux-agent-picker-test

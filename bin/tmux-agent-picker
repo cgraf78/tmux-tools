@@ -1,0 +1,389 @@
+#!/usr/bin/env bash
+# tmux-agent-picker -- pick an agent pane anywhere on this tmux server and jump
+# to it.
+#
+# Lists every pane the embedding config marks for attention or as an agent,
+# most urgent first (red, yellow, green, blue, then idle agents), in an fzf
+# popup with a preview of the pane's screen. Enter jumps the client there;
+# Escape closes the popup. The rows come from tmux formats alone, never from
+# ps or /proc: the config's predicates decide what each pane is.
+#
+# Usage: tmux-agent-picker --socket SOCKET --client CLIENT
+#        tmux-agent-picker --socket SOCKET --list [--client CLIENT]
+#        tmux-agent-picker --socket SOCKET --preview PANE
+
+set -euo pipefail
+
+usage() {
+  printf '%s\n' 'usage: tmux-agent-picker --socket SOCKET --client CLIENT' \
+    '       tmux-agent-picker --socket SOCKET --list [--client CLIENT]' \
+    '       tmux-agent-picker --socket SOCKET --preview PANE' >&2
+  exit 64
+}
+
+# tmux ids are machine data: check their shape before they reach a target.
+valid_id() {
+  local prefix=$1 value=$2 digits
+  [[ $value == "$prefix"* ]] || return 1
+  digits=${value#"$prefix"}
+  [[ -n $digits && $digits != *[!0-9]* && ${#digits} -le 20 ]]
+}
+
+socket='' client='' preview='' list=false
+while (($#)); do
+  case $1 in
+    --socket | --client | --preview)
+      (($# >= 2)) && [[ -n $2 ]] || usage
+      case $1 in
+        --socket)
+          [[ -z $socket ]] || usage
+          socket=$2
+          ;;
+        --client)
+          [[ -z $client ]] || usage
+          client=$2
+          ;;
+        --preview)
+          [[ -z $preview ]] || usage
+          preview=$2
+          ;;
+      esac
+      shift 2
+      ;;
+    --list)
+      [[ $list == false ]] || usage
+      list=true
+      shift
+      ;;
+    *) usage ;;
+  esac
+done
+# An inherited TMUX can name another server (SSH, or a nested client on the
+# same host), so every mode names the socket, and every call uses it.
+[[ $socket == /* ]] || usage
+if [[ -n $preview ]]; then
+  [[ $list == false && -z $client ]] || usage
+  valid_id % "$preview" || usage
+elif [[ $list == false ]]; then
+  [[ -n $client ]] || usage
+fi
+
+tm() {
+  tmux -S "$socket" "$@"
+}
+
+# The preview is the pane's visible screen with its colours, read from the
+# pane's grid rather than from a copy-mode view. Lines that are blank once
+# their SGR codes are gone are dropped from the end, and the last lines that
+# fit are shown, where agents draw their prompt and approval box.
+if [[ -n $preview ]]; then
+  keep=${FZF_PREVIEW_LINES:-40}
+  case $keep in '' | *[!0-9]*) keep=40 ;; esac
+  if ! screen=$(tm capture-pane -e -p -t "$preview" 2>/dev/null); then
+    printf '(pane closed)\n'
+    exit 0
+  fi
+  printf '%s\n' "$screen" | LC_ALL=C awk -v keep="$keep" '
+    {
+      line[NR] = $0
+      bare = $0
+      gsub(/\033\[[0-9;:]*m/, "", bare)
+      if (bare ~ /[^ \t]/) last = NR
+    }
+    END {
+      first = last - keep + 1
+      if (first < 1) first = 1
+      for (i = first; i <= last; i++) print line[i]
+    }'
+  exit 0
+fi
+
+# Query 1 walks sessions, windows and panes exactly as the config's
+# @attention_panes does, so it shares its order and its @window_counted
+# dedupe of windows linked into several sessions. Each candidate emits one
+# space-terminated token of machine fields only:
+#   pane/window/session/BITS/EXIT/MODE
+# BITS are the config's failed, waiting, done, working and agent predicates;
+# the first that holds is the row's level. EXIT is the exit status of a local
+# failed command (as the border shows it, never for blocked), else -. MODE is
+# 1 while the pane is in a mode such as copy mode.
+# Most unmarked panes fall out after plain option reads; only @pane_agent's
+# match runs on every pane without a mark.
+candidate='#{||:#{@term_notify_pending},#{||:#{@termnav_child_attention},#{||:#{@term_busy},#{E:@pane_agent}}}}'
+bits='#{?#{E:@pane_jump_failed},1,0}#{?#{E:@pane_jump_waiting},1,0}#{?#{E:@pane_jump_done},1,0}#{?#{E:@pane_jump_working},1,0}#{?#{E:@pane_agent},1,0}'
+exit_field='#{?#{&&:#{E:@pane_marked_failed},#{&&:#{!=:#{@term_notify_pending},blocked},#{m/r:^[0-9]+$,#{@term_notify_exit_status}}}},#{@term_notify_exit_status},-}'
+token="#{pane_id}/#{window_id}/#{session_id}/$bits/$exit_field/#{?pane_in_mode,1,0} "
+walk="W #{S:#{W:#{?#{E:@window_counted},#{P:#{?$candidate,$token,}},}}}"
+# Query 2 carries the display text, keyed by pane and session id: a pane in a
+# grouped session or a linked window repeats here, once per session. Fixed
+# fields come first, then the free text with the byte lengths of its first two
+# parts in front, so awk splits it without guessing. tmux truncates and pads
+# the location by display width (the ellipsis is its 24th column), so awk,
+# which counts bytes, never cuts inside a character. Neither format contains a
+# tab: some non-UTF-8 job locales rewrite them.
+location='#{p24:#{=/23/…:#{session_name}:#{window_index}.#{pane_index}}}'
+basename='#{b:pane_current_path}'
+text="T #{pane_id} #{session_id} #{n:$location} #{n:$basename} #{?#{||:#{E:@pane_agent},#{E:@pane_interactive}},1,0} $location$basename#{E:@pane_label}"
+clients='C #{client_control_mode} #{pane_id} #{client_name}'
+
+# All three queries go to tmux as one invocation, so one command queue.
+snapshot() {
+  tm -u display-message -p "$walk" \; \
+    list-panes -a -f "$candidate" -F "$text" \; \
+    list-clients -F "$clients"
+}
+
+# Turn a snapshot into rows: pane, window and session ids, then the visible
+# text, separated by tabs. awk adds the tabs and colours only after removing
+# control bytes from the text, and turns @pane_label's ## (doubled for tmux's
+# renderer) back into #. LC_ALL=C makes substr count bytes, as #{n:} does.
+render() {
+  TMUX_AGENT_PICKER_CLIENT=$client LC_ALL=C awk '
+    function clean(s) {
+      gsub(/[\001-\037\177]/, "?", s)
+      return s
+    }
+    function spaces(n,    s) {
+      s = ""
+      while (n-- > 0) s = s " "
+      return s
+    }
+    BEGIN {
+      client = ENVIRON["TMUX_AGENT_PICKER_CLIENT"]
+      e = "\033"
+      dot[0] = e "[31m●" e "[0m"
+      dot[1] = e "[33m●" e "[0m"
+      dot[2] = e "[32m●" e "[0m"
+      dot[3] = e "[34m●" e "[0m"
+      dot[4] = "○"
+    }
+    /^W / {
+      n = split(substr($0, 3), t, " ")
+      for (i = 1; i <= n; i++) token[++tokens] = t[i]
+      next
+    }
+    /^T / {
+      if ($2 !~ /^%[0-9]+$/ || $3 !~ /^\$[0-9]+$/ || $4 !~ /^[0-9]+$/ ||
+        $5 !~ /^[0-9]+$/ || $6 !~ /^[01]$/) next
+      key = $2 " " $3
+      if (key in loc) next
+      rest = $0
+      if (!sub(/^T [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ /, "", rest)) next
+      if (length(rest) < $4 + $5) next
+      loc[key] = clean(substr(rest, 1, $4))
+      base[key] = clean(substr(rest, $4 + 1, $5))
+      text = clean(substr(rest, $4 + $5 + 1))
+      gsub(/##/, "#", text)
+      label[key] = text
+      agentish[key] = $6
+      next
+    }
+    /^C / {
+      name = $0
+      if (sub(/^C [^ ]+ [^ ]+ /, "", name) && client != "" && name == client) here = $3
+      next
+    }
+    END {
+      width = 1
+      for (i = 1; i <= tokens; i++) {
+        tk = token[i]
+        if (tk !~ /^%[0-9]+\/@[0-9]+\/\$[0-9]+\/[01][01][01][01][01]\/([0-9]+|-)\/[01]$/) continue
+        split(tk, f, "/")
+        if (f[1] in seen) continue
+        seen[f[1]] = 1
+        level = index(f[4], "1") - 1
+        if (level < 0) continue
+        rows++
+        pane[rows] = f[1]
+        window[rows] = f[2]
+        session[rows] = f[3]
+        rank[rows] = level
+        status[rows] = dot[level]
+        shown[rows] = 1
+        if (level == 0 && f[5] != "-") {
+          status[rows] = status[rows] " exit " f[5]
+          shown[rows] = 7 + length(f[5])
+        }
+        mode[rows] = f[6]
+        if (shown[rows] > width) width = shown[rows]
+      }
+      # Each level keeps the walk order.
+      for (level = 0; level <= 4; level++) {
+        for (r = 1; r <= rows; r++) {
+          if (rank[r] != level) continue
+          key = pane[r] " " session[r]
+          line = status[r] spaces(width - shown[r]) "  "
+          line = line ((key in loc) ? loc[key] : spaces(24)) "  " label[key]
+          if (agentish[key] == 1 && base[key] != "") {
+            line = line "   " (level == 4 ? base[key] : e "[90m" base[key] e "[0m")
+          }
+          if (mode[r] == 1) line = line "   [COPY]"
+          if (pane[r] == here) line = line "   here"
+          if (level == 4) line = e "[90m" line e "[0m"
+          print pane[r] "\t" window[r] "\t" session[r] "\t" line
+        }
+      }
+    }'
+}
+
+if [[ $list == true ]]; then
+  snapshot | render
+  exit 0
+fi
+
+# Show a message on the client. tmux 3.2 parses display-message -c as a flag
+# without a value, so there the message goes to the session's latest client.
+message() {
+  tm display-message -c "$client" "$1" 2>/dev/null ||
+    tm display-message "$1" 2>/dev/null || true
+}
+
+# Quote a word for the popup's shell.
+shell_quote() {
+  local rest=$1 quoted=''
+  while [[ $rest == *"'"* ]]; do
+    quoted="$quoted${rest%%"'"*}'\\''"
+    rest=${rest#*"'"}
+  done
+  printf "'%s%s'" "$quoted" "$rest"
+}
+
+# type -P finds only an executable: the popup runs fzf from PATH.
+if ! type -P fzf >/dev/null 2>&1; then
+  message 'The agent picker needs fzf'
+  exit 0
+fi
+
+self=${BASH_SOURCE[0]}
+case $self in
+  */*) ;;
+  *) self=$(type -P "$self") ;;
+esac
+case $self in
+  /*) ;;
+  *) self=$PWD/$self ;;
+esac
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/tmux-agent-picker.XXXXXX")
+trap 'rm -rf "$work"' EXIT
+case "$work$socket$client$self" in
+  *"'"*)
+    printf 'tmux-agent-picker: a quote in the temporary path, socket, client or script path\n' >&2
+    exit 1
+    ;;
+esac
+
+if ! snapshot >"$work/state" 2>"$work/error"; then
+  cat "$work/error" >&2
+  exit 1
+fi
+# A detached or control-mode client gets nothing.
+attached=false
+while IFS= read -r record; do
+  case $record in "C "*) ;; *) continue ;; esac
+  record=${record#C }
+  control=${record%% *}
+  record=${record#* }
+  [[ ${record#* } == "$client" ]] || continue
+  [[ $control == 0 ]] || exit 0
+  attached=true
+done <"$work/state"
+[[ $attached == true ]] || exit 0
+
+render <"$work/state" >"$work/rows"
+if [[ ! -s "$work/rows" ]]; then
+  message 'No agent panes on this server'
+  exit 0
+fi
+
+# The popup only picks: it writes the chosen line and closes, and the jump
+# runs after it has gone. fzf runs its preview and reload with SHELL, so sh
+# reads their quoting. fzf exits 1 with no match and 130 when cancelled, and
+# the popup passes that status on, so only an error tmux itself reports (an
+# unknown client, say) is a failure.
+preview_command="'$self' --socket '$socket' --preview {1}"
+reload="ctrl-r:reload('$self' --socket '$socket' --list --client '$client')+refresh-preview"
+popup="env SHELL=sh fzf --ansi --no-sort --reverse --no-multi --delimiter='\\t' --with-nth=4.."
+popup+=" --prompt='Agents> ' --header='Enter jump · Esc cancel · ctrl-r refresh'"
+popup+=" --preview $(shell_quote "$preview_command")"
+popup+=" --preview-window='down,60%,border-top,nowrap' --bind $(shell_quote "$reload")"
+popup+=" <'$work/rows' >'$work/choice'"
+if ! tm display-popup -c "$client" -E -w 90% -h 85% "$popup" 2>"$work/error"; then
+  if [[ -s "$work/error" ]]; then
+    cat "$work/error" >&2
+    exit 1
+  fi
+fi
+[[ -s "$work/choice" ]] || exit 0
+pane='' window='' session=''
+IFS=$'\t' read -r pane window session _ <"$work/choice" || true
+valid_id % "$pane" && valid_id @ "$window" && valid_id '$' "$session" || exit 0
+
+# Find the exact client by name: display-message -c answers for another
+# client, and tmux 3.2 takes no argument to it. Keep its current session.
+own=''
+attached=false
+while read -r sid control name; do
+  [[ $name == "$client" ]] || continue
+  [[ $control == 0 ]] || exit 0
+  own=$sid
+  attached=true
+done < <(tm list-clients -F '#{session_id} #{client_control_mode} #{client_name}' 2>/dev/null || true)
+[[ $attached == true ]] && valid_id '$' "$own" || exit 0
+
+# Where does the pane live now? Its session may have been killed while a
+# grouped peer still holds it, or it may have moved to a new window.
+holders=$(tm list-panes -a -F '#{pane_id} #{window_id} #{session_id} #{session_attached}' 2>/dev/null || true)
+here_window='' idle_session='' idle_window='' row_window='' first_session='' first_window=''
+while read -r pid wid sid attached_count _; do
+  [[ $pid == "$pane" ]] || continue
+  if ! valid_id @ "$wid" || ! valid_id '$' "$sid"; then
+    continue
+  fi
+  if [[ -z $first_session ]]; then
+    first_session=$sid
+    first_window=$wid
+  fi
+  if [[ $sid == "$own" && -z $here_window ]]; then
+    here_window=$wid
+  fi
+  if [[ $attached_count == 0 && -z $idle_session ]]; then
+    idle_session=$sid
+    idle_window=$wid
+  fi
+  if [[ $sid == "$session" && -z $row_window ]]; then
+    row_window=$wid
+  fi
+done <<<"$holders"
+if [[ -z $first_session ]]; then
+  message 'That pane has closed'
+  exit 0
+fi
+
+# Every target names the pane, so no command makes a bystander pane current
+# on the way, which would acknowledge its mark through the config's hooks.
+# In the client's own session, select-pane goes first: it makes the pane its
+# window's active pane before select-window makes the window current, so the
+# window's old active pane is never current. Elsewhere, switch-client takes
+# the client straight to the pane. A session no client is attached to is
+# preferred there: switching into a grouped peer another client sits in would
+# move that client's view with it.
+if [[ -n $here_window ]]; then
+  target="$own:$here_window.$pane"
+  jump=(select-pane -t "$target" \; select-window -t "$target")
+else
+  if [[ -n $idle_session ]]; then
+    target="$idle_session:$idle_window.$pane"
+  elif [[ -n $row_window ]]; then
+    target="$session:$row_window.$pane"
+  else
+    target="$first_session:$first_window.$pane"
+  fi
+  jump=(switch-client -c "$client" -t "$target" \; select-window -t "$target" \;
+    select-pane -t "$target")
+fi
+if ! tm "${jump[@]}" 2>/dev/null; then
+  tm display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1 ||
+    message 'That pane has closed'
+fi
+exit 0

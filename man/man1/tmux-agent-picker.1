@@ -1,0 +1,260 @@
+.TH TMUX-AGENT-PICKER 1 "2026-11-16" "tmux-tools" "User Commands"
+.SH NAME
+tmux-agent-picker \- pick an agent pane anywhere on a tmux server and jump to it
+.SH SYNOPSIS
+.B tmux-agent-picker
+.B \-\-socket
+.I socket
+.B \-\-client
+.I client
+.br
+.B tmux-agent-picker
+.B \-\-socket
+.I socket
+.B \-\-list
+.RB [ \-\-client
+.IR client ]
+.br
+.B tmux-agent-picker
+.B \-\-socket
+.I socket
+.B \-\-preview
+.I pane
+.SH DESCRIPTION
+.B tmux-agent-picker
+lists the panes of every session on the tmux server at
+.I socket
+that need attention or run an agent, in an
+.BR fzf (1)
+popup on
+.IR client ,
+most urgent first, with a preview of the pane under the cursor. Enter takes
+the client to the chosen pane; Escape closes the popup and changes nothing.
+.PP
+Bind it with the server's socket and the client that pressed the key:
+.PP
+.RS
+.nf
+bind W run-shell 'tmux-agent-picker --socket #{q:socket_path} --client #{q:client_name}'
+.fi
+.RE
+.PP
+Each row shows a dot for its level, the pane's
+.IB session : window . pane
+location (24 columns, cut with an ellipsis), the config's
+.B @pane_label
+for the pane, and on agent rows the base name of the pane's directory. A
+failed command adds
+.BI exit " N"
+after its red dot. A pane in a mode such as copy mode shows
+.BR [COPY] ,
+and the client's own pane shows
+.BR here .
+The location is only for reading: every target the command uses is an id.
+.PP
+Rows come in five levels, each pane once, at the first level that holds:
+.TP
+.B red
+.B @pane_jump_failed
+.TP
+.B yellow
+.B @pane_jump_waiting
+.TP
+.B green
+.B @pane_jump_done
+.TP
+.B blue
+.B @pane_jump_working
+.TP
+.B idle
+.BR @pane_agent ,
+dimmed, at the bottom
+.PP
+Within a level, rows follow the walk of sessions, windows and panes that
+tmux's
+.B #{S:#{W:#{P:...}}}
+loops make, which is how a config's own
+.B prefix a
+style attention list goes, and a window linked into several sessions counts
+for one of them only, as
+.B @window_counted
+decides. The levels and the order come from tmux formats alone: the command
+never runs
+.BR ps (1)
+or reads
+.IR /proc .
+.PP
+The preview shows the pane's visible screen with its colours, read from the
+pane itself rather than a copy-mode view. Trailing lines that are blank once
+their colour codes are removed are dropped, and the last lines that fit are
+shown, so an agent's prompt at the bottom is in view. It reruns when the
+cursor moves, and ctrl-r reloads the rows and the preview together.
+.SS The jump
+The popup only picks; the jump runs after it has closed. The command finds
+where the pane lives now, so a pane moved to a new window, or a session
+killed while a grouped session still holds the pane, is followed. A pane
+that has closed is reported with a message and nothing moves. A pane in the
+client's own session is selected there. Otherwise the client switches to a
+session holding the pane, preferring one no other client is attached to, so
+a grouped session another client is looking at keeps that client's view; when
+every such session is attached, that client's view may change too.
+.PP
+Every command of the jump names the pane, and in the client's own session
+the pane is made its window's active pane before the window is selected. No
+other pane is made current on the way, so a config's hooks that acknowledge
+the pane being visited never acknowledge a bystander. The chosen pane keeps
+its mode.
+.SS Side effect of the popup
+From tmux 3.6, opening and closing a popup sends focus events to the pane
+beneath it. A config that acknowledges attention on
+.B pane-focus-in
+or
+.B pane-focus-out
+therefore acknowledges the client's current pane when the picker opens, even
+if the popup is cancelled, as for any popup. Other panes are unaffected.
+.SH CONFIGURATION
+The embedding tmux config supplies the predicates; the command evaluates
+them with
+.BR #{E:...} .
+An option the config does not set expands empty, which reads as false, so a
+config without them gets fewer rows or none, never an error.
+.TP
+.B @pane_jump_failed\fR, \fB@pane_jump_waiting\fR, \fB@pane_jump_done
+The red, yellow and green classes. Each pane should match at most one, as
+for a
+.B prefix a
+attention jump.
+.TP
+.B @pane_jump_working
+Work in progress without attention: the blue class.
+.TP
+.B @pane_agent
+The pane runs an agent: listed, dimmed, when nothing else holds.
+.TP
+.B @pane_marked_failed
+A local failed command; only then does a red row show the exit status from
+.BR @term_notify_exit_status ,
+and never for the
+.B blocked
+kind.
+.TP
+.B @window_counted
+The window counts for the session being walked. Required: without it no
+window counts.
+.TP
+.B @pane_label
+The row's label.
+.TP
+.B @pane_interactive
+Optional: an interactive pane that is not an agent also shows its
+directory's base name.
+.PP
+A pane is a candidate only while it has
+.BR @term_notify_pending ,
+.BR @termnav_child_attention ,
+.B @term_busy
+or
+.BR @pane_agent ,
+so most panes are skipped after plain option reads. A minimal example, for a
+config whose hooks acknowledge a done mark when its pane is visited, as the
+tmux-tools README shows:
+.PP
+.RS
+.nf
+set -g @agent_names 'claude|codex|gemini|grok|muse|opencode'
+set -g @pane_agent '#{m/r:^(#{@agent_names})$,#{pane_current_command}}'
+set -g @pane_marked_failed '#{&&:#{@term_notify_pending},#{||:#{==:#{@term_notify_pending},blocked},#{>:#{@term_notify_exit_status},0}}}'
+set -g @child_failed '#{m/r:^[0-9]+:[0-9]+:[0-9]+:[1-9][0-9]*$,#{@termnav_child_attention}}'
+set -g @pane_jump_failed '#{||:#{E:@pane_marked_failed},#{E:@child_failed}}'
+set -g @pane_jump_waiting '#{&&:#{!=:#{E:@pane_jump_failed},1},#{==:#{@term_notify_pending},waiting}}'
+set -g @pane_jump_done '#{&&:#{!=:#{E:@pane_jump_failed},1},#{&&:#{!=:#{E:@pane_jump_waiting},1},#{@term_notify_pending}}}'
+set -g @pane_jump_working '#{@term_busy}'
+set -g @session_name_glob '#{s/([][*?\e\e])/\e\e\e1/:session_name}'
+set -g @window_counted '#{||:#{==:#{window_linked_sessions_list},#{session_name}},#{m:#{E:@session_name_glob}#,*,#{window_linked_sessions_list}}}'
+set -g @pane_label '#{pane_current_command}#{?#{!=:#{pane_title},#{host}}, · #{q/h:pane_title},}'
+.fi
+.RE
+.PP
+The
+.B @termnav_child_attention
+lease (expiry:working:pending:failed) is how termnav reports a nested tmux; a
+real config also checks its expiry. cgraf78/dotfiles has a complete set,
+with leases, sticky kinds and shell prompts taken into account.
+.B @pane_label
+may double
+.B #
+for tmux's renderer, as
+.B q/h
+does; the picker turns
+.B ##
+back into
+.BR # .
+.SH OPTIONS
+.TP
+.BI \-\-socket " socket"
+The tmux server's socket, as an absolute path, usually
+.B #{q:socket_path}
+from the binding. Required in every mode: an inherited
+.B TMUX
+can name another server, as over SSH or from a nested client.
+.TP
+.BI \-\-client " client"
+The client to open the popup on and to move, usually
+.B #{q:client_name}
+from the binding. With
+.BR \-\-list ,
+it marks that client's pane
+.BR here .
+.TP
+.B \-\-list
+Print the rows and exit. Each line holds the pane, window and session ids,
+then the visible text, separated by tabs. ctrl-r runs this.
+.TP
+.BI \-\-preview " pane"
+Print the preview of
+.I pane
+(a
+.BI % N
+id), or
+.B (pane closed)
+when it is gone. The popup's preview runs this, and reads
+.B FZF_PREVIEW_LINES
+(default 40).
+.SH COMPATIBILITY
+tmux 3.2 or newer, and
+.BR fzf (1)
+0.27.0 or newer, the first to accept the
+.B border-top
+preview window option. tmux 3.2 cannot target a message at a client, so
+there a message goes to the session's most recently active client. Before
+tmux 3.6 a popup sends no focus events, so opening the picker acknowledges
+nothing.
+.PP
+Without
+.BR fzf (1)
+on
+.BR PATH ,
+or with no rows, the command shows a tmux message saying so and exits
+successfully. A quote in the socket path, the client name, the command's own
+path or the temporary directory is refused, since they are quoted into the
+popup's command line.
+.SH EXIT STATUS
+.TP
+.B 0
+A pane was chosen or the popup was cancelled; or the client was gone or in
+control mode, the pane had closed, or a missing
+.BR fzf (1)
+or an empty list was reported through tmux.
+.TP
+.B 1
+tmux could not be queried or could not open the popup, or a path or name held
+a quote.
+.TP
+.B 64
+The arguments were invalid.
+.SH SEE ALSO
+.BR tmux (1),
+.BR fzf (1),
+.BR tmux-command-palette (1),
+.BR term-pane-mark (1),
+.BR term-pane-state (1)

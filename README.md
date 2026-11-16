@@ -25,6 +25,10 @@ Small helpers for tmux setups that outgrow the defaults:
 - **`tmux-command-palette`**: find a key binding by its description in an fzf
   popup and run it, like an editor's command palette. It lists every root and
   prefix binding that has a note (`bind-key -N`).
+- **`tmux-agent-picker`**: list every agent pane on the server, most urgent
+  first (failed, waiting, done, working, then idle agents), in an fzf popup
+  with a preview of each pane's screen, and jump to the one you pick, in any
+  session.
 - **`term-notify-sound`**: ring the terminal bell. Call it when a job or agent
   finishes. Inside tmux it also marks which pane rang, which plain tmux does
   not track (tmux records a bell against the window).
@@ -47,6 +51,8 @@ Small helpers for tmux setups that outgrow the defaults:
   explicitly selected tmux client whose terminal supports OSC 52.
 - For `tmux-command-palette`: `fzf`, and tmux 3.4 or newer to run the chosen
   key itself (older tmux asks you to press it)
+- For `tmux-agent-picker`: `fzf` 0.27.0 or newer, tmux 3.2 or newer, and a
+  tmux config that defines its predicates (see below)
 
 ## Install
 
@@ -229,6 +235,63 @@ Mouse bindings, tmux's `Select window N` notes on `prefix 0`-`9`, and a second
 key with an earlier key's note are left out. `tmux-command-palette --list`
 prints the entries. `man tmux-command-palette` has the details.
 
+### `tmux-agent-picker`
+
+```tmux
+bind -N "Pick an agent pane across sessions" W run-shell 'tmux-agent-picker --socket #{q:socket_path} --client #{q:client_name}'
+```
+
+The popup lists every pane on the server that needs attention or runs an
+agent, one row each, most urgent first: red, yellow and green for
+attention, blue for work in progress, then idle agents, dimmed. Within a
+level the rows follow tmux's session, window and pane order. A row shows the
+pane's `session:window.pane`, its label and, for agents, its directory's
+base name; a failed command adds its exit status, as in
+`● exit 1  dev:1.2  zsh · ~/src`. The preview shows the bottom of the pane's
+screen in colour, and ctrl-r reloads both. Enter takes the client to the
+pane, switching sessions when it lives elsewhere; Escape closes the popup.
+
+The jump names the pane in every command, so no other pane becomes current
+on the way and the config's acknowledgement hooks see only the pane you
+chose. From tmux 3.6 a popup sends focus events to the pane beneath it, so a
+config that acknowledges attention on focus also acknowledges the current
+pane when the picker opens, as for any popup.
+
+The picker reads tmux formats only (never `ps`), and your config decides
+what each pane is. It needs these options, read with `#{E:...}`:
+
+| Option | Meaning |
+| --- | --- |
+| `@pane_jump_failed`, `@pane_jump_waiting`, `@pane_jump_done` | the red, yellow and green classes, one per pane |
+| `@pane_jump_working` | work in progress without attention (blue) |
+| `@pane_agent` | the pane runs an agent (idle rows) |
+| `@pane_marked_failed` | a local failed command, whose red row shows its exit status |
+| `@window_counted` | the window counts for the session being walked, so a linked window lists once |
+| `@pane_label` | the row's label (`##` is shown as `#`) |
+| `@pane_interactive` | optional: also show the directory for other interactive panes |
+
+For example, with [term-pane-mark](#term-notify-sound-and-term-pane-mark)
+marks:
+
+```tmux
+set -g @agent_names 'claude|codex|gemini|grok|muse|opencode'
+set -g @pane_agent '#{m/r:^(#{@agent_names})$,#{pane_current_command}}'
+set -g @pane_marked_failed '#{&&:#{@term_notify_pending},#{||:#{==:#{@term_notify_pending},blocked},#{>:#{@term_notify_exit_status},0}}}'
+set -g @pane_jump_failed '#{E:@pane_marked_failed}'
+set -g @pane_jump_waiting '#{&&:#{!=:#{E:@pane_jump_failed},1},#{==:#{@term_notify_pending},waiting}}'
+set -g @pane_jump_done '#{&&:#{!=:#{E:@pane_jump_failed},1},#{&&:#{!=:#{E:@pane_jump_waiting},1},#{@term_notify_pending}}}'
+set -g @pane_jump_working '#{@term_busy}'
+set -g @session_name_glob '#{s/([][*?\\])/\\\1/:session_name}'
+set -g @window_counted '#{||:#{==:#{window_linked_sessions_list},#{session_name}},#{m:#{E:@session_name_glob}#,*,#{window_linked_sessions_list}}}'
+set -g @pane_label '#{pane_current_command}'
+```
+
+`@window_counted` counts a window linked into several sessions (as grouped
+sessions share theirs) only for the first session it names, matched exactly
+even when the name holds glob characters. `man tmux-agent-picker` adds nested
+tmux leases to the example, and `tmux-agent-picker --socket SOCKET --list`
+prints the rows.
+
 ### `term-notify-sound` and `term-pane-mark`
 
 - `term-notify-sound [--owner PID] [--kind KIND] [--exit-status CODE]`:
@@ -344,6 +407,9 @@ Or run the focused command test directly:
 test/tmux-tools-test
 test/tmux-continuum-test
 test/copy-mark-test
+test/tmux-agent-picker-test
 ```
 
 If `tmux` is not installed, the test suite skips tmux server integration cases.
+The real-fzf picker test skips without `fzf`; `TMUX_TOOLS_REQUIRE_FZF=1`
+turns that skip into a failure, as CI does where it installs `fzf`.
