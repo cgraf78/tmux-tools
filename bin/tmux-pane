@@ -88,7 +88,7 @@ cleanup() {
   # Only this run's buffers, by exact name: -d deletes a buffer only when
   # its paste succeeds, and a glob could take someone else's.
   for b in ${buffers[@]+"${buffers[@]}"}; do
-    tmux ${server_args[@]+"${server_args[@]}"} delete-buffer -b "$b" >/dev/null 2>&1 || true
+    tmux -u ${server_args[@]+"${server_args[@]}"} delete-buffer -b "$b" >/dev/null 2>&1 || true
   done
   [ -z "$work" ] || rm -rf "$work"
 }
@@ -116,7 +116,9 @@ valid_pane() {
 }
 tmx() {
   valid_pane "$pane" || die 1 'internal error: tmux call without a valid pane id'
-  tmux ${server_args[@]+"${server_args[@]}"} "$@"
+  # -u: without a UTF-8 locale, tmux prints control and non-ASCII bytes in
+  # its output as _, which would break the field separator and captures.
+  tmux -u ${server_args[@]+"${server_args[@]}"} "$@"
 }
 
 disabled() { # disabled FEATURE: TMUX_PANE_TEST_DISABLE forces a feature off.
