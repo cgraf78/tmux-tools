@@ -244,8 +244,8 @@ draws its screen on standard error and the message cannot be captured.
 A client that detaches while the popup is open, or a popup closed under fzf
 (as by
 .BR "display-popup -C" ),
-is not a failure: the command exits 0 and says nothing. Neither does any
-failure once the client has gone, since nobody is left to tell, and since
+is not a failure: the command exits 0 and says nothing. Nor is any failure
+once the client has gone, since nobody is left to tell, and since
 tmux 3.2a crashes its server when a key binding's blocking
 .B run-shell
 exits non-zero after its client has detached.

@@ -547,6 +547,9 @@ printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
 status=0
 output=$(MOCK_GARBLE=1 listing 2>&1) || status=$?
 check 'a snapshot without its R line is an error' 1 "$status"
+check 'a snapshot without its R line says so' \
+  'tmux-agent-picker: tmux answered the snapshot with something unexpected' "$output"
+
 # --list (every ctrl-r) makes no temporary directory: it works where none
 # could be made.
 status=0
@@ -554,8 +557,14 @@ TMPDIR=$tmp/missing listing >/dev/null 2>&1 || status=$?
 check '--list makes no temporary directory' 0 "$status"
 listing >/dev/null 2>&1
 check '--list leaves no temporary directory' 0 "$(leftovers)"
-check 'a snapshot without its R line says so' \
-  'tmux-agent-picker: tmux answered the snapshot with something unexpected' "$output"
+
+# A client line whose session is not an id is not the client: no jump.
+printf 'bogus 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
+status=0
+pick 'own session' >/dev/null 2>&1 || status=$?
+check 'a client without a session id exits 0' 0 "$status"
+check 'a client without a session id gets no jump' '' "$(no_jump)"
+printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
 
 # Messages go to the client only. tmux 3.2 rejects a value after
 # display-message -c with its usage line, and only that falls back to an

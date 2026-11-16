@@ -280,8 +280,8 @@ complete example config, the one the tests run, and
 `tmux-agent-picker --socket SOCKET --list` prints the rows.
 
 Failures are loud: the picker exits 1 and says why on the client and on
-stderr, while cancelling or detaching is not a failure; DIAGNOSTICS in
-`man tmux-agent-picker` lists both.
+stderr, while cancelling or detaching is not a failure; DIAGNOSTICS and EXIT
+STATUS in `man tmux-agent-picker` list them.
 
 ### `term-notify-sound` and `term-pane-mark`
 
