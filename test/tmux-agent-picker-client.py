@@ -150,8 +150,10 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
         return created
 
     def agent_command(script: str = "sleep 600; :") -> str:
-        # The trailing no-op keeps bash in the foreground instead of sleep.
-        return shlex.join([str(agent), "-c", script])
+        # tmux runs the command with sh -c, and dash and busybox sh do not
+        # exec its last command, so exec the copy itself. The trailing no-op
+        # keeps bash in the foreground instead of sleep.
+        return "exec " + shlex.join([str(agent), "-c", script])
 
     def new_session(name: str, command: str = "sleep 600") -> str:
         created = tmux(

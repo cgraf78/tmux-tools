@@ -127,7 +127,8 @@ with tempfile.TemporaryDirectory(prefix="tap-fzf-") as directory:
             "-P",
             "-F",
             "#{pane_id}",
-            shlex.join([str(agent), "-c", script + "; sleep 600; :"]),
+            # dash and busybox sh do not exec a -c string's last command.
+            "exec " + shlex.join([str(agent), "-c", script + "; sleep 600; :"]),
         )
         assert re.fullmatch(r"%[0-9]+", pane), pane
         return pane
@@ -163,6 +164,12 @@ with tempfile.TemporaryDirectory(prefix="tap-fzf-") as directory:
             f"echo SECOND-MARKER; while [ ! -e {shlex.quote(str(flag))} ]; do sleep 0.05; done;"
             " echo REFRESHED-MARKER",
         )
+        for pane in (first, second):
+            poll(
+                "the stand-in agent runs as codex",
+                lambda p=pane: tmux("display-message", "-p", "-t", p, "#{pane_current_command}"),
+                lambda v: v == "codex",
+            )
         tmux("set-option", "-p", "-t", first, "@term_notify_pending", "waiting")
         tmux("set-option", "-p", "-t", second, "@term_notify_pending", "waiting")
         for pane, marker in ((first, "FIRST-MARKER"), (second, "SECOND-MARKER")):
