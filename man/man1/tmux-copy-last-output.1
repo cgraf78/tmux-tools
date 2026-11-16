@@ -57,7 +57,15 @@ leaves bash's next first line glued to it:
 The parser takes the identity
 .B user@host:
 that most prompts in the capture agree on, so the text before it is the
-command's output and the status is still read.
+command's output and the status is still read. A
+.B #
+second line also starts comments and headings in output, so its first line
+must start with the identity, never glued. Output that contains the identity
+on a line directly above a
+.B $
+or
+.B %
+line still splits the block there.
 .BR tmux-pane (1)
 carries the same parser.
 .PP

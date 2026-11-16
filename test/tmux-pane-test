@@ -11,6 +11,8 @@
 set -uo pipefail
 unset BASH_ENV ENV TMUX TMUX_PANE
 export NO_COLOR=1
+# tmux runs pane commands with $SHELL -c; keep the user's startup files out.
+export SHELL=/bin/sh
 ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 TOOL="$ROOT/bin/tmux-pane"
 
@@ -418,6 +420,27 @@ send_case 'send: key names in text stay text' 'C-c Enter' 'C-c Enter'
 send_case 'send: formats and paths stay literal' '#{pane_id} ~ %%5' '#{pane_id}' '~' '%5'
 send_case 'send: a tab and UTF-8 arrive' 'a\tb \303\251\342\234\223' "$(printf 'a\tb')" 'é✓'
 send_case 'rg_x15 -x after -- is text' '-x --x' -- -x --x
+send_case 'send: a TEXT argument keeps a trailing lone CR' 'ls\r' "$(printf 'ls\r')"
+send_case 'send: a TEXT argument keeps its trailing LF' 'ls\r' $'ls\n'
+send_case 'send: an empty TEXT sends nothing' '' ''
+send_case 'send: a UTF-8 key name' '\303\251' --keys é
+mkdir -p "$tmp/globdir"
+: >"$tmp/globdir/a"
+: >"$so"
+(cd "$tmp/globdir" && tp send -t "$sp" --keys '? *' 2>/dev/null)
+settle_file "$so"
+check 'send: key names never glob' "$(hexfmt '?*')" "$(hexfile "$so")"
+: >"$so"
+env TMUX_PANE_TEST_DISABLE=paste-S "$BASH" -c 'exec "$@"' _ \
+  env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" send -S "$sock" -t "$sp" --type 'typed' 2>/dev/null
+check 'send: --type without paste-buffer -S has no paste flags (Bash 3.2 set -u)' 0 "$?"
+settle_file "$so"
+check 'send: and the text arrives' "$(hexfmt 'typed')" "$(hexfile "$so")"
+for sub in send read wait mark; do
+  out=$(env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" "$sub" --help 2>/dev/null)
+  check "help: $sub --help exits 0" 0 "$?"
+  check_contains "help: $sub --help shows the pane-id hint" 'list-panes -a' "$out"
+done
 send_case 'send: keys and text keep argv order' '\025abc\r' --keys C-u abc --enter
 stdin_case() { # stdin_case NAME EXPECTED_FORMAT INPUT_FORMAT [ARGS...]
   local name=$1 want=$2 input=$3
@@ -566,7 +589,7 @@ T set-option -s extended-keys off
 # that only the target receives, and the bytes equal what tmux's own
 # send-keys produces for the same key (a sync-off pane), in VT10x mode and
 # in application cursor and keypad mode.
-keys_portable='Up C-Up M-Up S-Up C-M-S-Up Down Left Right Home C-Home End S-End F1 C-F1 F4 F5 S-F5 F12 C-M-F12 IC C-IC DC PPage NPage C-NPage PageUp PgDn BSpace M-BSpace Enter M-Enter Tab M-Tab BTab Escape M-Escape Space C-Space M-Space C-M-Space KP0 KP5 M-KP5 KP/ KP* KP- KP+ KP. KPEnter a z C-a C-z M-a C-M-a 1 M-1 C-/ C-[ C-\ C-] C-^ C-_ C-@ C-? M-?'
+keys_portable='Up C-Up M-Up S-Up C-M-S-Up Down Left Right Home C-Home End S-End F1 C-F1 F4 F5 S-F5 F12 C-M-F12 IC C-IC DC PPage NPage C-NPage PageUp PgDn BSpace M-BSpace Enter M-Enter Tab M-Tab BTab Escape M-Escape Space C-Space M-Space C-M-Space KP0 KP5 M-KP5 KP/ KP* KP- KP+ KP. KPEnter a z C-a C-z M-a C-M-a 1 M-1 C-/ C-[ C-\ C-] C-^ C-_ C-@ C-? M-? % M-% ? *'
 diff_keys() { # diff_keys INIT LABEL
   local ref ref_out tgt tgt_out other other_out k
   ref_out="$tmp/kref.out" tgt_out="$tmp/ktgt.out" other_out="$tmp/koth.out"
@@ -704,8 +727,11 @@ check_contains 'read: --ansi keeps SGR' "$(printf '\033[31m')red" "$(tp read -t 
 check_absent 'read: plain drops SGR' "$(printf '\033[31m')" "$(tp read -t "$sh" --lines 4)"
 killpane "$sh"
 FAKE_W=10 FAKE_H=10
-nw=$(newpane "stty raw -echo; printf 'abcdefghijklmnopqrstuvwxy\\r\\n'; exec cat >/dev/null" 10 10)
-sleep 0.3
+# The line is printed only once the pane is 10 wide, so it wraps rather than
+# being reflowed after a late resize.
+nw=$(newpane "until [ \"\$(stty size)\" = '10 10' ]; do sleep 0.05; done; stty raw -echo; printf 'abcdefghijklmnopqrstuvwxy\\r\\n'; exec cat >/dev/null" 10 10)
+[ -n "$nw" ] || exit 1
+sleep 0.5
 check 'read: a wrapped line is three rows plain' 3 "$(tp read -t "$nw" | grep -c .)"
 check 'read: --join makes it one line' 'abcdefghijklmnopqrstuvwxy' "$(tp read -t "$nw" --join)"
 killpane "$nw"
@@ -976,10 +1002,12 @@ check_contains 'rg_i3 the default deadline is 110 + 1' 'deadline=111' "$res"
 plog="$tmp/poll.log"
 : >"$plog"
 tps "$plog" send -t "$sh" 'sleep 1.5; echo slow' --enter --wait prompt >/dev/null 2>&1
-full=$(grep -c -- '-S\\? -10000\|-S - -E -' "$plog")
+# History-wide captures start at -S - or -S -10000; the polls' are small.
+full=$(grep -c -- 'capture-pane .*-S \(- \|-10000\)' "$plog")
 polls=$(grep -c 'list-panes' "$plog")
 check 'rg_p15 a wait polls several times' 1 "$([ "$polls" -ge 5 ] && echo 1 || echo 0)"
-check 'rg_p15 but captures the whole history at most twice' 1 "$([ "$full" -le 2 ] && echo 1 || echo 0)"
+check 'rg_p15 the shim saw the history-wide captures' 1 "$([ "$full" -ge 1 ] && echo 1 || echo 0)"
+check 'rg_p15 but they do not grow with the polls (send, parse, read)' 1 "$([ "$full" -le 3 ] && echo 1 || echo 0)"
 killpane "$sh"
 
 # rg_p1: a line 1 wider than the pane.
@@ -1046,6 +1074,39 @@ res=$(env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" send -S "$s2" -t "$(T2 list-panes
 check 'rg_t9 a server killed mid-wait is 66' 66 "$?"
 check_contains 'rg_t9 and reports result=gone' 'result=gone' "$res"
 wait
+# A restarted server that reuses the pane id is another pane: still 66.
+T2 kill-server >/dev/null 2>&1
+T2 new-session -d -s c "env '$tmp/fakesh'"
+sleep 0.5
+reused=$(T2 list-panes -t c -F '#{pane_id}')
+(
+  sleep 1
+  T2 kill-server
+  T2 new-session -d -s d "env '$tmp/fakesh'"
+) &
+res=$(env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" send -S "$s2" -t "$reused" 'sleep 30' --enter --wait prompt --timeout 15 2>&1 >/dev/null)
+check 'rg_t5 a restart mid-wait that reuses the pane id is 66' 66 "$?"
+check_contains 'rg_t5 and reports result=gone' 'result=gone' "$res"
+wait
+T2 kill-server >/dev/null 2>&1
+# Waits that fail before they start still end with a result= line.
+res=$(tp wait -t %99 --prompt 2>&1 >/dev/null)
+check 'wait: a missing pane is 65' 65 "$?"
+check 'wait: and ends with result=error' 'result=error exact=- status=unknown' "$(printf '%s\n' "$res" | tail -n 1)"
+res=$(tp send -t %99 'x' --enter --wait prompt 2>&1 >/dev/null)
+check 'wait: the shortcut on a missing pane ends with result=error' 'result=error exact=- status=unknown' "$(printf '%s\n' "$res" | tail -n 1)"
+sh=$(shellpane)
+# Glued output that ends in [digits] is output, not a status.
+waitp 'parser: glued array[2] is output, not status 2' 0 'printf "array[2]"' --timeout 10
+check_contains 'parser: and stays in the capture' 'array[2]' "$(cat "$tmp/w.out")"
+# Text that starts with a space is still exact.
+waitp 'rg_m18 text with a leading space (exit)' 0 ' echo spaced' --timeout 10
+check_contains 'rg_m18 text with a leading space is exact' 'exact=yes' "$(cat "$tmp/w.err")"
+# The preset identity is the only one: another host's prompt does not end it.
+waitp 'parser: a prompt with another identity does not end the wait' 0 \
+  "printf 'x@other:/ (main)\\n\$ '; sleep 1.5; echo REAL" --timeout 10
+check_contains 'parser: the wait ran to the real prompt' REAL "$(cat "$tmp/w.out")"
+killpane "$sh"
 
 # --- wait --agent ---------------------------------------------------------------
 
@@ -1130,11 +1191,18 @@ check 'rg_i10 an inexact wait --capture exits with the wait result' 0 "$?"
 check_contains 'rg_i10 and reports exact=no with a reason' 'exact=no' "$res"
 killpane "$sh"
 
-# rg_i6: the suite runs the tool with its own bash.
-printf '#!/bin/sh\necho "$0" >>"%s"\nexec bash "$@"\n' "$tmp/bashlog" >"$tmp/logbash"
-chmod +x "$tmp/logbash"
-BASH="$tmp/logbash" tp send -t "$decoy" --help >/dev/null 2>&1 || true
-check 'rg_i6 the tool runs under the suite bash' 1 "$([ -s "$tmp/bashlog" ] && echo 1 || echo 0)"
+# rg_i6: the suite runs the tool with its own "$BASH", never the shebang's
+# bash from PATH (on macOS that would be a newer brew bash, not 3.2).
+mkdir -p "$tmp/nobash"
+printf '#!/bin/sh\nexit 97\n' >"$tmp/nobash/bash"
+chmod +x "$tmp/nobash/bash"
+out=$(env -u TMUX -u TMUX_PANE PATH="$tmp/nobash:$PATH" "$BASH" "$TOOL" mark -S "$sock" -t "$decoy")
+check 'rg_i6 the tool runs under the suite bash, not PATH bash' 0 "$?"
+check_contains 'rg_i6 and works there' 'tp1:' "$out"
+check 'rg_i6 PATH bash would have failed' 97 "$(
+  PATH="$tmp/nobash:$PATH" bash -c true 2>/dev/null
+  echo $?
+)"
 
 printf '%s passed, %s failed\n' "$passes" "$failures"
 exit "$((failures != 0))"

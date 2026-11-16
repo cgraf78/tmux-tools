@@ -200,7 +200,8 @@ $ make test
 - **Output without a final newline** (`printf ok`) leaves bash's next line 1
   glued to it, as in `ok[1] user@host:~`. The `user@host:` that most prompts
   in the capture agree on marks where the prompt starts, so `ok` is still the
-  output and `1` the status.
+  output and `1` the status. A `#` line 2 also starts comments and headings
+  in output, so its line 1 must start with the identity, never glued.
 
 These prompts match:
 

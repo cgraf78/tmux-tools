@@ -379,6 +379,35 @@ EOF
 _assert_eq "rg_p12 parser: a # line 2 is a prompt" \
   '# id -u
 0' "$(parse_print "$tmp/root-prompt.txt")"
+# A # line 2 also starts comments and headings, so its line 1 must start
+# with the identity: an address line in output followed by `# Install` stays
+# output.
+cat >"$tmp/root-in-output.txt" <<'EOF'
+user@test:/repo (main)
+$ cat notes.md
+git@github.com:me/tool.git
+# Install
+run it
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: an address and a # line in output are not a prompt" \
+  '$ cat notes.md
+git@github.com:me/tool.git
+# Install
+run it' "$(parse_print "$tmp/root-in-output.txt")"
+cat >"$tmp/root-glued.txt" <<'EOF'
+user@test:/repo (main)
+$ cat deploy.txt
+rsync -a build/ user@test:/srv/app
+# restart
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: the identity inside output before a # line is not a prompt" \
+  '$ cat deploy.txt
+rsync -a build/ user@test:/srv/app
+# restart' "$(parse_print "$tmp/root-glued.txt")"
 cat >"$tmp/status-prompt.txt" <<'EOF'
 user@test:/repo (main)
 $ false

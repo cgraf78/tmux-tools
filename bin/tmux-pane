@@ -13,6 +13,8 @@
 # file explains why the code looks the way it does.
 
 set -u
+# Key lists are split on whitespace; a name like ? or KP* must never glob.
+set -f
 
 usage() {
   cat >&2 <<'EOF'
@@ -29,6 +31,7 @@ usage: tmux-pane send -t %N [-L NAME | -S SOCKET] [ACTION...] [--enter] [--type]
        tmux-pane mark -t %N [SERVER]
 ACTION is TEXT, - (stdin), or --keys 'KEY [KEY...]' (-k), in argv order.
 EOF
+  wait_result_error 64
   exit 64
 }
 
@@ -59,7 +62,19 @@ EOF
 
 die() { # die STATUS MESSAGE
   printf 'tmux-pane: %s\n' "$2" >&2
+  wait_result_error "$1"
   exit "$1"
+}
+
+# Every wait ends with one result= line, also when it fails before it can
+# start (a bad target, a failed send).
+wait_pending=0
+wait_result_error() { # wait_result_error STATUS
+  [ "$wait_pending" = 1 ] || return 0
+  wait_pending=0
+  local kind=error
+  [ "$1" != 66 ] || kind=gone
+  printf 'result=%s exact=- status=unknown\n' "$kind" >&2
 }
 
 # --- process state and cleanup ------------------------------------------------
@@ -193,14 +208,14 @@ has_paste_S() {
 # Fields are separated by the unit separator: a whitespace IFS such as tab
 # would merge the empty fields unset marks produce.
 tab=$(printf '\037')
-geom_format="#{pane_id}${tab}#{pane_dead}${tab}#{pane_in_mode}${tab}#{synchronize-panes}${tab}#{history_size}${tab}#{history_limit}${tab}#{cursor_x}${tab}#{cursor_y}${tab}#{pane_width}${tab}#{pane_height}${tab}#{alternate_on}${tab}#{scroll-on-clear}${tab}#{pane_key_mode}${tab}#{keypad_cursor_flag}${tab}#{keypad_flag}${tab}#{pane_input_off}${tab}#{@term_busy}${tab}#{@term_busy_seq}${tab}#{@term_notify_pending}${tab}#{window_activity}${tab}#{history_collected}${tab}#{history_generation}${tab}#{pane_output_generation}${tab}#{pane_title}"
+geom_format="#{pane_id}${tab}#{pane_dead}${tab}#{pane_in_mode}${tab}#{synchronize-panes}${tab}#{history_size}${tab}#{history_limit}${tab}#{cursor_x}${tab}#{cursor_y}${tab}#{pane_width}${tab}#{pane_height}${tab}#{alternate_on}${tab}#{scroll-on-clear}${tab}#{pane_key_mode}${tab}#{keypad_cursor_flag}${tab}#{keypad_flag}${tab}#{pane_input_off}${tab}#{@term_busy}${tab}#{@term_busy_seq}${tab}#{@term_notify_pending}${tab}#{window_activity}${tab}#{history_collected}${tab}#{history_generation}${tab}#{pane_output_generation}${tab}#{pid}.#{start_time}${tab}#{pane_title}"
 
 # Parse one geometry row into g_* variables. Fails if it is not our pane.
 parse_geom() {
   local id rest
   IFS="$tab" read -r id g_dead _ g_sync g_hsize g_hlimit g_cx g_cy g_w g_h g_alt \
     g_soc g_keymode g_kcf g_kf g_inputoff g_busy g_seq g_pending g_activity \
-    g_collected g_generation _ g_title <<<"$1" || true
+    g_collected g_generation _ g_srv g_title <<<"$1" || true
   [ "$id" = "$pane" ] || return 1
   for rest in "$g_hsize" "$g_hlimit" "$g_cx" "$g_cy" "$g_w" "$g_h"; do
     is_number "$rest" || return 1
@@ -496,10 +511,15 @@ locate() { # locate WANT_OUTPUT CAPTURE-FLAGS...
       line = rows[k + 1]
       pre = rtrim(headcp(line, cx))
       rest = substr(line, length(headcp(line, cx)) + 1)
-      if (substr(rest, 1, 1) == " ") rest = substr(rest, 2)
       preok = (hash(pre) == fppre) ? 1 : 0
       echook = 1
-      if (elen > 0) echook = (hash(headcp(rest, elen)) == fpecho) ? 1 : 0
+      if (elen > 0) {
+        # The echo follows the prefix, or one space after it; text that
+        # itself starts with a space matches the first way.
+        echook = (hash(headcp(rest, elen)) == fpecho) ? 1 : 0
+        if (!echook && substr(rest, 1, 1) == " ")
+          echook = (hash(headcp(substr(rest, 2), elen)) == fpecho) ? 1 : 0
+      }
       print topok, aboveok, preok, echook
     }')
   case $verdict in
@@ -601,11 +621,17 @@ key_split() { # key_split NAME: sets k_c k_m k_s k_base; fails for unknown names
       return 0
       ;;
   esac
-  # One character: printable ASCII or one UTF-8 character.
-  [ "${#k_base}" -eq 1 ] && case $k_base in [[:print:]]) return 0 ;; esac
-  [ "$(printf '%s' "$k_base" | LC_ALL=C wc -c | tr -d ' ')" -le 4 ] &&
-    [ "$(printf '%s' "$k_base" | LC_ALL=en_US.UTF-8 awk '{print length($0)}' 2>/dev/null)" = 1 ] &&
-    return 0
+  # One character: printable ASCII or one UTF-8 character. The UTF-8 check
+  # reads the bytes, since neither the locale nor awk can be relied on to
+  # count characters.
+  local hex
+  hex=$(printf '%s' "$k_base" | od -An -tx1 | tr -d ' \n')
+  case $hex in
+    2[0-9a-f] | [3-6][0-9a-f] | 7[0-9a-e]) return 0 ;;
+    c[2-9a-f][89ab][0-9a-f] | d[0-9a-f][89ab][0-9a-f]) return 0 ;;
+    e[0-9a-f][89ab][0-9a-f][89ab][0-9a-f]) return 0 ;;
+    f[0-4][89ab][0-9a-f][89ab][0-9a-f][89ab][0-9a-f]) return 0 ;;
+  esac
   return 1
 }
 key_class() { # after key_split: cursor | tilde | fn | plain | kp | char
@@ -712,7 +738,7 @@ key_bytes() { # key_bytes CKM KPAD: prints a printf format string
           *) bytes=$(printf '\\%03o' $(($(printf '%d' "'$k_base") - 96))) ;;
         esac
       else
-        bytes=$(printf '%s' "$k_base" | sed 's/[\\%]/\\&/g')
+        bytes=$(printf '%s' "$k_base" | sed 's/\\/\\\\/g; s/%/%%/g')
       fi
       [ "$k_m" = 0 ] || bytes="$e$bytes"
       printf '%s' "$bytes"
@@ -726,19 +752,22 @@ key_bytes() { # key_bytes CKM KPAD: prints a printf format string
 # turn CRLF into LF (a lone CR is the caller's text), and with bracketed
 # paste strip bracket markers that would end the paste early. Input that
 # contains NUL is left byte-for-byte alone: the line tools cannot carry it.
-prepare_segment() { # prepare_segment FILE BRACKETED
-  local f=$1 size last nul_free cr esc ended_lf=0
+prepare_segment() { # prepare_segment FILE BRACKETED DROP_LF
+  local f=$1 size last nul_free cr esc ended_lf=0 drop=0
   size=$(LC_ALL=C wc -c <"$f")
   size=$((size + 0))
   [ "$size" -gt 0 ] || return 0
   last=$(tail -c 1 "$f" | od -An -tx1 | tr -d ' \n')
   [ "$last" != 0a ] || ended_lf=1
+  # Standard input loses exactly one trailing LF; TEXT arguments keep theirs.
+  [ "$ended_lf" = 0 ] || [ "$3" = 0 ] || drop=1
   nul_free=$(LC_ALL=C tr -d '\000' <"$f" | LC_ALL=C wc -c)
   if [ "$((nul_free + 0))" -eq "$size" ]; then
     # sed's $ also matches an unterminated last line, where a trailing CR is
     # a lone CR and must stay, and BSD sed may add the missing LF back. So an
-    # unterminated text gets a sentinel LF and its last line is skipped; then
-    # every text ends in exactly one LF of ours or its own, dropped below.
+    # unterminated text gets a sentinel LF, dropped again below, and its last
+    # line is skipped. A CR before the final LF goes too, so a final CRLF
+    # counts as one line end.
     cr=$(printf '\r')
     esc=$(printf '\033')
     if [ "$ended_lf" = 1 ]; then
@@ -746,6 +775,7 @@ prepare_segment() { # prepare_segment FILE BRACKETED
     else
       printf '\n' >>"$f"
       LC_ALL=C sed "\$!s/$cr\$//" "$f" >"$f.t"
+      drop=1
     fi
     if [ "$2" = 1 ]; then
       LC_ALL=C sed "s/$esc\\[20[01]~//g" "$f.t" >"$f"
@@ -753,13 +783,19 @@ prepare_segment() { # prepare_segment FILE BRACKETED
       mv "$f.t" "$f"
     fi
     rm -f "$f.t"
-    ended_lf=1
   fi
-  # Exactly one trailing LF goes: CRLF counts as one line end, so a final
-  # CRLF leaves nothing behind either.
-  if [ "$ended_lf" = 1 ]; then
-    size=$(LC_ALL=C wc -c <"$f")
-    head -c "$((size - 1))" "$f" >"$f.t" && mv "$f.t" "$f"
+  [ "$drop" = 0 ] || drop_last_byte "$f"
+}
+
+# An emptied file is written directly, not with head -c 0.
+drop_last_byte() { # drop_last_byte FILE
+  local size
+  size=$(LC_ALL=C wc -c <"$1")
+  size=$((size + 0))
+  if [ "$size" -le 1 ]; then
+    : >"$1"
+  else
+    head -c "$((size - 1))" "$1" >"$1.t" && mv "$1.t" "$1"
   fi
 }
 
@@ -814,6 +850,7 @@ cmd_send() {
         shift
         ;;
       --wait)
+        wait_pending=1
         [ $# -ge 2 ] || usage
         wait_mode=$2
         shift 2
@@ -862,6 +899,7 @@ cmd_send() {
         acts+=(stdin) vals+=(-)
         shift
         ;;
+      -h | --help) help ;;
       -?*) usage ;;
       *)
         if [ "$have_text" = 1 ]; then textbuf="$textbuf $1"; else textbuf=$1 have_text=1; fi
@@ -904,16 +942,20 @@ cmd_send() {
     case ${acts[$i]} in
       text | stdin)
         seg="$work/seg$i"
-        if [ "${acts[$i]}" = stdin ]; then cat >"$seg"; else printf '%s' "${vals[$i]}" >"$seg"; fi
-        [ "${acts[$i]}" = text ] && printf '\n' >>"$seg"
-        prepare_segment "$seg" "$([ "$type" = 1 ] && echo 0 || echo 1)"
+        if [ "${acts[$i]}" = stdin ]; then
+          cat >"$seg"
+          prepare_segment "$seg" "$([ "$type" = 1 ] && echo 0 || echo 1)" 1
+        else
+          printf '%s' "${vals[$i]}" >"$seg"
+          prepare_segment "$seg" "$([ "$type" = 1 ] && echo 0 || echo 1)" 0
+        fi
         if [ "$first" = 1 ]; then
           # shellcheck disable=SC2046 # Two fields, split on purpose.
           set -- $(echo_prefix "$seg" "$(((g_w - g_cx - 1) < 64 ? (g_w - g_cx - 1) : 64))")
           elen=$1 fpecho=$2
         fi
         load_buffer "$seg"
-        qcmds+=(\; paste-buffer "${paste_flags[@]}" -d -b "$loaded" -t "$pane")
+        qcmds+=(\; paste-buffer ${paste_flags[@]+"${paste_flags[@]}"} -d -b "$loaded" -t "$pane")
         n_text=$((n_text + 1))
         ;;
       keys)
@@ -1112,6 +1154,7 @@ cmd_read() {
         ansi=1
         shift
         ;;
+      -h | --help) help ;;
       *) usage ;;
     esac
   done
@@ -1163,6 +1206,11 @@ poll_once() { # poll_once PROMPT_MODE
   local oldcy=${g_cy:-}
   parse_geom "$row" || return 66
   [ "$g_dead" != 1 ] || return 66
+  # A restarted server can reuse the pane id; that is another pane.
+  if [ -n "${wait_srv:-}" ] && [ "$g_srv" != "$wait_srv" ]; then
+    gone_reason='the server restarted'
+    return 66
+  fi
   p_state=none p_screen=''
   if [ "$1" = 1 ]; then
     # A capture taken with an older cursor row may end above the cursor.
@@ -1220,6 +1268,7 @@ wait_end() { # wait_end EXIT KIND STATUS [REASON]
 
 run_wait() { # run_wait MODE HAVE CAPTURE TIMEOUT START SETTLE LINES JOIN ANSI MARKER
   w_mode=$1 w_have=$2 w_capture=$3 w_lines=$7 w_join=$8 w_ansi=$9 w_marker=${10:-}
+  if [ "$w_have" = 1 ]; then wait_srv=$m_srv; else wait_srv=$(server_id) || wait_srv=''; fi
   local timeout=$4 start_timeout=$5 settle=$6
   local t0=$SECONDS deadline=0 sdeadline
   [ "$timeout" = 0 ] || deadline=$((t0 + timeout + 1))
@@ -1338,6 +1387,7 @@ wait_prompt() { # wait_prompt DEADLINE SETTLE
 
 cmd_wait() {
   local mode='' since='' capture=0 lines='' join=0 ansi=0 timeout=110 start_timeout=10 settle=1
+  wait_pending=1
   while [ $# -gt 0 ]; do
     case $1 in
       -t)
@@ -1401,6 +1451,7 @@ cmd_wait() {
         settle=$2
         shift 2
         ;;
+      -h | --help) help ;;
       *) usage ;;
     esac
   done
@@ -1438,6 +1489,7 @@ cmd_mark() {
         set_server "$1" "${2-}"
         shift 2
         ;;
+      -h | --help) help ;;
       *) usage ;;
     esac
   done
@@ -1472,7 +1524,10 @@ set_server() { # set_server -L|-S VALUE
 # newline, so line 1 can arrive glued to that output (`ok[1] me@host:~`). The
 # identity tells the two apart: it is the -v ident preset, else the identity
 # most confirmed prompts agree on. Glued output changes the prefix but never
-# the identity, so the most frequent one is the real one.
+# the identity, so the most frequent one is the real one. A preset identity
+# is the only one accepted; without one, any anchored line 1 also counts.
+# A `#` line 2 also starts comments and headings in output, so its line 1
+# must start with the identity (after an optional `[N] `), never glued.
 #
 # Variables (-v):
 #   mode     blocks (default), state or ident
@@ -1522,20 +1577,22 @@ function consensus(   i, t, u, best, bs, sc, distinct) {
 }
 # Record i is a line 1 when line 2 follows it. Sets glue (output text glued
 # before the identity) and st (its status) for it.
-function prompt1(i,   s, p, t) {
+function prompt1(i,   s, p, t, root) {
   if (i < 1 || i >= NR || !line2(rec[i + 1])) return 0
   s = rec[i]
+  root = (substr(rec[i + 1], 1, 1) == "#")
   p = (id != "") ? index(s, id) : 0
   if (p > 0) {
     t = substr(s, 1, p - 1)
-  } else if (anchored(s) != "") {
+    if (root && t !~ /^(\[[0-9]+\] )?$/) return 0
+  } else if (ident == "" && anchored(s) != "" && !(root && id != "")) {
     t = ""
-    if (match(s, /^\[[0-9]+\]/)) t = substr(s, 1, RLENGTH) " "
+    if (match(s, /^\[[0-9]+\] /)) t = substr(s, 1, RLENGTH)
   } else {
     return 0
   }
   st = 0
-  if (match(t, /\[[0-9]+\] ?$/)) {
+  if (match(t, /\[[0-9]+\] $/)) {
     st = substr(t, RSTART + 1)
     sub(/\].*/, "", st)
     t = substr(t, 1, RSTART - 1)
