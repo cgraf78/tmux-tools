@@ -87,6 +87,17 @@ export MOCK_CALLS=$tmp/calls MOCK_STATE=$tmp/state MOCK_CAPTURE=$tmp/capture
 export MOCK_CLIENTS=$tmp/clients MOCK_HOLDERS=$tmp/holders MOCK_PS=$tmp/ps
 export MOCK_FZF_ARGS=$tmp/fzf-args MOCK_FZF_OFFERED=$tmp/fzf-offered MOCK_PICK='' MOCK_CHOICE='' MOCK_FZF_STATUS='' MOCK_FZF_DETACH=''
 SOCKET=/private/test.sock
+# The picker's temporary directories go here, so the suite can see what is
+# left behind.
+export TMPDIR=$tmp/scratch
+mkdir "$TMPDIR"
+leftovers() {
+  local found=0 entry
+  for entry in "$TMPDIR"/tmux-agent-picker.*; do
+    [ -e "$entry" ] && found=$((found + 1))
+  done
+  printf '%s' "$found"
+}
 CLIENT=/dev/pts/7
 failures=0
 check() {
@@ -327,6 +338,7 @@ jumped() {
 printf '%s\n' '%2 @2 $1 1' '%2 @2 $5 0' >"$MOCK_HOLDERS"
 output=$(pick 'own session' 2>&1)
 check 'a jump prints nothing' '' "$output"
+check 'a jump leaves no temporary directory' 0 "$(leftovers)"
 check 'in its own session the pane is selected before its window' \
   "-S $SOCKET select-pane -t \$1:@2.%2 ; select-window -t \$1:@2.%2" "$(jumped)"
 args=$(cat "$MOCK_FZF_ARGS")
@@ -462,6 +474,7 @@ status=0
 output=$(MOCK_JUMP_FAIL=1 pick 'own session' 2>&1) || status=$?
 check 'a failed jump to a pane still there is an error' 1 "$status"
 check 'a failed jump says why' "tmux-agent-picker: could not jump to %2: can't find window" "$output"
+check 'a failure leaves no temporary directory' 0 "$(leftovers)"
 status=0
 output=$(MOCK_JUMP_FAIL=1 MOCK_PANE_GONE=1 pick 'own session' 2>&1) || status=$?
 check 'a failed jump to a pane closed since the pick exits 0' 0 "$status"
@@ -510,6 +523,14 @@ check 'a failure after a detach exits 0' 0 "$status"
 case $output in *'tmux-agent-picker:'*) result=$output ;; *) result=quiet ;; esac
 check 'a failure after a detach reports nothing' quiet "$result"
 check 'a failure after a detach sends no message' '' "$(client_messages)$(grep -F ' display-message tmux' "$MOCK_CALLS")"
+# A client of the same name in control mode is not the one that pressed the
+# key: a failure for it is as quiet.
+printf '$1 1 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
+status=0
+output=$(MOCK_FZF_STATUS=2 pick 'own session' 2>&1) || status=$?
+check 'a failure once the client is in control mode exits 0' 0 "$status"
+case $output in *'tmux-agent-picker:'*) result=$output ;; *) result=quiet ;; esac
+check 'a failure once the client is in control mode reports nothing' quiet "$result"
 printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
 # Any other failing exit passes the same guard: here mktemp fails.
 status=0
@@ -526,6 +547,13 @@ printf '$1 0 %s\n' "$CLIENT" >"$MOCK_CLIENTS"
 status=0
 output=$(MOCK_GARBLE=1 listing 2>&1) || status=$?
 check 'a snapshot without its R line is an error' 1 "$status"
+# --list (every ctrl-r) makes no temporary directory: it works where none
+# could be made.
+status=0
+TMPDIR=$tmp/missing listing >/dev/null 2>&1 || status=$?
+check '--list makes no temporary directory' 0 "$status"
+listing >/dev/null 2>&1
+check '--list leaves no temporary directory' 0 "$(leftovers)"
 check 'a snapshot without its R line says so' \
   'tmux-agent-picker: tmux answered the snapshot with something unexpected' "$output"
 

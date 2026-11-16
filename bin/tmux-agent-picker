@@ -72,17 +72,32 @@ tm() {
   tmux -S "$socket" "$@"
 }
 
-# Is the client gone? Only when tmux answers and does not list it attached
-# (outside control mode); a tmux that cannot answer is not taken as an answer.
-client_gone() {
-  local clients sid control name
-  [[ -n $client ]] || return 1
-  clients=$(tm list-clients -F '#{session_id} #{client_control_mode} #{client_name}' 2>/dev/null) ||
-    return 1
+# Look the client up by its exact name. Returns 0 while it is attached
+# outside control mode, with its session id in $own; 1 when tmux lists it
+# otherwise or not at all; 2 when tmux cannot answer, with tmux's words in
+# $reply and its status in $reply_status.
+find_client() {
+  local sid control name
+  own='' reply_status=0
+  reply=$(tm list-clients -F '#{session_id} #{client_control_mode} #{client_name}' 2>&1) ||
+    reply_status=$?
+  ((reply_status == 0)) || return 2
   while read -r sid control name; do
-    [[ $name == "$client" && $control == 0 ]] && return 1
-  done <<<"$clients"
-  return 0
+    if [[ $name == "$client" && $control == 0 ]] && valid_id '$' "$sid"; then
+      own=$sid
+      return 0
+    fi
+  done <<<"$reply"
+  return 1
+}
+
+# Is the client gone? Only when tmux answers without it; a tmux that cannot
+# answer is not taken as an answer, and preview mode has no client.
+client_gone() {
+  local status=0
+  [[ -n $client ]] || return 1
+  find_client || status=$?
+  ((status == 1))
 }
 
 # The one guard on a failing exit. tmux 3.2a crashes its server when a
@@ -388,9 +403,11 @@ fi
 # no default shell changes its meaning, and fzf runs its preview and reload
 # with SHELL=sh for the same reason. fzf exits 1 with no match and 130 when
 # cancelled, and 129 or 143 when the popup closes under it (a detach, or
-# display-popup -C); any other status is an error. Older fzf draws its screen
-# on stderr, so its error text cannot be captured: instead the popup stays
-# open on it until Enter.
+# display-popup -C): quiet_statuses, which the popup's sh and the bash below
+# both read. Any other status is an error. Older fzf draws its screen on
+# stderr, so its error text cannot be captured: instead the popup stays open
+# on it until Enter.
+quiet_statuses='1 129 130 143'
 preview_command="'$self' --socket '$socket' --preview {1}"
 reload="ctrl-r:reload('$self' --socket '$socket' --list --client '$client')+refresh-preview"
 picker="env SHELL=sh fzf --ansi --no-sort --reverse --no-multi --delimiter='\\t' --with-nth=4.."
@@ -400,7 +417,7 @@ picker+=" --preview-window='down,60%,border-top,nowrap' --bind $(shell_quote "$r
 picker+=" <'$work/rows' >'$work/choice'"
 picker+="; status=\$?; echo \"\$status\" >'$work/status'"
 # shellcheck disable=SC2016 # The popup's sh expands these.
-picker+='; case $status in 0 | 1 | 129 | 130 | 143) ;; *) printf "\nfzf failed with status %s. Press Enter to close.\n" "$status"; read -r _ ;; esac'
+picker+='; case " 0 '"$quiet_statuses"' " in *" $status "*) ;; *) printf "\nfzf failed with status %s. Press Enter to close.\n" "$status"; read -r _ ;; esac'
 popup_status=0
 tm display-popup -c "$client" -E -w 90% -h 85% "sh -c $(shell_quote "$picker")" \
   2>"$work/error" || popup_status=$?
@@ -409,19 +426,18 @@ tm display-popup -c "$client" -E -w 90% -h 85% "sh -c $(shell_quote "$picker")" 
 # display-popup -C, and that is nothing to report. Only an error tmux printed
 # means the popup could not open.
 fzf_status=''
-[[ ! -s "$work/status" ]] || fzf_status=$(cat "$work/status")
+[[ ! -s "$work/status" ]] || fzf_status=$(<"$work/status")
 if [[ -z $fzf_status ]]; then
   if ((popup_status != 0)) && [[ -s "$work/error" ]]; then
-    error=$(cat "$work/error")
+    error=$(<"$work/error")
     fail "tmux could not open the popup (status $popup_status): ${error//$'\n'/ }"
   fi
   exit 0
 fi
-case $fzf_status in
-  0) ;;
-  1 | 129 | 130 | 143) exit 0 ;;
-  *) fail "fzf failed with status $fzf_status" ;;
-esac
+if [[ $fzf_status != 0 ]]; then
+  case " $quiet_statuses " in *" $fzf_status "*) exit 0 ;; esac
+  fail "fzf failed with status $fzf_status"
+fi
 pane='' window='' session=''
 IFS=$'\t' read -r pane window session _ <"$work/choice" || true
 # The chosen line is one of the rows rendered above; anything else means fzf
@@ -430,18 +446,15 @@ if ! valid_id % "$pane" || ! valid_id @ "$window" || ! valid_id '$' "$session"; 
   fail 'unexpected choice from fzf'
 fi
 
-# Find the exact client by name: display-message -c answers for another
-# client, and tmux 3.2 takes no argument to it. Keep its current session.
-ask tm list-clients -F '#{session_id} #{client_control_mode} #{client_name}'
-own=''
-attached=false
-while read -r sid control name; do
-  [[ $name == "$client" ]] || continue
-  [[ $control == 0 ]] || exit 0
-  own=$sid
-  attached=true
-done <<<"$reply"
-[[ $attached == true ]] && valid_id '$' "$own" || exit 0
+# Find the exact client as it is now, and keep its current session:
+# display-message -c answers for another client, and tmux 3.2 takes no
+# argument to it. A client that has gone or turned control mode gets nothing.
+client_status=0
+find_client || client_status=$?
+case $client_status in
+  1) exit 0 ;;
+  2) fail "tmux failed (status $reply_status): ${reply//$'\n'/ }" ;;
+esac
 
 # Where does the pane live now? Its session may have been killed while a
 # grouped peer still holds it, or it may have moved to a new window.
@@ -498,7 +511,7 @@ fi
 # closed since the pick is only reported.
 if ! tm "${jump[@]}" 2>"$work/error"; then
   if tm display-message -p -t "$pane" '#{pane_id}' >/dev/null 2>&1; then
-    error=$(cat "$work/error")
+    error=$(<"$work/error")
     fail "could not jump to $pane: ${error//$'\n'/ }"
   fi
   notice 'That pane has closed'

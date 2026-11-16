@@ -72,19 +72,14 @@ earlier history.
   `$N`), never names, and every command of a jump names the pane, with
   `select-pane` before `select-window` in the client's own session, so no
   bystander pane is made current (and acknowledged) on the way.
-- The picker fails loudly: a failure exits 1 through `fail`, which also
-  shows the reason on the client, because `run-shell` discards stderr. Only
-  absences (cancel, no rows, no `fzf`, a pane closed after the pick, a gone
-  client, a popup closed by a detach or `display-popup -C`) exit 0. Every
-  failing exit first asks `client_gone`, in `fail` and in the EXIT trap, and
-  exits 0 quietly when the client has gone: tmux 3.2a crashes its server when
-  a binding's blocking `run-shell` exits non-zero after its client detached.
-  Read fzf's status file before the popup's status, which is 129 for a
-  detach. Query tmux through `ask`, never with `|| true`, so a lost
-  server is not read as an empty answer. `message` falls back to an
-  untargeted message only on tmux 3.2's `display-message -c` usage error,
-  never for a client that is gone. Never redirect fzf's stderr: fzf 0.27
-  draws its screen there; its exit status goes to a file instead.
+- The picker fails loudly (the man page's DIAGNOSTICS owns the list).
+  Every failure goes through `fail`, and every tmux query through `ask`
+  (or `find_client`), never with `|| true`. `client_gone` runs in `fail`,
+  before any message, and in the EXIT trap; the trap's comment gives the
+  tmux 3.2a reason. Read fzf's status file before the popup's status, and
+  keep the quiet fzf statuses in `quiet_statuses` only. `message` falls back
+  to an untargeted message only on tmux 3.2's `display-message -c` usage
+  error. Never redirect fzf's stderr: fzf 0.27 draws its screen there.
 - `required_options` in the script is the one list of required config
   options; the README's Required column and the man page's required list
   follow it, as `test/tmux-tools-test` checks. An unset required option is

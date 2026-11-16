@@ -279,17 +279,9 @@ an empty list; set one to `0` to turn it off. `man tmux-agent-picker` has a
 complete example config, the one the tests run, and
 `tmux-agent-picker --socket SOCKET --list` prints the rows.
 
-Failures are loud: the picker exits 1 and shows the reason on the client as
-well as on stderr, since `run-shell` discards stderr. That covers a tmux
-query that fails or answers with something unexpected, an unset required
-option, a quote in a path the popup's command line quotes, a popup tmux could
-not open, an fzf error (the popup stays open on it until Enter), a chosen line
-that is not a row, and a jump that fails while the pane is still there.
-Cancelling, no rows, a missing `fzf`, a pane that closed after the pick, and a
-detach or `display-popup -C` while the popup is open are not failures; nor is
-any failure once the client has gone, which exits 0 quietly (tmux 3.2a
-crashes its server when a binding's blocking `run-shell` fails after its
-client detached).
+Failures are loud: the picker exits 1 and says why on the client and on
+stderr, while cancelling or detaching is not a failure; DIAGNOSTICS in
+`man tmux-agent-picker` lists both.
 
 ### `term-notify-sound` and `term-pane-mark`
 
