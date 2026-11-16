@@ -28,9 +28,10 @@ optionally preceded by an exit code such as
 .BR "[0] " ;
 the user name may contain only letters, digits, and underscores. The line
 directly below it is
-.B $
+.BR $ ,
+.B %
 or
-.BR % ,
+.BR # ,
 optionally followed by a space and the command, for example:
 .PP
 .RS
@@ -48,6 +49,17 @@ PS1='[$?] \eu@\eh:\ew\en$ '
 PROMPT=$'[%?] %n@%m:%~\en%% '
 .fi
 .RE
+.PP
+Output without a final newline, such as
+.BR "printf ok" ,
+leaves bash's next first line glued to it:
+.BR "ok[1] user@host:~" .
+The parser takes the identity
+.B user@host:
+that most prompts in the capture agree on, so the text before it is the
+command's output and the status is still read.
+.BR tmux-pane (1)
+carries the same parser.
 .PP
 If no complete command block is found, the command displays a
 tmux message and exits successfully so keybindings do not fail noisily. With
@@ -111,4 +123,5 @@ The arguments were invalid. The command writes a usage diagnostic before any
 tmux or clipboard command is invoked.
 .SH SEE ALSO
 .BR tmux (1),
-.BR term-notify-sound (1)
+.BR term-notify-sound (1),
+.BR tmux-pane (1)

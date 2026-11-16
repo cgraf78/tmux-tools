@@ -62,66 +62,135 @@ capture_args=(-p -S -10000)
 [[ -z "$pane" ]] || capture_args+=(-t "$pane")
 content=$(tmux capture-pane "${capture_args[@]}")
 
-output=$(printf '%s\n' "$content" | awk -v count="$count" '
-# Two-line prompt detection:
-#   Line 1: [optional exit code] user@host:path (git info) timing
-#   Line 2: $ command
+# BEGIN prompt-parser
+# Command-block parser for the two-line prompt (see README "Prompt format").
+# tmux-copy-last-output and tmux-pane carry this region byte for byte; a test
+# compares the two copies, so change both together.
 #
-# Buffer line-1 candidates so output lines that happen to match the
-# user@host: pattern are not silently dropped.
-
-# Flush an unconfirmed line-1 candidate back into regular output.
-function flush_candidate() {
-  if (cand_nr > 0) {
-    lines[cand_nr] = cand_line
-    cand_nr = 0
+# Input is a pane capture, one row or joined line per record. A prompt is a
+# line 1 followed by a line 2 (`$`, `%` or `#`, then a space or nothing).
+# Line 1 holds the identity `user@host:` and, after a failure, a leading
+# `[N] ` status. Bash prints a prompt right after output that lacks a final
+# newline, so line 1 can arrive glued to that output (`ok[1] me@host:~`). The
+# identity tells the two apart: it is the -v ident preset, else the identity
+# most confirmed prompts agree on. Glued output changes the prefix but never
+# the identity, so the most frequent one is the real one.
+#
+# Variables (-v):
+#   mode     blocks (default), state or ident
+#   count    blocks: how many of the last finished blocks to print
+#   ident    the identity to look for; empty means use the consensus
+#   from     blocks: print every block whose line 2 is at or after this record
+#   first2   blocks: record 1 is a line 2 whose line 1 is not in the capture
+#   status   blocks: end with a line holding \034 and the last block status
+# Output:
+#   blocks   each block as its `$ command` line, then its output; blocks are
+#            separated by an empty line. Exits 1 when no block is complete.
+#   state    `prompt N` when the last record is a line 2 under a line 1
+#            whose status is N, else `none`
+#   ident    the consensus identity, or nothing
+# shellcheck disable=SC2016 # An awk program: its $ are awk syntax.
+prompt_parser='
+function line2(s) { return s ~ /^[$%#]($| )/ }
+# The identity an anchored line 1 starts with, or "".
+function anchored(s,   t) {
+  if (!match(s, /^(\[?[0-9]*\]? ?)?[a-zA-Z0-9_]+@[a-zA-Z0-9._-]+:/)) return ""
+  t = substr(s, 1, RLENGTH)
+  sub(/^(\[?[0-9]*\]? ?)?/, "", t)
+  return t
+}
+# The identity most confirmed prompts agree on. Glue can only prepend word
+# characters (`ok` + `me@host:` still matches the anchored pattern), so each
+# candidate scores the prompts whose identity ends with it, and the shortest
+# best scorer wins. It must score twice, or be the only candidate.
+function consensus(   i, t, u, best, bs, sc, distinct) {
+  distinct = 0
+  for (i = 1; i < NR; i++) {
+    if (!line2(rec[i + 1])) continue
+    t = anchored(rec[i])
+    if (t == "") continue
+    if (!(t in cnt)) distinct++
+    cnt[t]++
   }
-}
-
-# Match prompt line 1: optional [N] then user@host:
-/^(\[?[0-9]*\]? ?)?[a-zA-Z0-9_]+@[a-zA-Z0-9._-]+:/ {
-  flush_candidate()
-  cand_nr = NR
-  cand_line = $0
-  next
-}
-
-# Match prompt line 2: $ (bash) or % (zsh), with optional command,
-# immediately after line 1.  tmux trims trailing whitespace, so a bare
-# prompt with no command appears as just "$" or "%".
-/^[$%]($| )/ {
-  if (cand_nr > 0 && NR == cand_nr + 1) {
-    n++
-    prompts[n] = cand_nr
-    cmd_lines[n] = (length($0) > 2) ? substr($0, 3) : ""
-    shell_char[n] = substr($0, 1, 1)
-    cand_nr = 0
-    next
+  best = ""; bs = 0
+  for (t in cnt) {
+    sc = 0
+    for (u in cnt)
+      if (length(u) >= length(t) && substr(u, length(u) - length(t) + 1) == t) sc += cnt[u]
+    if (sc > bs || (sc == bs && length(t) < length(best))) { bs = sc; best = t }
   }
-  # Not preceded by a line-1 match — treat as regular output
-  flush_candidate()
+  if (best == "" || (bs < 2 && distinct > 1)) return ""
+  return best
 }
-
-{ lines[NR] = $0 }
-
+# Record i is a line 1 when line 2 follows it. Sets glue (output text glued
+# before the identity) and st (its status) for it.
+function prompt1(i,   s, p, t) {
+  if (i < 1 || i >= NR || !line2(rec[i + 1])) return 0
+  s = rec[i]
+  p = (id != "") ? index(s, id) : 0
+  if (p > 0) {
+    t = substr(s, 1, p - 1)
+  } else if (anchored(s) != "") {
+    t = ""
+    if (match(s, /^\[[0-9]+\]/)) t = substr(s, 1, RLENGTH) " "
+  } else {
+    return 0
+  }
+  st = 0
+  if (match(t, /\[[0-9]+\] ?$/)) {
+    st = substr(t, RSTART + 1)
+    sub(/\].*/, "", st)
+    t = substr(t, 1, RSTART - 1)
+  }
+  glue = t
+  return 1
+}
+{ rec[NR] = $0 }
 END {
-  flush_candidate()
+  if (mode == "ident") {
+    t = consensus()
+    if (t != "") print t
+    exit 0
+  }
+  id = (ident != "") ? ident : consensus()
+  if (mode == "state") {
+    if (NR >= 2 && line2(rec[NR]) && prompt1(NR - 1)) print "prompt " st
+    else print "none"
+    exit 0
+  }
+  n = 0
+  if (first2 == 1 && NR >= 1 && line2(rec[1])) {
+    n = 1; l2[1] = 1; pglue[1] = ""; pst[1] = 0
+  }
+  for (i = 1; i < NR; i++) {
+    if (n > 0 && i <= l2[n]) continue
+    if (prompt1(i)) {
+      n++; l2[n] = i + 1; pglue[n] = glue; pst[n] = st; l1[n] = i
+    }
+  }
   if (n < 2) exit 1
-  start = n - count
-  if (start < 1) start = 1
+  if (from != "") {
+    start = 0
+    for (c = 1; c < n; c++) if (l2[c] >= from + 0) { start = c; break }
+    if (start == 0) exit 1
+  } else {
+    start = n - count
+    if (start < 1) start = 1
+  }
   first = 1
   for (c = start; c < n; c++) {
     if (!first) print ""
     first = 0
-    cmd = cmd_lines[c]
-    if (cmd != "") print shell_char[c] " " cmd
-    out_start = prompts[c] + 2
-    out_end = prompts[c+1] - 1
-    for (i = out_start; i <= out_end; i++)
-      if (i in lines) print lines[i]
+    if (length(rec[l2[c]]) > 2) print rec[l2[c]]
+    for (i = l2[c] + 1; i < l1[c + 1]; i++) print rec[i]
+    if (pglue[c + 1] != "") print pglue[c + 1]
   }
+  if (status == 1) print "\034" pst[n]
 }
-') || true
+'
+# END prompt-parser
+
+output=$(printf '%s\n' "$content" | awk -v mode=blocks -v count="$count" "$prompt_parser") || true
 
 # Tell the pressing client. tmux 3.2 cannot aim a message at one client
 # (display-message takes no argument to -c there), so there it goes to the

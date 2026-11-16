@@ -1,0 +1,518 @@
+.TH TMUX-PANE 1 "2026-11-16" "tmux-tools" "User Commands"
+.SH NAME
+tmux-pane \- type into one exact tmux pane, read it, and wait on it
+.SH SYNOPSIS
+.B tmux-pane send
+.B \-t
+.I %N
+.RI [ SERVER ]
+.RI [ ACTION ...]
+.RB [ \-\-enter ]
+.RB [ \-\-type ]
+.RB [ \-\-keep\-mode ]
+.RB [ \-\-print\-marker ]
+.RB [ \-\-wait " agent|prompt"
+.RI [ WAIT-OPTS ]
+.RB [ \-\-no\-capture ]
+.RB [ \-\-lines
+.IR N ]
+.RI [ READ-FMT ]]
+.RB [ \-\- ]
+.RI [ TEXT ...]
+.br
+.B tmux-pane read
+.B \-t
+.I %N
+.RI [ SERVER ]
+.RB [ \-\-lines
+.I N
+|
+.B \-\-all
+|
+.B \-\-last\-output
+.RB [ \-\-count
+.IR N ]]
+.RB [ \-\-since
+.IR MARKER ]
+.RI [ READ-FMT ]
+.br
+.B tmux-pane wait
+.B \-t
+.I %N
+.RI [ SERVER ]
+.B \-\-wait agent|prompt
+.RB [ \-\-since
+.IR MARKER ]
+.RI [ WAIT-OPTS ]
+.RB [ \-\-capture
+.RB [ \-\-lines
+.IR N ]
+.RI [ READ-FMT ]]
+.br
+.B tmux-pane mark
+.B \-t
+.I %N
+.RI [ SERVER ]
+.br
+.B tmux-pane
+.B \-\-help
+.PP
+.I SERVER
+is
+.B \-L
+.I NAME
+or
+.B \-S
+.IR SOCKET .
+.I ACTION
+is
+.IR TEXT ,
+.B \-
+(standard input), or
+.B \-\-keys
+.RI ' KEY " [" KEY ...]'
+(also
+.BR \-k ),
+in argument order.
+.I WAIT-OPTS
+are
+.B \-\-timeout
+.I S
+(default 110; 0 waits without bound),
+.B \-\-start\-timeout
+.I S
+(default 10) and
+.B \-\-settle
+.I S
+(default 1).
+.I READ-FMT
+is
+.B \-\-join
+(logical lines, as
+.BR "capture-pane \-J" )
+and
+.B \-\-ansi
+(keep escape sequences, as
+.BR "capture-pane \-e" ).
+.B wait
+also takes
+.B \-\-agent
+and
+.B \-\-prompt
+for
+.BR "\-\-wait agent" " and " "\-\-wait prompt" .
+.SH DESCRIPTION
+.B tmux-pane
+drives one tmux pane from a script or an agent: it types text and named keys
+into it, reads what it shows, and waits until the program in it is done. It
+works on agent panes, which mark their turns with
+.BR term-pane-mark (1),
+and on plain shell panes that use the two-line prompt described in the
+tmux-tools README.
+.PP
+It is permissive about everything except the target. It does not refuse a
+busy pane, a pane with
+.B synchronize-panes
+on, or the caller's own pane named explicitly, and it never blocks raw
+.BR "tmux send-keys" .
+.SH TARGET AND SERVER
+Every subcommand needs exactly one
+.B \-t
+naming an exact pane id,
+.B %
+followed by a number without leading zeros. Anything else exits 64: an empty
+target, a session or window name, an index such as
+.BR 0 " or " p:0.0 ,
+a repeated
+.BR \-t .
+The pane must exist on the chosen server; otherwise the command exits 65
+before doing anything. There is no fallback to the current pane or any other.
+.PP
+Find a pane id with
+.PP
+.RS
+.nf
+tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_command} #{pane_title}'
+.fi
+.RE
+.PP
+A pane id is exact only within one server. Without
+.B \-L
+or
+.BR \-S ,
+tmux uses the server of
+.BR $TMUX ,
+or, when
+.B TMUX
+is unset, the default socket under
+.BR TMUX_TMPDIR .
+Pass
+.B \-L
+or
+.B \-S
+for any other server, including a tmux nested in the pane, which the outer
+server only shows as the alternate screen.
+.SH SEND
+.B send
+runs its actions in argument order. Text is loaded into a paste buffer of its
+own, named
+.BI tmux-pane. PID . RANDOM . I\fR,
+from a file, and pasted with
+.BR "paste-buffer \-p \-d" ,
+so it arrives byte for byte: a trailing
+.BR ; ,
+key names, tmux formats and NUL bytes are not interpreted. The paste is
+bracketed when the program enabled bracketed paste, and an embedded bracket
+start or end sequence is then removed;
+.B \-\-type
+pastes without brackets and keeps those bytes. On tmux 3.7 and later,
+.B paste-buffer \-S
+keeps control bytes raw.
+.PP
+Text from standard input
+.RB ( \- )
+loses exactly one trailing newline. A carriage return directly before a
+newline is dropped, so CRLF input submits once per line; a lone carriage
+return is kept. Input that contains NUL is passed through untouched, without
+either conversion or the bracket strip. Text that starts with
+.B \-
+follows
+.BR \-\- .
+.PP
+.B \-\-keys
+takes tmux key names, such as
+.BR "C-u" ", " "Up" " or " "M-Enter" ,
+and
+.B \-\-enter
+adds Enter at the end. An unknown name exits 64. In the VT10x key mode, tmux
+types some names literally (C-BSpace, for example), so a key without a
+portable encoding exits 67 and nothing is sent. With
+.B synchronize-panes
+on, tmux would broadcast
+.BR send-keys ,
+so each key is pasted as its bytes to the target only; there, a key whose bytes
+depend on an extended key mode exits 67. Before tmux 3.5 the key mode is not
+visible, and
+.B extended-keys on
+counts as possibly extended: the VT10x check is skipped and, under
+synchronize-panes, only unmodified keys and cursor, function and keypad keys
+are sent.
+.PP
+When there are keys or
+.BR \-\-enter ,
+.B send
+first leaves any mode the pane is in with
+.BR "copy-mode \-q" ,
+which discards a copy-mode selection and scroll position and also leaves
+tree, clock and view modes. Text alone reaches the program without leaving
+the mode.
+.B \-\-keep\-mode
+skips that step: with synchronize-panes off the keys go to the mode; with it
+on, their bytes reach the program.
+.PP
+Everything is loaded before the sending starts, then the marker snapshot,
+the mode exit, the pastes and the keys run as one tmux command queue, so two
+senders cannot interleave. A send too long for one tmux command exits 64.
+If the pane has input disabled
+.RB ( "select-pane \-d" ),
+the send exits 0 with a warning that nothing arrives.
+.PP
+.B send
+prints nothing unless
+.B \-\-print\-marker
+or
+.B \-\-wait
+is given. With
+.BR \-\-wait ,
+it waits as
+.B wait \-\-since
+does with the marker it just took, then prints the capture, unless
+.BR \-\-no\-capture .
+.B \-\-wait
+without
+.B \-\-enter
+or keys prints a hint, since it waits on whatever is already running.
+.SH READ
+.TP
+(default)
+The visible screen, without trailing blank rows.
+.TP
+.BI \-\-lines " N"
+The last
+.I N
+rows of the screen.
+.TP
+.B \-\-all
+All retained history and the screen.
+.TP
+.BI \-\-last\-output " \fR[\fB\-\-count \fIN\fR]"
+The last finished command block, or
+.IR N ,
+each as its
+.B $ command
+line followed by its output, from the last 10,000 lines. Standard error gets
+.BR status=N ,
+the block's exit status, or
+.BR status=unknown .
+.TP
+.BI \-\-since " MARKER"
+From the row the marker was taken at to the end, when that row can be found
+exactly (see
+.BR MARKERS ).
+With
+.BR \-\-lines ,
+the last
+.I N
+rows of that range; with
+.BR \-\-last\-output ,
+the blocks that start there.
+.SH MARKERS
+A marker is one word, starting with
+.BR tp1: ,
+that records the pane's server, geometry, cursor row, hashes of nearby rows,
+the typed text's first characters, the prompt identity and the agent marks.
+.B send \-\-print\-marker
+and
+.B mark
+print one;
+.B send \-\-wait
+reports one on its
+.B result=
+line. A marker from another pane or a malformed one exits 64, and one from
+another or a restarted server exits 66.
+.PP
+.B \-\-since
+is either exact or bounded; it never searches for or guesses a position.
+On tmux 3.8 and later, tmux counts the history rows it drops, and the marker
+row is exact while the history generation and the pane size are unchanged
+and no in-place clear hid the rows above. Before 3.8, the row is trusted only
+while history cannot have been trimmed (it is more than a tenth below
+.BR history-limit ,
+which is unchanged), has not shrunk, the size is unchanged, the first rows of
+history still match, and the rows above the marker still match or a clear
+scrolled them into history. Both paths then check the echo anchor: the
+marker row still holds the text that was typed on it. So a
+.B clear
+that refills the same rows is not exact.
+.PP
+A marker from
+.B mark
+records no typed text, so only the prompt before the cursor is checked; a
+.B clear
+that regrows identical rows under the same prompt still passes. One case
+also passes with
+.B send
+markers: a trim, then
+.BR ESC[3J ,
+then an identical refill that also reproduces the echo.
+.PP
+When the row cannot be found exactly, output is bounded: the visible screen,
+or the last
+.I N
+rows with
+.BR \-\-lines ,
+never all of history. A standalone
+.B read \-\-since
+then exits 4 and names the reason on standard error:
+.BR trimmed ,
+.BR shrunk ,
+.BR resized ,
+.BR "grid-top changed" ,
+.BR cleared ,
+.BR "blank gap" ,
+.BR "echo moved" ,
+.BR "alternate screen" ,
+.B "generation changed"
+or
+.BR "weak marker" .
+Agent TUIs usually redraw their input row after a submit, so their captures
+are usually inexact: a reply that fits on one screen is still captured whole,
+and a longer one needs
+.B read \-\-lines
+or the agent's own transcript.
+.PP
+The prompt identity
+.RB ( user@host: )
+comes from the pane title, when it has the dotfiles prompt's
+.B user@host: path
+form and the screen confirms it, else from the identity most prompts in the
+recent history agree on, else nothing.
+.SH WAIT
+Each poll is one small tmux queue every 0.2 seconds. The wait ends with 66
+and
+.B result=gone
+if the pane dies or goes away, or its server stops or restarts.
+.SS "\-\-wait agent"
+Agents mark their turns through
+.BR term-pane-mark (1):
+.B @term_busy
+while working,
+.B @term_busy_seq
+counting each start, and
+.B @term_notify_pending
+for
+.BR done ,
+.B waiting
+(a question or a permission prompt) or
+.BR blocked .
+With a marker, the wait first needs the turn to start: busy set or the count
+past the marker's. A new waiting exits 68 and a new blocked 69; none of these
+within
+.B \-\-start\-timeout
+exits 70. Then it waits for busy to clear, and for
+.B \-\-settle
+seconds more, so a queued turn that starts at once is waited on too. A
+waiting or blocked mark that was already there when the marker was taken is
+ignored until it clears. With a
+.B term-pane-mark
+too old to count, a new
+.B done
+ends the start phase. Without a marker, the current marks are the baseline.
+.PP
+A pane already busy when the marker is taken is ambiguous: the wait may end
+with that turn. An agent with a background shell can take its own idle
+timeout, about a minute for Claude, to clear busy.
+.SS "\-\-wait prompt"
+The pane is at a prompt when the cursor is on a bare second prompt line
+.RB ( $ ,
+.B %
+or
+.BR # )
+under a first line with the prompt identity, outside the alternate screen.
+With a marker, a prompt counts only after progress: an exact marker with the
+cursor past it, window activity after the send's second, a steady prompt
+whose screen differs from the marker's, or a steady prompt after
+.B \-\-settle
+seconds on an unchanged screen with activity. The result's status is the
+prompt's
+.BR [N] ,
+or 0 without one, and is the exit status. Typeahead, other prompt shapes,
+remote shells and nested tmux are not supported.
+.SS Resuming
+After 124, or after 68 once the question is answered, run
+.B wait \-\-since
+with the
+.B marker=
+from the
+.B result=
+line.
+.B wait \-\-capture
+then prints the same capture the shortcut would.
+.SH RESULT LINE
+Every wait ends with one line, the last on standard error:
+.PP
+.RS
+.nf
+result=done|waiting|blocked|no-start|timeout|gone|error exact=yes|no|- status=N|unknown [reason=R] [marker=M]
+.fi
+.RE
+.PP
+.B exact
+reports the capture:
+.B yes
+or
+.B no
+with a
+.BR reason ,
+or
+.B \-
+when nothing was captured. The exit status is the wait's result, never 4.
+.B status=N
+means the code is the command's (a command can exit 64 or 124 itself), and
+.B status=unknown
+means it is
+.BR tmux-pane 's.
+.B marker=
+is present whenever a wait ran, and the capture is printed whenever it ran,
+for any result except an error before or during the send.
+.SH EXIT STATUS
+.TP
+.B 0
+Success; for
+.BR read ,
+exact.
+.TP
+.I N
+A prompt wait: the command's status.
+.TP
+.B 1
+A tmux failure, or tmux older than 3.2.
+.TP
+.B 3
+.B read \-\-last\-output
+found no command block.
+.TP
+.B 4
+A standalone
+.B read \-\-since
+was not exact; the output is bounded.
+.TP
+.B 64
+Usage: a bad target, server, key or marker, or a marker for another pane.
+.TP
+.B 65
+No such pane or server, before anything was done.
+.TP
+.B 66
+The pane is dead or gone, its server is gone, or the marker is from another
+or a restarted server.
+.TP
+.B 67
+A key cannot be encoded for the target's key mode.
+.TP
+.B 68
+The agent is waiting on a question or permission prompt.
+.TP
+.B 69
+The agent is blocked.
+.TP
+.B 70
+The agent's turn never started.
+.TP
+.B 124
+The wait timed out.
+.TP
+.BR 130 ", " 143
+Interrupted; this run's buffers and temporary files are removed.
+.SH ENVIRONMENT
+.TP
+.B TMUX
+Names the default server.
+.TP
+.B TMUX_TMPDIR
+Where tmux looks for its default socket when
+.B TMUX
+is unset.
+.TP
+.B TMUX_PANE_DEBUG_DEADLINE
+When 1, a wait prints its deadline.
+.TP
+.B TMUX_PANE_TEST_DISABLE
+A comma list of features to treat as missing, for tests:
+.BR paste-S ,
+.BR soc ,
+.BR counters ,
+.BR key-mode .
+.SH VERSIONS
+tmux 3.2 and later. Features are detected directly where tmux exposes them.
+A version that does not parse counts as the newest. tmux 3.2 has no
+.B scroll-on-clear
+option and behaves as if it were on. Before 3.7,
+.B paste-buffer
+has no
+.BR \-S .
+Before 3.8, there are no history counters.
+.SH EXAMPLES
+.nf
+tmux-pane send -t %7 'make test' --enter --wait prompt
+M=$(tmux-pane send -t %7 'explain the failure' --enter --print-marker)
+tmux-pane wait -t %7 --agent --since "$M" --capture
+tmux-pane send -t %7 --keys 'C-c'
+tmux-pane send -t %7 -- '-n 5'
+printf 'line 1\\nline 2\\n' | tmux-pane send -t %7 - --enter
+tmux-pane read -t %7 --last-output
+.fi
+.SH SEE ALSO
+.BR tmux (1),
+.BR term-pane-mark (1),
+.BR tmux-copy-last-output (1)
