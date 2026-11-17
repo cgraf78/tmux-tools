@@ -60,12 +60,14 @@ that most prompts in the capture agree on, so the text before it is the
 command's output and the status is still read. A
 .B #
 second line also starts comments and headings in output, so its first line
-must start with the identity, never glued. Output that contains the identity
-on a line directly above a
+must start with the identity, never glued. Glue is output without its final
+newline, so it never ends in a space: a line that names the identity after a
+space is output. Output whose line ends in the identity glued to other text,
+directly above a
 .B $
 or
 .B %
-line still splits the block there.
+line, still splits the block there.
 .BR tmux-pane (1)
 carries the same parser.
 .PP

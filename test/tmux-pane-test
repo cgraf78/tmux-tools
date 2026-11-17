@@ -101,10 +101,19 @@ check 'rg_i7 the tool never waits with read -t' '' "$(grep -nE 'read +(-[a-zA-Z]
 # statuses. Everything below must agree with it.
 iface=$("$BASH" "$TOOL" --interface)
 check 'drift: --interface exits 0' 0 "$?"
-subs=$(printf '%s\n' "$iface" | awk '$1 != "exit" && $1 != "top" { print $1 }' | tr '\n' ' ')
-all_opts=$(printf '%s\n' "$iface" | awk '$1 != "exit" { for (i = 2; i <= NF; i++) print $i }' | sort -u)
-sub_opts() { printf '%s\n' "$iface" | awk -v s="$1" '$1 == s { for (i = 2; i <= NF; i++) print $i }' | sort -u; }
-exit_codes=$(printf '%s\n' "$iface" | awk '$1 == "exit" { for (i = 2; i <= NF; i++) print $i }')
+iline() { printf '%s\n' "$iface" | awk -v k="$1" '$1 == k { for (i = 2; i <= NF; i++) print $i }'; }
+subs=$(iline subcommands | tr '\n' ' ')
+sub_opts() { iline "$1" | sort -u; }
+all_opts=$(for s in $subs top; do iline "$s"; done | sort -u)
+exit_codes=$(iline exit)
+
+# The geometry table: the names spelled out for ShellCheck are the table's,
+# and no format holds a control byte (tmux 3.5 prints those escaped).
+geom_tab=$(awk '/^geom_fields=/ { on = 1 } on { print } on && /'"'"'$/ { exit }' "$TOOL")
+check 'drift: the spelled-out g_* names match geom_fields' \
+  "$(printf '%s\n' "$geom_tab" | tr -d "'" | tr ' ' '\n' | sed -n 's/.*:\(g_[a-z]*\)$/\1/p' | sort)" \
+  "$(awk '/^g_id=/ { on = 1 } on && /^g_/ { print; next } on { exit }' "$TOOL" | tr ' ' '\n' | sed -n "s/^\(g_[a-z]*\)=''$/\1/p" | sort)"
+check 'drift: geom_fields has no control bytes' 0 "$(printf '%s' "$geom_tab" | tr -d '\n' | LC_ALL=C tr -d '[:print:]' | wc -c | tr -d ' ')"
 
 # The top-level dispatch and each parser's case labels are exactly their
 # options.
@@ -134,10 +143,10 @@ not_listed() { # words in $1 that $2 does not list
     [ -z "$w" ] || printf '%s\n' "$2" | grep -qxF -- "$w" || printf '%s ' "$w"
   done
 }
-missing_from() { # options in $1 absent from the text $2
+missing_from() { # options in $1 that the option words $2 lack (whole words)
   printf '%s\n' "$1" | while IFS= read -r w; do
     case $w in '' | - | -- | -h | --help) continue ;; esac
-    case $2 in *"$w"*) ;; *) printf '%s ' "$w" ;; esac
+    printf '%s\n' "$2" | grep -qxF -- "$w" || printf '%s ' "$w"
   done
 }
 
@@ -155,8 +164,16 @@ for sub in $subs top; do
     cur == s' "$tmp/text.txt" >"$tmp/block.txt"
   check "drift: usage and help use only $sub's options" '' \
     "$(not_listed "$(opt_words "$tmp/block.txt")" "$(sub_opts "$sub")")"
+  [ "$sub" != top ] || continue
+  # The server options are spelled [SERVER] after the first subcommand.
+  awk -v s="$sub" '
+    /^ACTION/ { cur = "send" }
+    match($0, /tmux-pane [a-z]+/) { cur = substr($0, RSTART + 10, RLENGTH - 10) }
+    /tmux-pane --/ { cur = "top" }
+    cur == s' "$tmp/usage.txt" >"$tmp/block.txt"
+  check "drift: usage shows every $sub option" '' \
+    "$(missing_from "$(sub_opts "$sub" | grep -vxE -e '-L|-S')" "$(opt_words "$tmp/block.txt")")"
 done
-check 'drift: usage shows every option' '' "$(missing_from "$all_opts" "$(cat "$tmp/usage.txt")")"
 
 # tmux-pane(1): every --word is an option, every option is documented, and
 # the EXIT STATUS entries are the exit list.
@@ -164,7 +181,37 @@ man_page="$ROOT/man/man1/tmux-pane.1"
 sed 's/\\-/-/g; s/\\f[BIRP]//g' "$man_page" >"$tmp/man.txt"
 check 'drift: tmux-pane(1) uses only listed --options' '' \
   "$(not_listed "$(opt_words "$man_page" | grep -- '^--')" "$all_opts")"
-check 'drift: tmux-pane(1) documents every option' '' "$(missing_from "$all_opts" "$(cat "$tmp/man.txt")")"
+check 'drift: tmux-pane(1) documents every option' '' "$(missing_from "$all_opts" "$(opt_words "$man_page")")"
+# Result kinds, inexact reasons, defaults and the floor: the code uses
+# exactly the listed ones, and the docs say the same.
+words() { tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '; }
+code_results=$( (
+  grep -oE 'wait_end [0-9"$a-z]+ "?[a-z-]+' "$TOOL" | awk '{ gsub(/"/, "", $3); print $3 }'
+  grep -oE 'kind=[a-z]+' "$TOOL" | sed 's/kind=//'
+) | tr '\n' ' ' | words)
+check 'drift: the code reports exactly the listed result kinds' "$(iline result | tr '\n' ' ' | words)" "$code_results"
+man_results=$(sed -n 's/^result=\([a-z|-]*\) exact=.*/\1/p' "$tmp/man.txt" | tr '|' ' ' | words)
+check 'drift: tmux-pane(1) RESULT LINE lists the result kinds' "$(iline result | tr '\n' ' ' | words)" "$man_results"
+code_reasons=$(grep -oE "loc_reason=('[a-z -]+'|[a-z-]+)" "$TOOL" | sed "s/loc_reason=//; s/'//g; s/ /-/g" | tr '\n' ' ' | words)
+check 'drift: the code reports exactly the listed inexact reasons' "$(iline reason | tr '\n' ' ' | words)" "$code_reasons"
+man_reasons=$(awk '/names the reason on standard error:/ { on = 1; next }
+  on && !/^\.BR? / && $0 != "or" { exit }
+  on && $0 != "or" { sub(/^\.BR? /, ""); gsub(/"/, ""); sub(/ [,.]$/, ""); gsub(/ /, "-"); print }' "$man_page" | tr '\n' ' ' | words)
+check 'drift: tmux-pane(1) lists the inexact reasons' "$(iline reason | tr '\n' ' ' | words)" "$man_reasons"
+man_flat=$(tr '\n' ' ' <"$tmp/man.txt" | sed 's/\.[A-Z][A-Z]* //g; s/  */ /g')
+for d in $(iline default); do
+  o=${d%%=*} v=${d#*=}
+  check_contains "drift: tmux-pane(1) gives $o's default" "$o S (default $v" "$man_flat"
+done
+floor=$(iline floor)
+check_contains 'drift: tmux-pane(1) VERSIONS names the floor' "tmux $floor and later" "$man_flat"
+check_contains 'drift: tmux-pane(1) exit 1 names the floor' "older than $floor" "$man_flat"
+check_contains 'drift: the README names the floor' "tmux $floor or newer" "$(cat "$ROOT/README.md")"
+check_contains 'drift: AGENTS.md names the floor' "supports $floor and later" "$(cat "$ROOT/AGENTS.md")"
+# AGENTS.md spells the exit statuses as a list with ranges.
+agents_codes=$(tr '\n' ' ' <"$ROOT/AGENTS.md" | sed 's/  */ /g' | sed -n 's/.*Its exit codes (\([^)]*\)).*/\1/p' |
+  tr ',/' '  ' | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+-[0-9]+$/) { split($i, r, "-"); for (j = r[1]; j <= r[2]; j++) print j } else if ($i ~ /^[0-9]+$/) print $i }' | sort -n | tr '\n' ' ')
+check 'drift: AGENTS.md lists the exit codes' "$(printf '%s\n' "$exit_codes" | sort -n | tr '\n' ' ')" "$agents_codes"
 man_codes=$(awk '/^\.SH EXIT STATUS/ { on = 1; next } /^\.SH/ { on = 0 }
   on && /^\.BR? [0-9]/ { gsub(/[^0-9 ]/, " "); for (i = 1; i <= NF; i++) print $i }' "$man_page" |
   sort -n | tr '\n' ' ')
@@ -174,17 +221,25 @@ check 'drift: every literal exit status is listed' '' "$(not_listed "$used" "$(p
 
 # Every `tmux-pane SUB ...` reference in the docs names a real subcommand and
 # only that subcommand's options (alternatives such as send|read are split).
-ref_check() { # ref_check FILE...: prints bad references
-  sed 's/\\-/-/g; s/\\f[BIRP]//g; s/`/ ` /g' "$@" | awk -v iface="$iface" '
+# The interface goes in through the environment: BSD awk refuses a -v value
+# with a newline in it. ref_scan ends with "#refs N", the references it read,
+# so a checker that silently reads nothing fails its self-test.
+ref_scan() { # ref_scan FILE...: prints bad references, then "#refs N"
+  sed 's/\\-/-/g; s/\\f[BIRP]//g; s/`/ ` /g' "$@" | TP_IFACE=$iface awk -v sq="'" '
     BEGIN {
-      n = split(iface, L, "\n")
+      n = split(ENVIRON["TP_IFACE"], L, "\n")
       for (i = 1; i <= n; i++) {
         m = split(L[i], f, " ")
-        if (f[1] == "exit" || f[1] == "top") continue
-        sub_ok[f[1]] = 1
+        if (f[1] == "subcommands") for (j = 2; j <= m; j++) sub_ok[f[j]] = 1
+      }
+      for (i = 1; i <= n; i++) {
+        m = split(L[i], f, " ")
+        if (!(f[1] in sub_ok)) continue
         for (j = 2; j <= m; j++) opt[f[1], f[j]] = 1
       }
+      refs = 0
     }
+    END { print "#refs " refs }
     {
       w = split($0, t, " ")
       for (i = 1; i < w; i++) {
@@ -199,11 +254,12 @@ ref_check() { # ref_check FILE...: prints bad references
         ns = split(s, alt, "|"); bad = 0
         for (a = 1; a <= ns; a++) if (!(alt[a] in sub_ok)) { print "subcommand " alt[a]; bad = 1 }
         if (bad) continue
+        refs++
         q = 0
         for (k = i + 2; k <= w; k++) {
           x = t[k]
           if (x == "`" || x == "#" || x == "|" || x == "--" || x ~ /^\$/) break
-          nq = gsub(/\x27/, "&", x); if (q || nq % 2 == 1 && x ~ /^\x27/) { if (nq % 2 == 1) q = !q; continue }
+          nq = gsub(sq, "&", x); if (q || nq % 2 == 1 && substr(x, 1, 1) == sq) { if (nq % 2 == 1) q = !q; continue }
           if (x !~ /^-/) continue
           gsub(/[][(),.;:"]/, "", x); sub(/=.*/, "", x)
           no = split(x, alt2, "|")
@@ -217,6 +273,12 @@ ref_check() { # ref_check FILE...: prints bad references
       }
     }'
 }
+ref_check() { # ref_check FILE...: prints bad references; fails loudly if the scan does
+  local out
+  out=$(ref_scan "$@") || out='checker failed'
+  case $out in *'#refs '[0-9]*) ;; *) out="checker failed${out:+: $out}" ;; esac
+  printf '%s\n' "$out" | grep -v '^#refs '
+}
 for doc in README.md AGENTS.md man/man1/tmux-pane.1 man/man1/term-pane-mark.1 man/man1/tmux-copy-last-output.1; do
   check "drift: $doc names only real tmux-pane subcommands and options" '' "$(ref_check "$ROOT/$doc" | sort -u | tr '\n' ';')"
 done
@@ -224,6 +286,11 @@ check 'drift: help and usage examples use real options' '' "$(ref_check "$tmp/te
 # The checker itself catches a wrong option and a wrong subcommand.
 printf '%s\n' 'run `tmux-pane send -t %1 --enterr` or `tmux-pane bogus -t %1`' >"$tmp/bad.md"
 check 'drift: the reference check flags bad references' 'send --enterr;subcommand bogus;' "$(ref_check "$tmp/bad.md" | sort -u | tr '\n' ';')"
+printf '%s\n' 'run `tmux-pane send -t %1 --enter '"'"'a -b'"'"'` and `tmux-pane read|wait -t %1' \
+  '--since "$M"`' >"$tmp/good.md"
+check 'drift: the reference check reads known-good references' '#refs 2' "$(ref_scan "$tmp/good.md")"
+check 'drift: the docs hold references for it to check' 1 \
+  "$([ "$(ref_scan "$ROOT/README.md" "$ROOT/man/man1/tmux-pane.1" | sed -n 's/^#refs //p')" -ge 5 ] && echo 1 || echo 0)"
 
 if ! command -v tmux >/dev/null 2>&1; then
   if [ "${TMUX_TOOLS_REQUIRE_TMUX:-0}" = 1 ]; then
@@ -422,8 +489,36 @@ if [ "\$1" = -V ] && [ -n "\${SHIM_VERSION+x}" ]; then
   printf '%s\n' "\$SHIM_VERSION"
   exit 0
 fi
+if [ -n "\${SHIM_PASTE_USAGE:-}" ] && [ "\$*" = "-u -S $sock list-commands paste-buffer" ]; then
+  printf '%s\n' "\$SHIM_PASTE_USAGE"
+  exit 0
+fi
 if [ -n "\${SHIM_FAIL_ON:-}" ]; then
   for a in "\$@"; do [ "\$a" = "\$SHIM_FAIL_ON" ] && exit 1; done
+fi
+# SHIM_STOP_AFTER=WORD runs the command only up to the first argument WORD
+# and then fails, like a tmux queue that stopped part way.
+if [ -n "\${SHIM_STOP_AFTER:-}" ]; then
+  n=0
+  for a in "\$@"; do
+    n=\$((n + 1))
+    [ "\$a" = "\$SHIM_STOP_AFTER" ] || continue
+    "$real_tmux" "\${@:1:n}" >/dev/null 2>&1
+    exit 1
+  done
+fi
+# SHIM_SHRINK=PANE: before each of a read's locate queues (the one with the
+# nonce-1 marker), shrink PANE by one row, SHIM_SHRINK_TIMES times in all, so
+# history grows between the pre-query and the queue.
+if [ -n "\${SHIM_SHRINK:-}" ]; then
+  for a in "\$@"; do
+    case \$a in tmux-pane-*-1) ;; *) continue ;; esac
+    n=\$(cat "\$SHIM_LOG.shrunk" 2>/dev/null || echo 0)
+    if [ "\$n" -lt "\${SHIM_SHRINK_TIMES:-1}" ]; then
+      echo \$((n + 1)) >"\$SHIM_LOG.shrunk"
+      "$real_tmux" -S "$sock" -f /dev/null resize-window -t "\$SHIM_SHRINK" -y \$((23 - n))
+    fi
+  done
 fi
 exec "$real_tmux" "\$@"
 EOF
@@ -560,6 +655,7 @@ send_case 'rg_x15 -x after -- is text' '-x --x' -- -x --x
 send_case 'send: a TEXT argument keeps a trailing lone CR' 'ls\r' "$(printf 'ls\r')"
 send_case 'send: a TEXT argument keeps its trailing LF' 'ls\r' $'ls\n'
 send_case 'send: an empty TEXT sends nothing' '' ''
+send_case 'send: an empty TEXT before Enter is skipped' '\r' '' --enter
 send_case 'send: a UTF-8 key name' '\303\251' --keys é
 mkdir -p "$tmp/globdir"
 : >"$tmp/globdir/a"
@@ -573,6 +669,18 @@ env TMUX_PANE_TEST_DISABLE=paste-S "$BASH" -c 'exec "$@"' _ \
 check 'send: --type without paste-buffer -S has no paste flags (Bash 3.2 set -u)' 0 "$?"
 settle_file "$so"
 check 'send: and the text arrives' "$(hexfmt 'typed')" "$(hexfile "$so")"
+# paste-buffer -S is detected from the first [-flags] group of its usage, not
+# from an S anywhere in it.
+plog="$tmp/paste.log"
+: >"$plog"
+SHIM_PASTE_USAGE='paste-buffer [-dpr] [-b buffer-name] [-s Separator] [-t target-pane]' \
+  tps "$plog" send -t "$sp" 'x' 2>/dev/null
+check 'send: an S outside the flag group is not paste-buffer -S' '' "$(grep 'paste-buffer.* -S ' "$plog")"
+check 'send: and the shim answered list-commands' 1 "$(grep -c 'list-commands paste-buffer' "$plog")"
+: >"$plog"
+SHIM_PASTE_USAGE='paste-buffer [-dprS] [-b buffer-name] [-s separator] [-t target-pane]' \
+  tps "$plog" send -t "$sp" 'x' 2>/dev/null
+check 'send: an S in the flag group is paste-buffer -S' 1 "$(grep -c 'paste-buffer.* -S ' "$plog")"
 for sub in send read wait mark; do
   out=$(env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" "$sub" --help 2>/dev/null)
   check "help: $sub --help exits 0" 0 "$?"
@@ -596,6 +704,21 @@ stdin_case 'rg_x6 rg_i9 a mid-text lone CR stays' 'a\rb' 'a\rb'
 stdin_case 'rg_x6 rg_i9 a trailing lone CR stays' 'abc\r' 'abc\r'
 stdin_case 'send: CRLF with NUL arrives untouched' 'a\r\r\000b' 'a\r\n\000b'
 stdin_case 'rg_x7 NUL in stdin arrives raw' 'A\000B\003C\033D' 'A\000B\003C\033D'
+stdin_case 'send: stdin that is one newline, then Enter' '\r' '\n' --enter
+# Every stdin segment is read before any buffer is loaded, so no tmux-pane
+# buffer sits on the server (where prefix ] would paste it) while stdin is
+# slow.
+: >"$so"
+{
+  sleep 1.5
+  printf 'slow'
+} | tp send -t "$sp" 'first' - 2>/dev/null &
+sleep 0.7
+check 'send: no buffer is loaded while stdin is still open' '' \
+  "$(T list-buffers -F '#{buffer_name}' 2>/dev/null | grep '^tmux-pane\.')"
+wait
+settle_file "$so"
+check 'send: and both segments arrive in order' "$(hexfmt 'firstslow')" "$(hexfile "$so")"
 if grep -q 'S' <<<"$(T list-commands paste-buffer)"; then
   : >"$so"
   printf 'A\000B' | env TMUX_PANE_TEST_DISABLE=paste-S "$BASH" -c 'exec "$@"' _ \
@@ -708,6 +831,18 @@ T set-option -s extended-keys on
 sleep 0.2
 check 'rg_x9 and nothing is typed' '' "$(hexfile "$so")"
 
+# B1: tmux reads a trailing ; in an argument as a command separator, so a
+# bare ; key would end the queue early. It is typed as itself.
+: >"$so"
+tp send -t "$sp" --keys '; M-;' 'x' 2>/dev/null
+check 'send: the ; keys send' 0 "$?"
+settle_file "$so"
+check 'send: ; and M-; are typed as bytes' "$(hexfmt ';\033;x')" "$(hexfile "$so")"
+T set-option -s extended-keys off
+tp send -t "$sp" --keys 'C-;' 2>/dev/null
+check 'send: C-; in VT10x mode is 67' 67 "$?"
+T set-option -s extended-keys on
+
 # rg_x12: copy mode. Text reaches the program; --enter leaves the mode
 # first; --keep-mode leaves the keys to the mode.
 : >"$so"
@@ -735,7 +870,7 @@ T set-option -s extended-keys off
 # that only the target receives, and the bytes equal what tmux's own
 # send-keys produces for the same key (a sync-off pane), in VT10x mode and
 # in application cursor and keypad mode.
-keys_portable='Up C-Up M-Up S-Up C-M-S-Up Down Left Right Home C-Home End S-End F1 C-F1 F4 F5 S-F5 F12 C-M-F12 IC C-IC DC PPage NPage C-NPage PageUp PgDn BSpace M-BSpace Enter M-Enter Tab M-Tab BTab Escape M-Escape Space C-Space M-Space C-M-Space KP0 KP5 M-KP5 KP/ KP* KP- KP+ KP. KPEnter a z C-a C-z M-a C-M-a 1 M-1 C-/ C-[ C-\ C-] C-^ C-_ C-@ C-? M-? % M-% ? *'
+keys_portable='Up C-Up M-Up S-Up C-M-S-Up Down Left Right Home C-Home End S-End F1 C-F1 F4 F5 S-F5 F12 C-M-F12 IC C-IC DC PPage NPage C-NPage PageUp PgDn BSpace M-BSpace Enter M-Enter Tab M-Tab BTab Escape M-Escape Space C-Space M-Space C-M-Space KP0 KP5 M-KP5 KP/ KP* KP- KP+ KP. KPEnter a z C-a C-z M-a C-M-a 1 M-1 C-/ C-[ C-\ C-] C-^ C-_ C-@ C-? M-? % M-% ? * ; M-;'
 diff_keys() { # diff_keys INIT LABEL
   local ref ref_out tgt tgt_out other other_out k
   ref_out="$tmp/kref.out" tgt_out="$tmp/ktgt.out" other_out="$tmp/koth.out"
@@ -788,32 +923,56 @@ settle_file "$x2t_out"
 check 'rg_x2 the target gets text and keys' "$(hexfmt 'synced\003\033\r')" "$(hexfile "$x2t_out")"
 check 'rg_x2 the other synchronized pane gets nothing' '' "$(hexfile "$x2o_out")"
 : >"$x2t_out"
-T copy-mode -t "$x2t"
-tp send -t "$x2t" --keep-mode --enter 2>/dev/null
+# The pane-level override is set and put back in the send's own queue: an
+# inherited setting stays inherited, a pane's own value is restored, and the
+# window's is never touched.
+check 'sync: no pane-level value is left behind' '' "$(T show-options -pqv -t "$x2t" synchronize-panes)"
+check 'sync: the window still synchronizes' on "$(T show-options -wqv -t "$x2t" synchronize-panes)"
+T set-option -p -t "$x2t" synchronize-panes on
+: >"$x2t_out"
+tp send -t "$x2t" --keys 'a b' 2>/dev/null
 settle_file "$x2t_out"
-check 'rg_x12 with sync on, --keep-mode bytes reach the program' "$(hexfmt '\r')" "$(hexfile "$x2t_out")"
+check 'sync: with a pane-level on, keys still reach only the target' '' "$(hexfile "$x2o_out")"
+check 'sync: and the pane-level on is restored' on "$(T show-options -pqv -t "$x2t" synchronize-panes)"
+T set-option -pu -t "$x2t" synchronize-panes
+# A queue that stops right after the override still gets its setting back.
+SHIM_STOP_AFTER=off tps /dev/null send -t "$x2t" --keys a >/dev/null 2>&1
+check 'sync: a queue that stops part way fails' 1 "$?"
+check 'sync: and the inherited setting comes back' '' "$(T show-options -pqv -t "$x2t" synchronize-panes)"
+T set-option -p -t "$x2t" synchronize-panes on
+SHIM_STOP_AFTER=off tps /dev/null send -t "$x2t" --keys a >/dev/null 2>&1
+check 'sync: and so does a pane-level value' on "$(T show-options -pqv -t "$x2t" synchronize-panes)"
+T set-option -pu -t "$x2t" synchronize-panes
+: >"$x2t_out"
+T copy-mode -t "$x2t"
+# Up moves the copy-mode cursor (Enter would copy and leave the mode).
+tp send -t "$x2t" --keep-mode --keys Up 2>/dev/null
+sleep 0.3
+check 'rg_x12 with sync on, --keep-mode keys go to the mode too' '' "$(hexfile "$x2t_out")"
+check 'rg_x12 and the mode stays' 1 "$(T display -p -t "$x2t" '#{pane_in_mode}')"
 T send-keys -t "$x2t" -X cancel 2>/dev/null
 T set-option -s extended-keys on
-# rg_x10: an extended key mode under sync: plain keys pass, modified ones
-# have no mode-independent bytes.
+# rg_x10: under sync, tmux encodes every key for the target's own mode, Ext 2
+# included, and still only the target receives it.
 if tmux_ge 3 5; then
   x10_out="$tmp/x10.out"
   x10=$(splitsink "$x2t" "$x10_out" '\033[>4;2m')
   check 'rg_x10 the fixture is in Ext 2 mode' 'Ext 2' "$(T display -p -t "$x10" '#{pane_key_mode}')"
-  tp send -t "$x10" --keys C-c 2>/dev/null
-  check 'rg_x10 C-c under sync in Ext 2 is 67' 67 "$?"
-  : >"$x10_out"
-  tp send -t "$x10" --keys 'Up Enter' 2>/dev/null
-  check 'rg_x10 plain keys under sync in Ext 2 still send' 0 "$?"
+  : >"$x2o_out"
+  tp send -t "$x10" --keys 'C-c C-;' 2>/dev/null
+  check 'rg_x10 C-c and C-; under sync in Ext 2 send' 0 "$?"
+  settle_file "$x10_out"
+  check 'rg_x10 and the target receives them' 1 "$([ -s "$x10_out" ] && echo 1 || echo 0)"
+  check 'rg_x10 and no other pane does' '' "$(hexfile "$x2o_out")"
   killpane "$x10"
 else
   skip 'rg_x10 pane_key_mode needs 3.5' "$vstr"
 fi
 # rg_x11: without pane_key_mode (3.2-3.4, or forced) and extended-keys on,
-# modified keys under sync are 67 and the VT10x pre-check is skipped.
+# the VT10x pre-check is skipped; under sync modified keys send as well.
 env TMUX_PANE_TEST_DISABLE=key-mode "$BASH" -c 'exec "$@"' _ \
   env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" send -S "$sock" -t "$x2t" --keys C-c 2>/dev/null
-check 'rg_x11 possibly-extended mode under sync: C-c is 67' 67 "$?"
+check 'rg_x11 possibly-extended mode under sync: C-c sends' 0 "$?"
 T set-option -w -t "$x2t" synchronize-panes off
 env TMUX_PANE_TEST_DISABLE=key-mode "$BASH" -c 'exec "$@"' _ \
   env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" send -S "$sock" -t "$x2t" --keys C-BSpace 2>/dev/null
@@ -964,6 +1123,9 @@ M=$(tp send -t "$sh" 'echo weak' --enter --print-marker)
 sleep 0.3
 weak=$(printf '%s\n' "$M" | awk -F: 'BEGIN { OFS = ":" } { $11 = 0; print }')
 inexact 'rg_m13 a weak marker is inexact' "$sh" "$weak" 'weak marker'
+# The top rows of history no longer match (on 3.8 too, without the counters).
+top=$(printf '%s\n' "$M" | awk -F: '{ $12 = "0"; s = $1; for (i = 2; i <= 24; i++) s = s ":" $i; print s }')
+inexact 'grid-top: changed top rows are inexact' "$sh" "$top" 'grid-top changed'
 killpane "$sh"
 
 # rg_m4: a fresh pane, then clear; echo hi.
@@ -1058,6 +1220,27 @@ sleep 0.6
 inexact 'rg_m15 a TUI redrawing its input row is inexact' "$tui" "$M" 'echo moved'
 killpane "$tui"
 
+# rg_m17: history that grows between a read's pre-query and its queue makes
+# the computed ranges stale, so the read queries again; when it never holds
+# still the result is inexact.
+sh=$(shellpane)
+M=$(tp send -t "$sh" 'seq 60' --enter --print-marker)
+tp wait -t "$sh" --prompt --since "$M" >/dev/null 2>&1
+slog="$tmp/shrink.log"
+: >"$slog"
+rm -f "$slog.shrunk"
+SHIM_SHRINK="$sh" SHIM_SHRINK_TIMES=1 tps "$slog" read -t "$sh" --since "$M" >/dev/null 2>&1
+check 'rg_m17 one growth between pre-query and queue queries again' 2 "$(grep -c 'tmux-pane-.*-1' "$slog")"
+T resize-window -t "$sh" -x 80 -y 24
+M=$(tp send -t "$sh" 'echo again' --enter --print-marker)
+sleep 0.3
+: >"$slog"
+rm -f "$slog.shrunk"
+SHIM_SHRINK="$sh" SHIM_SHRINK_TIMES=5 tps "$slog" read -t "$sh" --since "$M" >/dev/null 2>"$tmp/inx.err"
+check 'rg_m17 history that never holds still is inexact' 4 "$?"
+check_contains 'rg_m17 as unstable' unstable "$(cat "$tmp/inx.err")"
+T resize-window -t "$sh" -x 80 -y 24
+killpane "$sh"
 # rg_m17: a fresh pane has no history; its marker covers grid rows on the
 # screen and is exact.
 sh=$(shellpane)
@@ -1119,9 +1302,12 @@ check_contains 'wait: false reports status=1' 'status=1' "$(cat "$tmp/w.err")"
 waitp 'wait: exit 7' 7 '(exit 7)'
 waitp 'rg_p14 a command exiting 124 keeps its status' 124 '(exit 124)'
 check_contains 'rg_p14 and says status=124' 'status=124' "$(cat "$tmp/w.err")"
-waitp 'rg_p14 a command exiting 65' 65 '(exit 65)'
-check_contains 'rg_i1 a tool-range status still prints the capture' '$ (exit 65)' "$(cat "$tmp/w.out")"
-check_contains 'rg_i1 and says status=65' 'status=65' "$(cat "$tmp/w.err")"
+# A command's status in the tool's own range is still the command's.
+for st in 64 65 66 67; do
+  waitp "rg_i1 a command exiting $st" "$st" "(exit $st)"
+  check_contains "rg_i1 a command exiting $st still prints the capture" "\$ (exit $st)" "$(cat "$tmp/w.out")"
+  check_contains "rg_i1 and says result=done status=$st" "result=done exact=yes status=$st" "$(cat "$tmp/w.err")"
+done
 waitp 'rg_p2 glued ok[1] (exit)' 1 'printf ok; (exit 1)'
 check 'rg_p2 glued output is the block output' "$(printf '$ printf ok; (exit 1)\nok')" "$(cat "$tmp/w.out")"
 waitp 'rg_p3 glued 1.2.3' 0 'printf 1.2.3'
@@ -1243,6 +1429,19 @@ check 'rg_t5 a restart mid-wait that reuses the pane id is 66' 66 "$?"
 check_contains 'rg_t5 and reports result=gone' 'result=gone' "$res"
 wait
 T2 kill-server >/dev/null 2>&1
+# A wait stopped by a signal still ends with a result line and its marker.
+sh=$(shellpane)
+env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" send -S "$sock" -t "$sh" 'sleep 30' --enter --wait prompt \
+  >/dev/null 2>"$tmp/sig.err" &
+pid=$!
+sleep 1.5
+kill -TERM "$pid"
+wait "$pid"
+check 'wait: SIGTERM is 143' 143 "$?"
+check_contains 'wait: and ends with a result line and the marker' 'result=error exact=- status=unknown marker=tp1:' \
+  "$(tail -n 1 "$tmp/sig.err")"
+T send-keys -t "$sh" C-c
+killpane "$sh"
 # Waits that fail before they start still end with a result= line.
 res=$(tp wait -t %99 --prompt 2>&1 >/dev/null)
 check 'wait: a missing pane is 65' 65 "$?"
@@ -1253,6 +1452,16 @@ sh=$(shellpane)
 # Glued output that ends in [digits] is output, not a status.
 waitp 'parser: glued array[2] is output, not status 2' 0 'printf "array[2]"' --timeout 10
 check_contains 'parser: and stays in the capture' 'array[2]' "$(cat "$tmp/w.out")"
+# Every tmux call passes -u: without it, a client outside a UTF-8 locale
+# prints non-ASCII and control bytes in format output (the pane title, so
+# the identity) as _. Captures are unaffected and a mangled title falls back
+# to the history identity, so no output shows a missing -u; the calls do.
+ulog="$tmp/u.log"
+: >"$ulog"
+tps "$ulog" send -t "$sh" 'echo u' --enter --wait prompt --timeout 10 >/dev/null 2>&1
+tps "$ulog" read -t "$sh" --last-output >/dev/null 2>&1
+check 'locale: every tmux call but -V passes -u' '' "$(grep -v -e '^-u ' -e '^-V $' "$ulog")"
+check 'locale: and the log saw the calls' 1 "$([ "$(wc -l <"$ulog")" -ge 5 ] && echo 1 || echo 0)"
 # Text that starts with a space is still exact.
 waitp 'rg_m18 text with a leading space (exit)' 0 ' echo spaced' --timeout 10
 check_contains 'rg_m18 text with a leading space is exact' 'exact=yes' "$(cat "$tmp/w.err")"
@@ -1323,13 +1532,26 @@ sleep 0.3
 waita 'rg_a7 without seq, a new done finishes the wait' 0 'legacy'
 check 'rg_a7 the old marker sets no seq' '' "$(T show -pqv -t "$ag" @term_busy_seq)"
 killpane "$ag"
+# term-pane-mark's older pending value 1 means done: as a new value it ends
+# the wait; as the baseline it is an earlier turn's.
+lp=$(newpane 'sleep 100')
+M=$(tp mark -t "$lp")
+T set-option -p -t "$lp" @term_notify_pending 1
+res=$(tp wait -t "$lp" --agent --since "$M" --timeout 5 2>&1 >/dev/null)
+check 'rg_a7 a legacy pending 1 finishes the wait' 0 "$?"
+check_contains 'rg_a7 as done' 'result=done' "$res"
+M=$(tp mark -t "$lp")
+tp wait -t "$lp" --agent --since "$M" --start-timeout 1 --timeout 5 >/dev/null 2>&1
+check 'rg_a7 a legacy pending 1 at the baseline does not' 70 "$?"
+killpane "$lp"
 
 # rg_i10, rg_i11, rg_i12: exactness is reported, never the exit code.
 tui=$(newpane "env MOVE=1 '$tmp/tui'")
 sleep 0.3
 res=$(tp send -t "$tui" 'hi' --enter --wait prompt --timeout 2 2>&1 >/dev/null)
+rc=$?
 check_contains 'rg_i10 an inexact shortcut capture says exact=no' 'exact=no' "$res"
-check_absent 'rg_i10 and never exits 4' 'exit=4' "$res"
+check 'rg_i10 and exits with the wait result (124), never 4' 124 "$rc"
 killpane "$tui"
 sh=$(shellpane)
 res=$(tp send -t "$sh" 'true' --enter --wait prompt 2>&1 >/dev/null)
@@ -1343,6 +1565,42 @@ check 'rg_i12 a standalone inexact read --since is 4' 4 "$?"
 res=$(tp wait -t "$sh" --prompt --since "$M" --capture 2>&1 >/dev/null)
 check 'rg_i10 an inexact wait --capture exits with the wait result' 0 "$?"
 check_contains 'rg_i10 and reports exact=no with a reason' 'exact=no' "$res"
+killpane "$sh"
+
+# B2: an inexact or unfinished prompt-mode capture still prints something,
+# and exact= describes what it printed. A resize makes a marker inexact.
+inexact_after() { # inexact_after PANE COMMAND: print a marker for COMMAND, then resize
+  local m
+  m=$(tp send -t "$1" "$2" --enter --print-marker)
+  tp wait -t "$1" --prompt --since "$m" >/dev/null 2>&1
+  # A width the marker did not see.
+  if [ "$(T display -p -t "$1" '#{pane_width}')" = 70 ]; then
+    T resize-window -t "$1" -x 75 -y 24
+  else
+    T resize-window -t "$1" -x 70 -y 24
+  fi
+  printf '%s\n' "$m"
+}
+sh=$(shellpane)
+M=$(inexact_after "$sh" 'seq 60')
+out=$(tp read -t "$sh" --since "$M" --last-output 2>/dev/null)
+check 'B2 an inexact --last-output longer than the screen is 4' 4 "$?"
+check_contains 'B2 and prints the screen' "$(printf '59\n60')" "$out"
+res=$(tp wait -t "$sh" --prompt --since "$M" --capture 2>&1 >"$tmp/w.out")
+check_contains 'B2 an inexact long wait capture says exact=no' 'exact=no' "$res"
+check_contains 'B2 and prints the screen' 60 "$(cat "$tmp/w.out")"
+tp wait -t "$sh" --prompt --since "$M" --capture --lines 3 >"$tmp/w.out" 2>/dev/null
+check 'B2 --lines bounds a prompt-mode capture' 3 "$(wc -l <"$tmp/w.out" | tr -d ' ')"
+M=$(inexact_after "$sh" 'echo AAA')
+tp send -t "$sh" 'echo BBB' --enter --wait prompt >/dev/null 2>&1
+out=$(tp read -t "$sh" --since "$M" --last-output 2>/dev/null)
+check 'B2 an inexact --last-output with several blocks is 4' 4 "$?"
+check_contains 'B2 and prints the first block' '$ echo AAA' "$out"
+check_contains 'B2 and the last' '$ echo BBB' "$out"
+res=$(tp send -t "$sh" 'sleep 3' --enter --wait prompt --timeout 1 2>&1 >"$tmp/w.out")
+check 'B2 a 124 wait (exit)' 124 "$?"
+check_contains 'B2 a 124 capture prints the range since the marker' '$ sleep 3' "$(cat "$tmp/w.out")"
+check_contains 'B2 and it is exact' 'exact=yes' "$res"
 killpane "$sh"
 
 # rg_i6: the suite runs the tool with its own "$BASH", never the shebang's

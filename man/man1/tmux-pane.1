@@ -189,17 +189,17 @@ and
 .B \-\-enter
 adds Enter at the end. An unknown name exits 64. In the VT10x key mode, tmux
 types some names literally (C-BSpace, for example), so a key without a
-portable encoding exits 67 and nothing is sent. With
+portable encoding exits 67 and nothing is sent. Before tmux 3.5 the key mode
+is not visible, and
+.B extended-keys on
+counts as possibly extended: the VT10x check is skipped. With
 .B synchronize-panes
 on, tmux would broadcast
 .BR send-keys ,
-so each key is pasted as its bytes to the target only; there, a key whose bytes
-depend on an extended key mode exits 67. Before tmux 3.5 the key mode is not
-visible, and
-.B extended-keys on
-counts as possibly extended: the VT10x check is skipped and, under
-synchronize-panes, only unmodified keys and cursor, function and keypad keys
-are sent.
+so the send turns it off for the target pane alone around its keys, in the
+same command queue, then puts back the pane's own setting (or none); the
+window's setting is never touched. tmux still encodes each key for the
+target's own key mode.
 .PP
 When there are keys or
 .BR \-\-enter ,
@@ -210,8 +210,7 @@ which discards a copy-mode selection and scroll position and also leaves
 tree, clock and view modes. Text alone reaches the program without leaving
 the mode.
 .B \-\-keep\-mode
-skips that step: with synchronize-panes off the keys go to the mode; with it
-on, their bytes reach the program.
+skips that step, and the keys go to the mode.
 .PP
 Everything is loaded before the sending starts, then the marker snapshot,
 the mode exit, the pastes and the keys run as one tmux command queue, so two
@@ -231,6 +230,14 @@ it waits as
 .B wait \-\-since
 does with the marker it just took, then prints the capture, unless
 .BR \-\-no\-capture .
+A prompt wait's capture is the command's block; when no block finished (a
+timeout, or output longer than the range) it is the range since the marker,
+or the screen. With
+.B \-\-lines
+it is the last
+.I N
+rows of the range or the screen. An agent wait's capture is the range since
+the marker, or the screen.
 .B \-\-wait
 without
 .B \-\-enter
@@ -314,6 +321,9 @@ or the last
 .I N
 rows with
 .BR \-\-lines ,
+or with
+.B \-\-last\-output
+every command block on the screen (the screen itself when none is whole),
 never all of history. A standalone
 .B read \-\-since
 then exits 4 and names the reason on standard error:
@@ -325,9 +335,11 @@ then exits 4 and names the reason on standard error:
 .BR "blank gap" ,
 .BR "echo moved" ,
 .BR "alternate screen" ,
-.B "generation changed"
+.BR "generation changed" ,
+.B "weak marker"
 or
-.BR "weak marker" .
+.B unstable
+(history kept changing while it was read).
 Agent TUIs usually redraw their input row after a submit, so their captures
 are usually inexact: a reply that fits on one screen is still captured whole,
 and a longer one needs
@@ -339,7 +351,14 @@ The prompt identity
 comes from the pane title, when it has the dotfiles prompt's
 .B user@host: path
 form and the screen confirms it, else from the identity most prompts in the
-recent history agree on, else nothing.
+recent history agree on, else nothing. The prompt parser is the one in
+.BR tmux-copy-last-output (1),
+with the same limit: output with a line that ends in the identity, glued to
+text that does not end in a space, directly above a line that starts with
+.B $
+or
+.B %
+splits a block there.
 .SH WAIT
 Each poll is one small tmux queue every 0.2 seconds. The wait ends with 66
 and
@@ -479,11 +498,23 @@ The wait timed out.
 Interrupted; this run's buffers and temporary files are removed.
 .SH INTERFACE LIST
 .B tmux-pane \-\-interface
-prints one line per subcommand with every option it accepts, then
+prints one line per item, a key and its words:
+.B subcommands
+and their names; one line per subcommand with every option it accepts;
+.B top
+with the options taken without a subcommand;
 .B exit
-and the exit statuses. The script keeps this list in one place; its tests
-check the parsers, the usage text, this page and the README against it, and
-other documentation can do the same.
+with the exit statuses;
+.B result
+and
+.B reason
+with the result kinds and inexact reasons, as the result line spells them;
+.B default
+with each option's default; and
+.B floor
+with the oldest supported tmux. The script keeps this list in one place; its
+tests check the code, the usage text, this page, the README and AGENTS.md
+against it, and other documentation can do the same.
 .SH ENVIRONMENT
 .TP
 .B TMUX

@@ -36,13 +36,13 @@ earlier history.
 - `term-pane-mark` and `term-notify-sound` are best effort: missing tmux,
   panes, or helpers must not turn the caller's work into an error.
 - `@term_notify_pending`, `@term_notify_exit_status`, `@term_busy`,
-  `@term_busy_seq` and `TERM_NOTIFY_TTY` are read or set by users' tmux configs, shell prompts,
-  and agent hooks. Don't rename them. `@term_busy` is `1`.
-  `@term_notify_pending` holds the attention kind: `done`, `waiting` or
+  `@term_busy_seq` and `TERM_NOTIFY_TTY` are read or set by users' tmux
+  configs, shell prompts, and agent hooks. Don't rename them. `@term_busy` is
+  `1`. `@term_notify_pending` holds the attention kind: `done`, `waiting` or
   `blocked`; readers treat the legacy value `1` as `done`, and any non-empty
   value as pending. Exit status only accompanies `done`. Kinds, `--kind` and
-  `--if waiting|blocked|sticky` are a cross-repo contract with agent hooks
-  and the tmux config; don't add or rename one without updating them.
+  `--if waiting|blocked|sticky` are a cross-repo contract with agent hooks and
+  the tmux config; don't add or rename one without updating them.
 - `term-pane-state` reads the config predicates `@pane_busy`,
   `@pane_pending`, `@pane_waiting` (empty in older configs, so 0) and
   `@pane_failed`, and Termnav's leases `@termnav_child_attention`
@@ -85,10 +85,11 @@ earlier history.
   `result=<kind> exact=yes|no|- status=N|unknown [reason=R] [marker=M]` are
   read by scripts and agents; change them only with their man page. Exit 4
   belongs to a standalone `read --since` alone.
-- `tmux-pane`'s subcommands, options and exit statuses live once, in the
-  interface block at the top of the script (`tmux-pane --interface` prints
-  it). Add or rename one there first: `test/tmux-pane-test` fails until the
-  parser's case labels, the usage and help text, `tmux-pane.1`, and every
+- `tmux-pane`'s subcommands, options, exit statuses, result kinds, inexact
+  reasons, option defaults and tmux floor live once, in the interface block
+  at the top of the script (`tmux-pane --interface` prints it). Add or rename
+  one there first: `test/tmux-pane-test` fails until the code, the parser's
+  case labels, the usage and help text, `tmux-pane.1`, and every
   `tmux-pane SUB ...` reference in the README, AGENTS.md and the man pages
   agree with it. The only version gate is `tp_tmux_floor`; newer behaviour is
   detected from tmux (the "Capabilities" comment lists each detection).

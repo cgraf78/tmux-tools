@@ -80,7 +80,7 @@ content=$(tmux capture-pane "${capture_args[@]}")
 # must start with the identity (after an optional `[N] `), never glued.
 #
 # Variables (-v):
-#   mode     blocks (default), state or ident
+#   mode     blocks (default), state, ident, confirm or anchor
 #   count    blocks: how many of the last finished blocks to print
 #   ident    the identity to look for; empty means use the consensus
 #   from     blocks: print every block whose line 2 is at or after this record
@@ -92,6 +92,8 @@ content=$(tmux capture-pane "${capture_args[@]}")
 #   state    `prompt N` when the last record is a line 2 under a line 1
 #            whose status is N, else `none`
 #   ident    the consensus identity, or nothing
+#   confirm  1 when some record is a line 1 with the -v ident preset, else 0
+#   anchor   the identity record 1 starts with (no status prefix), or nothing
 # shellcheck disable=SC2016 # An awk program: its $ are awk syntax.
 prompt_parser='
 function line2(s) { return s ~ /^[$%#]($| )/ }
@@ -127,7 +129,7 @@ function consensus(   i, t, u, best, bs, sc, distinct) {
 }
 # Record i is a line 1 when line 2 follows it. Sets glue (output text glued
 # before the identity) and st (its status) for it.
-function prompt1(i,   s, p, t, root) {
+function prompt1(i,   s, p, t, u, root) {
   if (i < 1 || i >= NR || !line2(rec[i + 1])) return 0
   s = rec[i]
   root = (substr(rec[i + 1], 1, 1) == "#")
@@ -135,6 +137,10 @@ function prompt1(i,   s, p, t, root) {
   if (p > 0) {
     t = substr(s, 1, p - 1)
     if (root && t !~ /^(\[[0-9]+\] )?$/) return 0
+    # Glue is output that lacked a final newline, so it ends right before
+    # the identity; text ending in a space is a line that mentions it.
+    u = t; sub(/\[[0-9]+\] $/, "", u)
+    if (u ~ /[ \t]$/) return 0
   } else if (ident == "" && anchored(s) != "" && !(root && id != "")) {
     t = ""
     if (match(s, /^\[[0-9]+\] /)) t = substr(s, 1, RLENGTH)
@@ -157,7 +163,18 @@ END {
     if (t != "") print t
     exit 0
   }
+  if (mode == "anchor") {
+    t = anchored(rec[1])
+    if (t != "" && index(rec[1], t) == 1) print t
+    exit 0
+  }
   id = (ident != "") ? ident : consensus()
+  if (mode == "confirm") {
+    t = 0
+    for (i = 1; i < NR; i++) if (prompt1(i)) { t = 1; break }
+    print t
+    exit 0
+  }
   if (mode == "state") {
     if (NR >= 2 && line2(rec[NR]) && prompt1(NR - 1)) print "prompt " st
     else print "none"

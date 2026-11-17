@@ -200,7 +200,8 @@ $ make test
 - **Output without a final newline** (`printf ok`) leaves bash's next line 1
   glued to it, as in `ok[1] user@host:~`. The `user@host:` that most prompts
   in the capture agree on marks where the prompt starts, so `ok` is still the
-  output and `1` the status. A `#` line 2 also starts comments and headings
+  output and `1` the status. Glue never ends in a space, so `copied to
+  user@host:/srv` is output. A `#` line 2 also starts comments and headings
   in output, so its line 1 must start with the identity, never glued.
 
 These prompts match:
@@ -215,10 +216,10 @@ PS1='[$?] \u@\h:\w\n$ '
 PROMPT=$'[%?] %n@%m:%~\n%% '
 ```
 
-With any other prompt, `tmux-copy-last-output` finds no blocks: it shows a tmux message,
-"No command output found", and copies nothing. With `--print` it also exits
-with status 3. Prompt colors are fine, because tmux captures the text without
-them.
+With any other prompt, `tmux-copy-last-output` finds no blocks: it shows a
+tmux message, "No command output found", and copies nothing. With `--print`
+it also exits with status 3. Prompt colors are fine, because tmux captures
+the text without them.
 
 ### `tmux-pane`
 
@@ -231,18 +232,20 @@ tmux-pane send -t %8 'review the diff' --enter --wait agent
 tmux-pane read -t %7 --last-output
 ```
 
-- `send -t %N [TEXT | - | --keys 'K ...']... [--enter] [--wait agent|prompt]`
-  pastes text byte for byte through a paste buffer of its own and sends named
-  keys, as one tmux command queue so senders cannot interleave. It works with
+- `tmux-pane send -t %N [TEXT | - | --keys 'K ...']... [--enter]` pastes
+  text byte for byte through a paste buffer of its own and sends named keys,
+  as one tmux command queue so senders cannot interleave. It works with
   `synchronize-panes` on (only the target receives anything) and leaves copy
-  mode before keys.
-- `read -t %N [--lines N | --all | --last-output] [--since MARKER]` prints
-  the screen, history, or the last command blocks with their status.
-- `wait -t %N --agent|--prompt [--since MARKER] [--capture]` waits for an
-  agent's turn to finish (through `term-pane-mark`'s marks) or for the shell
-  prompt to come back. Every wait ends with a `result=` line on stderr that
-  carries a marker to resume from after a timeout or a question.
-- `mark -t %N` prints a marker for a later `read --since` or `wait --since`.
+  mode before keys. `--wait agent|prompt` waits as `wait` does.
+- `tmux-pane read -t %N [--lines N | --all | --last-output]` prints the
+  screen, history, or the last command blocks with their status;
+  `--since MARKER` starts at a marker.
+- `tmux-pane wait -t %N --agent|--prompt [--since MARKER] [--capture]` waits
+  for an agent's turn to finish (through `term-pane-mark`'s marks) or for the
+  shell prompt to come back. Every wait ends with a `result=` line on stderr
+  that carries a marker to resume from after a timeout or a question.
+- `tmux-pane mark -t %N` prints a marker for a later `read --since` or
+  `wait --since`.
 
 The target must be an exact `%N` pane id on the chosen server (`-L` or `-S`
 for another); anything else is refused, and there is no fallback to the
@@ -250,7 +253,8 @@ current pane. Find one with `tmux list-panes -a -F '#{pane_id}
 #{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'`.
 `man tmux-pane` has the details: markers and when `--since` is exact, key
 encoding under `synchronize-panes`, the agent and prompt waits, and the exit
-codes. `tmux-pane --interface` prints every subcommand, option and exit code.
+codes. `tmux-pane --interface` prints every subcommand, option, exit code,
+result kind, inexact reason and default.
 
 ### `tmux-command-palette`
 

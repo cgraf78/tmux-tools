@@ -408,6 +408,20 @@ _assert_eq "parser: the identity inside output before a # line is not a prompt" 
   '$ cat deploy.txt
 rsync -a build/ user@test:/srv/app
 # restart' "$(parse_print "$tmp/root-glued.txt")"
+# Glue is output with no final newline, so it never ends in whitespace: a
+# line that names the identity after a space is output.
+cat >"$tmp/glue-space.txt" <<'EOF'
+user@test:/repo (main)
+$ cat log.txt
+copied to user@test:/repo (main)
+$ not a prompt
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: glue that ends in whitespace is output, not a prompt" \
+  '$ cat log.txt
+copied to user@test:/repo (main)
+$ not a prompt' "$(parse_print "$tmp/glue-space.txt")"
 cat >"$tmp/status-prompt.txt" <<'EOF'
 user@test:/repo (main)
 $ false
