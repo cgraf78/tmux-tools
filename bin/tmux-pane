@@ -39,9 +39,12 @@ tp_results='done waiting blocked no-start timeout gone error'
 # As the result line prints them (spaces become dashes there).
 tp_reasons='trimmed shrunk resized grid-top-changed cleared blank-gap echo-moved alternate-screen generation-changed weak-marker unstable'
 tp_default_timeout=110 tp_default_start_timeout=10 tp_default_settle=1
-# The only version gate: 3.3 is the oldest supported tmux (the tool relies on
-# list-panes -f, #{e|+:} and set-option -pF, all older). Everything newer is
-# detected from tmux itself, never from its version (see "capabilities").
+# The only version gate: 3.3 is the oldest supported tmux, the floor the
+# cgraf78 tmux repositories share. 3.2 was dropped for its quirks: no
+# scroll-on-clear option, delete-buffer -b on a missing name deletes the
+# newest buffer, and -J captures keep trailing spaces. (The tool's commands,
+# list-panes -f, #{e|+:} and set-option -pF, are all older.) Everything newer
+# is detected from tmux itself, never from its version (see "capabilities").
 tp_tmux_floor='3 3'
 interface_text() {
   local sub opts
@@ -80,10 +83,15 @@ interface() {
 #   repository's documents in one call;
 # - a number after "exit" or "exits" (and the rest of a list such as
 #   "exits 64 or 65") is a listed exit status.
+# The exemption has limits: records that do not name tmux-pane are not
+# checked at all, and an option name another command shares passes bare.
 # The interface goes in through the environment: BSD awk refuses a -v value
 # with a newline in it.
 check_refs() { # check_refs FILE...
-  [ $# -gt 0 ] || usage
+  if [ $# -eq 0 ]; then
+    printf 'usage: tmux-pane --check-refs FILE...\n' >&2
+    exit 64
+  fi
   local f
   for f in "$@"; do
     [ -r "$f" ] || die 1 "cannot read $f"
@@ -169,8 +177,10 @@ check_refs() { # check_refs FILE...
     }
     # A Markdown fence (its backticks spaced out above), or a man page
     # no-fill block.
-    code && (/^ *` *` *`/ || /^\.(fi|EE)( |$)/) { code = 0; next }
-    code { add($0); next }
+    code && (/^ *` *` *`/ || /^\.(fi|EE)( |$)/) { add(cont); cont = ""; code = 0; next }
+    # A code line ending in \ continues on the next one.
+    code && /\\$/ { line = $0; sub(/\\$/, "", line); cont = cont line " "; next }
+    code { add(cont $0); cont = ""; next }
     /^ *` *` *`/ || /^\.(nf|EX)( |$)/ { add(rec); rec = ""; code = 1; next }
     /^[ \t]*$/ || /^\.(PP|LP|P|TP|IP|SH|SS|RS|RE)( |$)/ { add(rec); rec = ""; next }
     /^[ \t]*([-*]|[0-9]+\.) / { add(rec); rec = "" }

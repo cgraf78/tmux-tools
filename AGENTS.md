@@ -154,6 +154,9 @@ earlier history.
   for `-S`, empty `pane_key_mode`, empty history counters). Run
   `test/tmux-pane-test` on the oldest and newest tmux you touch;
   `TMUX_PANE_TEST_DISABLE` forces each feature off for the other side.
+  Below the floor the suite skips, so the CentOS CI leg (tmux 3.2a) moves
+  to a source-built 3.3a through the cgraf78/actions `tmux-floor` profile
+  (cgraf78/actions#163); until that lands, 3.3 is verified locally.
 - Stock Bash 3.2 (macOS): `PREFIX=$tmp /bin/bash install.sh`, then for each
   installed command `/bin/bash -n`, plus `tmux-clip-paste --help`,
   `TMUX= tmux-continuum-default-server`, `tmux-continuum-save-gate`, and

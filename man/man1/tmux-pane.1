@@ -59,6 +59,11 @@ tmux-pane \- type into one exact tmux pane, read it, and wait on it
 .B \-\-help
 .br
 .B tmux-pane \-\-interface
+.br
+.B tmux-pane \-\-check\-refs
+.IR FILE ...
+(a maintenance aid for documentation tests; see
+.BR "INTERFACE LIST" )
 .PP
 .I SERVER
 is
@@ -556,9 +561,7 @@ A comma list of features to treat as missing, for tests:
 .BR key-mode .
 .SH VERSIONS
 tmux 3.3 and later. Features are detected directly where tmux exposes them.
-A version that does not parse counts as the newest. tmux 3.2 has no
-.B scroll-on-clear
-option and behaves as if it were on. Before 3.7,
+A version that does not parse counts as the newest. Before 3.7,
 .B paste-buffer
 has no
 .BR \-S .

@@ -261,16 +261,22 @@ check 'drift: the docs name only real tmux-pane subcommands, options and exits' 
   "$(ref_check "${docs[@]}" | sort -u | tr '\n' ';')"
 check 'drift: help and usage examples use real options' '' "$(ref_check "$tmp/text.txt" | sort -u | tr '\n' ';')"
 # The checker itself: a wrong option, bracketed ones (also after a | inside
-# brackets), one wrapped onto the next line, a bare unknown option, a wrong
-# subcommand and unlisted exit statuses; prose numbers are not statuses.
+# brackets), one wrapped onto the next line (also by a \ in a code block), a
+# bare unknown option, a wrong subcommand and unlisted exit statuses; prose
+# numbers are not statuses.
 cat >"$tmp/bad.md" <<'EOF'
 - `tmux-pane send -t %1 --enterr [--typ]` or `tmux-pane bogus -t %1`.
 - `tmux-pane read -t %N [--line N | --al]` and `tmux-pane wait
   -t %1 --wrapped`; keep `--sincee` low. After 5 retries it exits 99, or
   exit 64 or 98; after 68 is fine.
+
+```sh
+tmux-pane send -t %1 x \
+  --enterz
+```
 EOF
 check 'drift: the reference check flags bad references' \
-  'exit 98;exit 99;option --sincee;read --al;read --line;send --enterr;send --typ;subcommand bogus;wait --wrapped;' \
+  'exit 98;exit 99;option --sincee;read --al;read --line;send --enterr;send --enterz;send --typ;subcommand bogus;wait --wrapped;' \
   "$(ref_check "$tmp/bad.md" | sort -u | tr '\n' ';')"
 printf '%s\n' 'run `tmux-pane send -t %1 --enter '"'"'a -b'"'"'` and `tmux-pane read|wait -t %1' \
   '--since "$M"`' >"$tmp/good.md"
