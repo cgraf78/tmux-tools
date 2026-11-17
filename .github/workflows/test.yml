@@ -61,15 +61,21 @@ jobs:
           # The pane commands talk to tmux, so give them a stub that serves a
           # fixed pane capture and logs every other call. It reports
           # STUB_VERSION as #{version}, by default nothing, which counts as
-          # newest. Run each command with /bin/bash: its env-bash shebang
-          # would pick PATH's bash. Bash 3.2's errexit ignores a failed
-          # [[ ]], so each check exits explicitly.
+          # newest, alone or ahead of a chained command (display-message -p
+          # '#{version}' \; capture-pane ...). Run each command with
+          # /bin/bash: its env-bash shebang would pick PATH's bash. Bash 3.2's
+          # errexit ignores a failed [[ ]], so each check exits explicitly.
           stub_dir="$RUNNER_TEMP/tmux-stub"
           mkdir -p "$stub_dir"
           printf '%s\n' '#!/bin/sh' \
+            'if [ "$1 ${2-} ${3-}" = "display-message -p #{version}" ]; then' \
+            '  printf "%s\n" "${STUB_VERSION-}"' \
+            '  [ "${4-}" = ";" ] || exit 0' \
+            '  shift 4' \
+            'fi' \
             'case $1 in' \
             '  capture-pane) cat "$STUB_CAPTURE" ;;' \
-            '  display-message) [ "$2 $3" = "-p #{version}" ] && printf "%s\n" "${STUB_VERSION-}" || printf "%s\n" "$*" >>"$STUB_LOG" ;;' \
+            '  display-message) printf "%s\n" "$*" >>"$STUB_LOG" ;;' \
             '  list-keys) [ "$4" != prefix ] || printf "%s\n" "r  Record the pane" ;;' \
             '  *) printf "%s\n" "$*" >>"$STUB_LOG" ;;' \
             'esac' >"$stub_dir/tmux"
@@ -86,7 +92,7 @@ jobs:
           PATH="$stub_dir:$PATH" /bin/bash \
             "$install_prefix/bin/tmux-copy-last-output" --print || status=$?
           [[ $status -eq 3 ]] || exit 1
-          # An older server is refused before the pane is read.
+          # An older server is refused before its capture is used.
           status=0
           STUB_VERSION=3.2a PATH="$stub_dir:$PATH" /bin/bash \
             "$install_prefix/bin/tmux-copy-last-output" --print 2>/dev/null ||
