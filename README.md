@@ -288,7 +288,7 @@ prints the entries. `man tmux-command-palette` has the details.
 ### `tmux-agent-picker`
 
 ```tmux
-bind -N "Pick an agent pane across sessions" W run-shell 'tmux-agent-picker --socket #{q:socket_path} --client #{q:client_name}'
+bind -N "Pick an agent pane across sessions" C-a run-shell 'tmux-agent-picker --socket #{q:socket_path} --client #{q:client_name}'
 ```
 
 The popup lists every pane on the server that needs attention or runs an
