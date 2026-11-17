@@ -2107,12 +2107,22 @@ for vector in $tmux_supported_vectors; do
   done
 done
 
-# The README and each checking tool's man page state the floor.
+# Each checking tool's man page states the floor, and so does the README's
+# Requirements bullet itself, which names every tool that checks.
 read -r -a floor_docs <<<"$tmux_supported_tools"
-for doc in README.md "${floor_docs[@]/%/.1}"; do
-  [[ $doc == README.md ]] || doc=man/man1/$doc
-  _assert_contains "$doc states the floor" "tmux $tmux_floor or newer" \
-    "$(tr '\n' ' ' <"$ROOT/$doc")"
+for doc in "${floor_docs[@]/%/.1}"; do
+  _assert_contains "man/man1/$doc states the floor" "tmux $tmux_floor or newer" \
+    "$(tr '\n' ' ' <"$ROOT/man/man1/$doc")"
+done
+floor_bullet=$(awk '/^## Requirements$/ { on = 1; next } on && /^## / { exit }
+  on && /^- / { if (bullet != "") exit; if ($0 ~ /^- tmux /) bullet = $0; next }
+  on && bullet != "" && /^  / { bullet = bullet " " substr($0, 3) }
+  on && bullet != "" && !/^  / { exit }
+  END { print bullet }' "$ROOT/README.md")
+_assert_contains "README.md's Requirements bullet states the floor" \
+  "- tmux $tmux_floor or newer. " "$floor_bullet"
+for tool in "${floor_docs[@]}"; do
+  _assert_contains "README.md's floor bullet names $tool" "\`$tool\`" "$floor_bullet"
 done
 
 if ((_failures > 0)); then

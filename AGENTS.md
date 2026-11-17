@@ -37,11 +37,12 @@ earlier history.
 
 - tmux 3.3 is the floor. `tmux_minimum` in the `tmux_supported` block is
   its one statement: the block is identical in `tmux-agent-picker`,
-  `tmux-command-palette`, `tmux-copy-last-output`, `tmux-clip-paste` and
-  `term-pane-state`, which ask their server for `#{version}` within a query
-  they already make (or one extra `display-message -p`) and refuse an older
-  one; `term-pane-state --print` reads no client rows and does not check.
-  `tmux-pane` carries the same block and checks `tmux -V` instead.
+  `tmux-command-palette`, `tmux-copy-last-output`, `tmux-clip-paste`,
+  `term-pane-state` and `tmux-pane`, which ask their server for
+  `#{version}` within a query they already make (or one extra
+  `display-message -p`) and refuse an older one; `term-pane-state --print`
+  reads no client rows and does not check. The client's `tmux -V` is never
+  the test: a new client can reach an old server.
   When the picker's batched snapshot fails, it asks for the version alone,
   since an older server can reject the batch first. A version the rule
   cannot read counts as newest, so an unknown or unreleased build is never
@@ -141,8 +142,10 @@ earlier history.
   agree with it. The reference check is `tmux-pane --check-refs FILE...`,
   the one copy: cgraf78/dotfiles' agent-rules test runs it too, so keep its
   output (bad references, then `#refs N`) stable. The only version gate is
-  `tp_tmux_floor`; newer behaviour is detected from tmux (the "Capabilities"
-  comment lists each detection).
+  the shared floor (`tmux_minimum` in the `tmux_supported` block), checked
+  on the server's `#{version}`; newer behaviour is detected from tmux (the
+  "Capabilities" comment lists each detection). `test/tmux-pane-test` fails
+  on a `tp_` name in the docs that the script no longer has.
 - Every `bin/` command needs a `man/man1/<cmd>.1` with `.SH NAME`, a row in
   `commands=()` in `support/install-checkout.sh`, and a ShellCheck inventory
   row; `test/tmux-tools-test` checks the first two.

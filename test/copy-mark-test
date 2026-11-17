@@ -34,15 +34,19 @@ cat >"$mock_bin/tmux" <<'EOF'
 if [[ -n "${TMUX_CALL_LOG:-}" ]]; then
   printf '%s\n' "$*" >>"$TMUX_CALL_LOG"
 fi
+# One command, or the version query followed by \; and the next command.
+if [[ "${1:-}" == display-message && "${2:-}" == "-p" && "${3:-}" == "#{version}" ]]; then
+  printf '%s\n' "${TMUX_TEST_VERSION-$floor_tmux}"
+  [[ "${4:-}" == ';' ]] || exit 0
+  shift 4
+fi
 case "$1" in
   capture-pane)
     cat "$TMUX_CAPTURE_FILE"
     ;;
   display-message)
     # tmux drops a message for a client that has gone, silently.
-    if [[ "${2:-}" == "-p" && "${3:-}" == "#{version}" ]]; then
-      printf '%s\n' "${TMUX_TEST_VERSION-$floor_tmux}"
-    elif [[ -n "${TMUX_TEST_CLIENT_GONE:-}" && " $* " == *' -c '* ]]; then
+    if [[ -n "${TMUX_TEST_CLIENT_GONE:-}" && " $* " == *' -c '* ]]; then
       exit 0
     elif [[ "${2:-}" == "-p" && "${3:-}" == "#{client_tty}" ]]; then
       printf '%s\n' "${TMUX_CLIENT_TTY:-}"
@@ -112,7 +116,12 @@ TMUX_CAPTURE_FILE="$tmp/pane.txt" \
   PATH="$mock_bin:$PATH" \
   "$ROOT/bin/tmux-copy-last-output"
 _assert_eq "copy last output: captures the last 10,000 lines" \
-  "capture-pane -p -S -10000" "$(grep '^capture-pane' "$tmp/history-calls.log")"
+  "display-message -p #{version} ; capture-pane -p -S -10000" \
+  "$(grep 'capture-pane' "$tmp/history-calls.log")"
+# The version rides the capture: one call to read the pane, then the
+# message, as before the version check.
+_assert_eq "copy last output: makes two tmux calls" 2 \
+  "$(wc -l <"$tmp/history-calls.log" | tr -d ' ')"
 
 TMUX_CAPTURE_FILE="$tmp/pane.txt" \
   TMUX_MESSAGE_LOG="$tmp/messages-one.log" \
@@ -260,7 +269,7 @@ _assert_contains "copy noted: the Copied message carries clip's notices, one per
   'Copied last command + output to clipboard (clip: history must be a private directory; clip: history unavailable; copied without recording it)' \
   "$(cat "$tmp/noted-message.log")"
 
-# An older server is refused before the pane is read, and the client is
+# An older server is refused before its capture is used, and the client is
 # told why.
 TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/old-message.log" \
   TMUX_CALL_LOG="$tmp/old-tmux.log" TMUX_TEST_VERSION=$older_tmux \
@@ -272,8 +281,8 @@ _assert_file_content "copy on an older tmux: tells the pressing client" \
   "$tmp/old-message.log"
 _assert_file_content "copy on an older tmux: says so on stderr" \
   "tmux-copy-last-output: needs tmux $floor_tmux or newer (server is $older_tmux)" "$tmp/old.err"
-_assert_not_contains "copy on an older tmux: reads no pane" \
-  'capture-pane' "$(cat "$tmp/old-tmux.log")"
+_assert_eq "copy on an older tmux: asks once, then tells the client" 2 \
+  "$(wc -l <"$tmp/old-tmux.log" | tr -d ' ')"
 _assert_file_missing "copy on an older tmux: copies nothing" "$tmp/old-copied"
 for version in master ''; do
   rm -f "$tmp/new-copied"

@@ -15,6 +15,11 @@
 set -u
 # Key lists are split on whitespace; a name like ? or KP* must never glob.
 set -f
+# The caller's stderr, kept on fd 9 for the result line. A signal trap runs
+# inside whatever redirection is active when the signal lands, and the poll
+# loop's tmux calls send stderr to /dev/null, so >&2 there would lose it.
+# With stderr closed there is nothing to keep, and the dup fails quietly.
+exec 9>&2 || exec 9>/dev/null
 
 # BEGIN tmux_supported
 # Whether the tmux server reporting VERSION (#{version}) is supported; on
@@ -68,12 +73,11 @@ tp_results='done waiting blocked no-start timeout gone error'
 tp_reasons='trimmed shrunk resized grid-top-changed cleared blank-gap echo-moved alternate-screen generation-changed weak-marker unstable'
 tp_default_timeout=110 tp_default_start_timeout=10 tp_default_settle=1
 # The only version gate is the floor every tool here shares, tmux_minimum in
-# the tmux_supported block above. For this tool, 3.2 lacks the
-# scroll-on-clear option, deletes the newest buffer on delete-buffer -b of a
-# missing name, and keeps trailing spaces in -J captures. (The commands the
-# tool relies on, list-panes -f, #{e|+:} and set-option -pF, are older.)
-# Everything newer is detected from tmux itself, never from its version (see
-# "capabilities").
+# the tmux_supported block above, checked against the server's #{version}
+# (check_target). For this tool, 3.2 lacks the scroll-on-clear option and
+# pads -J captures to the pane width. (The commands the tool relies on,
+# list-panes -f, #{e|+:} and set-option -pF, are older.) Everything newer is
+# detected from tmux itself, never from its version (see "capabilities").
 interface_text() {
   local sub opts
   printf 'subcommands %s\n' "$tp_subcommands"
@@ -276,7 +280,7 @@ wait_result_error() { # wait_result_error STATUS
   wait_pending=0
   local kind=error
   [ "$1" != 66 ] || kind=gone
-  printf 'result=%s exact=- status=unknown%s\n' "$kind" "${w_marker:+ marker=$w_marker}" >&2
+  printf 'result=%s exact=- status=unknown%s\n' "$kind" "${w_marker:+ marker=$w_marker}" >&9
 }
 
 # --- process state and cleanup ------------------------------------------------
@@ -294,8 +298,8 @@ cleanup() {
   fi
   # Only this run's buffers, by exact name: -d deletes a buffer only when
   # its paste succeeds, and a glob could take someone else's. Delete only
-  # names that still exist: 3.2 turns delete-buffer -b on a missing
-  # name into deleting the newest buffer, which is someone else's.
+  # names that still exist: tmux before 3.4 turns delete-buffer -b on a
+  # missing name into deleting the newest buffer, which is someone else's.
   if [ "${#buffers[@]}" -gt 0 ]; then
     left=$(tmux -u ${server_args[@]+"${server_args[@]}"} list-buffers -F '#{buffer_name}' 2>/dev/null) || left=''
     for b in "${buffers[@]}"; do
@@ -390,8 +394,9 @@ split_queue() { # split_queue FILE NONCE
 
 # --- tmux version and features ------------------------------------------------
 
-# Capabilities. The only version check is the floor (tmux_supported); a
-# version that does not parse (master, a distro suffix) counts as the newest.
+# Capabilities. The only version check is the floor (tmux_supported, on the
+# server's #{version} in check_target); a version that does not parse
+# (master, a distro suffix) counts as the newest.
 # Everything newer is detected from tmux itself, so later releases need no
 # change here:
 # - paste-buffer -S (3.7+): its usage line in list-commands (has_paste_S);
@@ -399,14 +404,9 @@ split_queue() { # split_queue FILE NONCE
 #   are empty without them (parse_geom, locate);
 # - key mode (3.5+): #{pane_key_mode} is empty without it, and then
 #   show -sv extended-keys decides (cmd_send);
-# - scroll-on-clear (3.3+): empty on 3.2, which behaves as on (parse_geom).
+# - scroll-on-clear: the pane's option, which a user may turn off.
 # TMUX_PANE_TEST_DISABLE forces each one off, so tests cover both sides.
-detect_version() {
-  local v
-  v=$(tmux -V 2>/dev/null) || die 1 'tmux not found'
-  # The client's version: the shared message names the server's.
-  tmux_supported "$v" || die 1 "${tmux_refusal/(server is /(found }"
-}
+need_tmux() { command -v tmux >/dev/null 2>&1 || die 1 'tmux not found'; }
 
 # paste-buffer -S (3.7+) sends control bytes raw; without it 3.7 escapes
 # them. Detected from the command's own usage line, never by version.
@@ -467,9 +467,6 @@ parse_geom() {
   is_number "$g_seq" || g_seq=0
   [ -n "$g_busy" ] || g_busy=0
   [ -n "$g_pending" ] || g_pending=-
-  # 3.2 has no scroll-on-clear option but always scrolls the screen into
-  # history on a clear, so a missing option behaves as on.
-  [ -n "$g_soc" ] || g_soc=1
   if disabled soc; then g_soc=0; fi
   if disabled counters; then g_collected='' g_generation=''; fi
   if disabled key-mode; then g_keymode=''; fi
@@ -490,8 +487,14 @@ server_id() { tmx display-message -p '#{pid}.#{start_time}' 2>/dev/null; }
 # The guardrail, in order: the server named by a marker first (a restarted
 # server is gone, whatever pane ids it happens to have), then the exact pane.
 check_target() { # check_target [MARKER_SERVER]
-  local sid status
-  sid=$(server_id) || sid=''
+  local sid status sv
+  # The server's version rides its id, so the floor costs no extra call. It
+  # is the server that matters: a new client can reach an old server.
+  sv=$(tmx display-message -p '#{pid}.#{start_time} #{version}' 2>/dev/null) || sv=''
+  sid=${sv%% *}
+  if [ -n "$sid" ]; then
+    tmux_supported "${sv#* }" || die 1 "$tmux_refusal"
+  fi
   if [ -n "${1:-}" ]; then
     [ "$sid" = "$1" ] || {
       gone_reason='the server restarted or is gone'
@@ -825,7 +828,7 @@ locate() { # locate WANT_OUTPUT CAPTURE-FLAGS...
 }
 
 # Print FILE without its trailing blank rows, optionally only the last N.
-# Trailing spaces go too: 3.2a keeps them in -J captures.
+# Trailing spaces go too: -J captures keep them.
 emit_rows() { # emit_rows FILE [N]
   LC_ALL=C awk -v want="${2:-0}" "$awk_lib"'
     { sub(/ +$/, ""); r[NR] = $0 }
@@ -1085,7 +1088,7 @@ cmd_send() {
     done
   done
   [ "$enter" = 0 ] || kn=$((kn + 1))
-  detect_version
+  need_tmux
   make_work
   check_target || die 66 "$gone_reason"
   if [ -n "$wait_mode" ] && [ "$kn" = 0 ]; then
@@ -1177,6 +1180,8 @@ cmd_send() {
   finish_ident
   local marker
   marker=$(marker_string)
+  # From here an interrupted wait names its marker, so its caller can resume.
+  [ -z "$wait_mode" ] || w_marker=$marker
   if [ -z "$wait_mode" ]; then
     [ "$print_marker" = 0 ] || printf '%s\n' "$marker"
     exit 0
@@ -1348,7 +1353,7 @@ cmd_read() {
     [ "$m_pane" = "$pane" ] || die 64 "the marker is for $m_pane, not $pane"
     have=1
   fi
-  detect_version
+  need_tmux
   make_work
   if [ "$have" = 1 ]; then
     check_target "$m_srv" || die 66 "$gone_reason"
@@ -1456,7 +1461,7 @@ wait_end() { # wait_end EXIT KIND STATUS [REASON]
   local line="result=$kind exact=$exact status=$status"
   [ -z "$reason" ] || [ "$exact" != no ] || line="$line reason=${reason// /-}"
   [ -z "$w_marker" ] || line="$line marker=$w_marker"
-  printf '%s\n' "$line" >&2
+  printf '%s\n' "$line" >&9
   exit "$code"
 }
 
@@ -1663,7 +1668,7 @@ cmd_wait() {
     have=1 w_marker=$since
   fi
   w_capture=0 w_mode=$mode
-  detect_version
+  need_tmux
   make_work
   if [ "$have" = 1 ]; then
     check_target "$m_srv" || wait_end 66 gone unknown "$gone_reason"
@@ -1692,7 +1697,7 @@ cmd_mark() {
     esac
   done
   { [ -n "$target_seen" ] && valid_pane "$pane"; } || usage
-  detect_version
+  need_tmux
   make_work
   check_target || die 66 "$gone_reason"
   marker_queue 0 - || die 66 "$pane is gone"

@@ -9,6 +9,7 @@ its file and words in ALLOWED.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
 import sys
@@ -123,6 +124,9 @@ def main() -> int:
     )
     offenders = []
     if not is_checkout():
+        # CI always has a checkout, so the lint can never be skipped there.
+        if os.environ.get("GITHUB_ACTIONS"):
+            raise SystemExit("FAIL: not a Git checkout under GitHub Actions")
         print("note: not a Git checkout, so the old-tmux lint is skipped")
         return 0
     for path in files():

@@ -91,15 +91,6 @@ notify() {
   fi
 }
 
-# An older server is refused before anything else is asked of it. A server
-# that does not answer is not refused here; the calls below report it.
-if version=$(tmux display-message -p '#{version}' 2>/dev/null) &&
-  ! tmux_supported "$version"; then
-  printf 'tmux-copy-last-output: %s\n' "$tmux_refusal" >&2
-  notify "tmux-copy-last-output: $tmux_refusal" 2>/dev/null || true
-  exit 1
-fi
-
 # Search the last 10,000 lines. The old 500-line window lost a command whose
 # own output scrolled its prompt out of range, which is exactly when copying
 # it matters, but the whole history is unbounded: a 90,000-line build log
@@ -107,7 +98,18 @@ fi
 # characters) and a paste no agent wants. 10,000 lines stays near 1 MB.
 capture_args=(-p -S -10000)
 [[ -z "$pane" ]] || capture_args+=(-t "$pane")
-content=$(tmux capture-pane "${capture_args[@]}")
+# The server's version rides the capture, one call per keypress. An older
+# server is refused before its capture is used; a server that does not
+# answer fails the call, as the capture alone would.
+captured=$(tmux display-message -p '#{version}' \; capture-pane "${capture_args[@]}")
+version=${captured%%$'\n'*}
+content=''
+[[ $captured != *$'\n'* ]] || content=${captured#*$'\n'}
+if ! tmux_supported "$version"; then
+  printf 'tmux-copy-last-output: %s\n' "$tmux_refusal" >&2
+  notify "tmux-copy-last-output: $tmux_refusal" 2>/dev/null || true
+  exit 1
+fi
 
 # BEGIN prompt-parser
 # Command-block parser for the two-line prompt (see README "Prompt format").

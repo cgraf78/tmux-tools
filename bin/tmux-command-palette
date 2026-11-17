@@ -132,7 +132,7 @@ fi
 if version=$(tmux display-message -p '#{version}' 2>/dev/null) &&
   ! tmux_supported "$version"; then
   printf 'tmux-command-palette: %s\n' "$tmux_refusal" >&2
-  # tmux before 3.3 answers display-message -c with its usage line; the
+  # An older tmux may answer display-message -c with its usage line; the
   # refusal above is the one thing to say.
   message "tmux-command-palette: $tmux_refusal" 2>/dev/null || true
   exit 1
