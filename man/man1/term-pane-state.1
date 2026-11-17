@@ -85,7 +85,9 @@ by these badges.
 tmux 3.3 or newer. Each client row carries its server's
 .BR #{version} ;
 an older tmux is refused with a message on standard error and exit status 1,
-and nothing is published. A version it cannot read counts as newer.
+and nothing is published. A version it cannot read counts as newer. The
+print form reads no client rows, only pane options, and does not check the
+version.
 .SH EXIT STATUS
 0 indicates success; 1 indicates an older tmux or missing, invalid or changed
 runtime state; 64 indicates invalid arguments.

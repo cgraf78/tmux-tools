@@ -40,11 +40,15 @@ earlier history.
   `tmux-command-palette`, `tmux-copy-last-output`, `tmux-clip-paste` and
   `term-pane-state`, which ask their server for `#{version}` within a query
   they already make (or one extra `display-message -p`) and refuse an older
-  one. A version the rule cannot read counts as newest, so an unknown or
-  unreleased build is never refused. `test/tmux-tools-test` checks the
-  copies, the canonical version table, the README and the man pages
-  against it; `test/tmux_version.py` reads it; `test/tmux-floor-lint.py`
-  fails on any mention of an older tmux outside its allowlist. Feature
+  one; `term-pane-state --print` reads no client rows and does not check.
+  When the picker's batched snapshot fails, it asks for the version alone,
+  since an older server can reject the batch first. A version the rule
+  cannot read counts as newest, so an unknown or unreleased build is never
+  refused. `test/tmux-tools-test` checks the copies, the canonical version
+  table, the README and the man pages against it; `test/tmux_version.py`
+  reads it; `test/tmux-floor-lint.py` fails on any "tmux <version>" or
+  "older than <version>" below the floor outside its allowlist, so a
+  stated floor goes stale loudly. Feature
   checks above the floor (send-keys -K from 3.4, popup focus events from
   3.6) stay capability checks.
 - The continuum commands are activation helpers: they exit quietly when

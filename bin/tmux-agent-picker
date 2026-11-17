@@ -31,8 +31,9 @@ tmux_supported() {
   major=${version%%.*}
   minor=${version#*.}
   minor=${minor%%[!0-9]*}
-  case $version:$major in *.*:[0-9]*) ;; *) return 0 ;; esac
-  case $major$minor in '' | *[!0-9]*) return 0 ;; esac
+  case $version in *.*) ;; *) return 0 ;; esac
+  case $major in '' | *[!0-9]*) return 0 ;; esac
+  case $minor in '' | *[!0-9]*) return 0 ;; esac
   if ((10#$major > floor_major || (10#$major == floor_major && 10#$minor >= floor_minor))); then
     return 0
   fi
@@ -217,7 +218,6 @@ for option in $required_options; do
 done
 
 # All four queries go to tmux as one invocation, so one command queue.
-# shellcheck disable=SC2329 # ask runs it.
 snapshot() {
   tm -u display-message -p "$required" \; \
     display-message -p "$walk" \; \
@@ -363,8 +363,18 @@ if [[ $list == false ]] && ! type -P fzf >/dev/null 2>&1; then
   exit 0
 fi
 
-ask snapshot
-state=$reply
+# An older server may reject the whole snapshot before its version line is
+# read (list-panes -f arrived in 3.2), so on a failed snapshot the version is
+# asked alone: an older server gets the refusal, not tmux's usage error.
+snapshot_status=0
+state=$(snapshot 2>&1) || snapshot_status=$?
+if ((snapshot_status != 0)); then
+  if version=$(tm display-message -p '#{version}' 2>/dev/null) &&
+    ! tmux_supported "$version"; then
+    fail "$tmux_refusal"
+  fi
+  fail "tmux failed (status $snapshot_status): ${state//$'\n'/ }"
+fi
 missing=${state%%$'\n'*}
 [[ $missing == 'R '* ]] || fail 'tmux answered the snapshot with something unexpected'
 missing=${missing#R }

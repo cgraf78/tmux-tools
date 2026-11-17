@@ -91,6 +91,8 @@ VECTORS = [
     ("master", "newest"),
     ("openbsd-7.6", "newest"),
     ("openbsd-7.6-current", "newest"),
+    ("3.x", "unknown"),
+    ("3.", "unknown"),
     ("", "unknown"),
 ]
 

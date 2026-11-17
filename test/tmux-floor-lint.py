@@ -39,14 +39,23 @@ def joined(text: str) -> str:
 
 
 def old_mentions(text: str, minimum: tuple[int, int]) -> list[str]:
-    """Each "tmux <version>" below MINIMUM, case-insensitive, allowing a - or
-    space and then >=, before or v between the two."""
+    """Each "tmux <version>" or "older than <version>" below MINIMUM,
+    case-insensitive. After "tmux", a - or space and then >=, before or v
+    may come between the two. "older than" catches the floor stated without
+    the word tmux, which would go stale silently after a bump."""
     lower = text.lower()
     found = []
+    for key in ("tmux", "older than"):
+        found += _mentions_after(text, lower, key, minimum)
+    return found
+
+
+def _mentions_after(text: str, lower: str, key: str, minimum: tuple[int, int]) -> list[str]:
+    found = []
     start = 0
-    while (at := lower.find("tmux", start)) >= 0:
-        start = at + 4
-        rest = lower[at + 4 :]
+    while (at := lower.find(key, start)) >= 0:
+        start = at + len(key)
+        rest = lower[at + len(key) :]
         if rest[:1] in (" ", "-"):
             rest = rest[1:]
         for word in (">= ", ">=", "before ", "v"):
@@ -74,11 +83,23 @@ def files() -> list[pathlib.Path]:
 
 def main() -> int:
     floor = tmux_version.MINIMUM
-    assert old_mentions("needs tmux\n# 3.2a here", floor) == []
-    assert len(old_mentions(joined("needs tmux\n# 3.2a here"), floor)) == 1
-    assert len(old_mentions(joined(".B tmux\n3.2 or newer"), floor)) == 1
-    assert len(old_mentions("tmux before 3.1 and tmux >= 3.2 and tmux-3.0", floor)) == 3
-    assert old_mentions("tmux 3.3a, tmux 3.10, tmux v3.4, Bash 3.2", floor) == []
+    major, minor = floor
+    if minor == 0:
+        raise SystemExit(f"FAIL: the lint's samples cannot express a floor of {major}.0")
+    # Samples built from the floor, so they stay true after a bump.
+    below, at, above = f"{major}.{minor - 1}", f"{major}.{minor}", f"{major}.{minor + 1}"
+    older = f"{major - 1}.0"
+    assert old_mentions(f"needs tmux\n# {below}a here", floor) == []
+    assert len(old_mentions(joined(f"needs tmux\n# {below}a here"), floor)) == 1
+    assert len(old_mentions(joined(f".B tmux\n{below} or newer"), floor)) == 1
+    assert (
+        len(old_mentions(f"tmux before {older} and tmux >= {below} and tmux-{older}", floor)) == 3
+    )
+    assert len(old_mentions(joined(f"The server is older\nthan {below}."), floor)) == 1
+    assert old_mentions(f"older than {at}, older than tmux {at}", floor) == []
+    assert (
+        old_mentions(f"tmux {at}a, tmux {major}.{minor + 7}, tmux v{above}, Bash 3.2", floor) == []
+    )
     offenders = []
     for path in files():
         relative = path.relative_to(ROOT).as_posix()

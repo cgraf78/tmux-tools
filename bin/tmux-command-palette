@@ -29,8 +29,9 @@ tmux_supported() {
   major=${version%%.*}
   minor=${version#*.}
   minor=${minor%%[!0-9]*}
-  case $version:$major in *.*:[0-9]*) ;; *) return 0 ;; esac
-  case $major$minor in '' | *[!0-9]*) return 0 ;; esac
+  case $version in *.*) ;; *) return 0 ;; esac
+  case $major in '' | *[!0-9]*) return 0 ;; esac
+  case $minor in '' | *[!0-9]*) return 0 ;; esac
   if ((10#$major > floor_major || (10#$major == floor_major && 10#$minor >= floor_minor))); then
     return 0
   fi
@@ -131,7 +132,9 @@ fi
 if version=$(tmux display-message -p '#{version}' 2>/dev/null) &&
   ! tmux_supported "$version"; then
   printf 'tmux-command-palette: %s\n' "$tmux_refusal" >&2
-  message "tmux-command-palette: $tmux_refusal" || true
+  # tmux before 3.3 answers display-message -c with its usage line; the
+  # refusal above is the one thing to say.
+  message "tmux-command-palette: $tmux_refusal" 2>/dev/null || true
   exit 1
 fi
 

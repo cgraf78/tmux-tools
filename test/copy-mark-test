@@ -9,6 +9,10 @@ unset BASH_ENV ENV
 
 TEST_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd -- "$TEST_DIR/.." && pwd -P)"
+# The floor and a release just below it, from the tools' own tmux_minimum,
+# so these cases follow a floor bump.
+floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
+older_tmux=${floor_tmux%%.*}.$((${floor_tmux#*.} - 1))a
 
 # shellcheck source=copy-mark-helpers.sh
 . "$TEST_DIR/copy-mark-helpers.sh"
@@ -257,15 +261,15 @@ _assert_contains "copy noted: the Copied message carries clip's notices, one per
 # An older server is refused before the pane is read, and the client is
 # told why.
 TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/old-message.log" \
-  TMUX_CALL_LOG="$tmp/old-tmux.log" TMUX_TEST_VERSION=3.2a \
+  TMUX_CALL_LOG="$tmp/old-tmux.log" TMUX_TEST_VERSION=$older_tmux \
   PBCOPY_OUT="$tmp/old-copied" PATH="$mock_bin:$PATH" \
   "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007 2>"$tmp/old.err"
 _assert_exit "copy on an older tmux: fails" 1 "$?"
 _assert_file_content "copy on an older tmux: tells the pressing client" \
-  'display-message -c /dev/ttys007 -t %7 tmux-copy-last-output: needs tmux 3.3 or newer (server is 3.2a)' \
+  "display-message -c /dev/ttys007 -t %7 tmux-copy-last-output: needs tmux $floor_tmux or newer (server is $older_tmux)" \
   "$tmp/old-message.log"
 _assert_file_content "copy on an older tmux: says so on stderr" \
-  'tmux-copy-last-output: needs tmux 3.3 or newer (server is 3.2a)' "$tmp/old.err"
+  "tmux-copy-last-output: needs tmux $floor_tmux or newer (server is $older_tmux)" "$tmp/old.err"
 _assert_not_contains "copy on an older tmux: reads no pane" \
   'capture-pane' "$(cat "$tmp/old-tmux.log")"
 _assert_file_missing "copy on an older tmux: copies nothing" "$tmp/old-copied"

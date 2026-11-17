@@ -44,8 +44,8 @@ Small helpers for tmux setups that outgrow the defaults:
 - Bash 3.2 or newer
 - tmux 3.3 or newer. `tmux-agent-picker`, `tmux-command-palette`,
   `tmux-copy-last-output`, `tmux-clip-paste` and `term-pane-state` ask their
-  server for its version and refuse an older one, saying so; the others
-  assume it.
+  server for its version and refuse an older one, saying so (except
+  `term-pane-state --print`); the others assume it.
 - tmux-continuum and tmux-resurrect for `tmux-continuum-default-server`
   (found under `$TMUX_PLUGIN_MANAGER_PATH`, which TPM sets, else
   `$HOME/.local/share/tmux-plugins`)

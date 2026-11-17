@@ -23,8 +23,9 @@ tmux_supported() {
   major=${version%%.*}
   minor=${version#*.}
   minor=${minor%%[!0-9]*}
-  case $version:$major in *.*:[0-9]*) ;; *) return 0 ;; esac
-  case $major$minor in '' | *[!0-9]*) return 0 ;; esac
+  case $version in *.*) ;; *) return 0 ;; esac
+  case $major in '' | *[!0-9]*) return 0 ;; esac
+  case $minor in '' | *[!0-9]*) return 0 ;; esac
   if ((10#$major > floor_major || (10#$major == floor_major && 10#$minor >= floor_minor))); then
     return 0
   fi
