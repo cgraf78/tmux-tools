@@ -24,7 +24,7 @@ set -f
 # tmux-pane(1), the README or AGENTS.md disagree with them.
 # `tmux-pane --interface` prints them for other repositories' doc tests.
 tp_subcommands='send read wait mark'
-tp_opts_top='-h --help --interface'
+tp_opts_top='-h --help --interface --check-refs'
 tp_opts_common='-t -L -S -h --help'
 tp_opts() { # tp_opts SUBCOMMAND: its own options, after tp_opts_common
   case $1 in
@@ -43,7 +43,7 @@ tp_default_timeout=110 tp_default_start_timeout=10 tp_default_settle=1
 # tool relies on (list-panes -f, #{e|+:}, set-option -pF). Everything newer is
 # detected from tmux itself, never from its version (see "capabilities").
 tp_tmux_floor='3 2'
-interface() {
+interface_text() {
   local sub opts
   printf 'subcommands %s\n' "$tp_subcommands"
   for sub in $tp_subcommands; do
@@ -57,7 +57,125 @@ interface() {
   printf 'default --timeout=%s --start-timeout=%s --settle=%s\n' \
     "$tp_default_timeout" "$tp_default_start_timeout" "$tp_default_settle"
   printf 'floor %s\n' "${tp_tmux_floor/ /.}"
+}
+interface() {
+  interface_text
   exit 0
+}
+
+# --check-refs FILE...: the documentation check this repository's tests and
+# other repositories' (agent rules) run, kept here so there is one copy. It
+# reads Markdown, plain text or man pages and prints one line per bad
+# reference, then "#refs N", the number of references it read, so a caller
+# can tell a clean document from a scan that read nothing. Records are
+# paragraphs, list items and man paragraphs, joined so a wrapped reference
+# is read whole; code blocks are read a line at a time. In a record that
+# names tmux-pane:
+# - `tmux-pane SUB ...` names a subcommand and only that subcommand's
+#   options, inside [ ] too, up to a backtick, #, --, $..., the next
+#   tmux-pane, or a | outside brackets;
+# - every other --option word is one some subcommand (or the top level)
+#   takes, unless a record that does not name tmux-pane uses it too (another
+#   command's option, such as term-pane-mark --kind); so check all of a
+#   repository's documents in one call;
+# - a number after "exit" or "exits" (and the rest of a list such as
+#   "exits 64 or 65") is a listed exit status.
+# The interface goes in through the environment: BSD awk refuses a -v value
+# with a newline in it.
+check_refs() { # check_refs FILE...
+  [ $# -gt 0 ] || usage
+  local f
+  for f in "$@"; do
+    [ -r "$f" ] || die 1 "cannot read $f"
+  done
+  # shellcheck disable=SC2016 # Literal backticks in sed; an awk program.
+  sed 's/\\-/-/g; s/\\f[BIRP]//g; s/`/ ` /g' "$@" | TP_IFACE=$(interface_text) awk -v sq="'" '
+    BEGIN {
+      n = split(ENVIRON["TP_IFACE"], L, "\n")
+      for (i = 1; i <= n; i++) {
+        m = split(L[i], f, " ")
+        if (f[1] == "subcommands") for (j = 2; j <= m; j++) sub_ok[f[j]] = 1
+        if (f[1] == "exit") for (j = 2; j <= m; j++) code_ok[f[j]] = 1
+      }
+      for (i = 1; i <= n; i++) {
+        m = split(L[i], f, " ")
+        if (!(f[1] in sub_ok)) continue
+        for (j = 2; j <= m; j++) { opt[f[1], f[j]] = 1; any[f[j]] = 1 }
+      }
+      for (i = 1; i <= n; i++) {
+        m = split(L[i], f, " ")
+        if (f[1] == "top") for (j = 2; j <= m; j++) any[f[j]] = 1
+      }
+      refs = 0; rec = ""; code = 0; nr = 0
+    }
+    # Records that name tmux-pane are checked at the end, once every other
+    # record has shown which --options belong to other commands.
+    function add(r,   w, t, i, x) {
+      if (index(r, "tmux-pane")) { recs[++nr] = r; return }
+      w = split(r, t, " ")
+      for (i = 1; i <= w; i++) { x = bare(t[i]); if (x ~ /^--[a-z]/) foreign[x] = 1 }
+    }
+    function bare(x) { gsub(/[][(),.;:"]/, "", x); sub(/=.*/, "", x); return x }
+    function check(r,   w, t, i, j, s, ns, alt, known, bad, a, k, x, q, nq, depth, no, alt2, b, ok, seen, y, nb, part, c, np) {
+      w = split(r, t, " ")
+      split("", seen)
+      for (i = 1; i < w; i++) {
+        if (t[i] != "tmux-pane") continue
+        s = t[i + 1]; gsub(/[][(),.;:]/, "", s)
+        # Prose ("tmux-pane drives ...") is not a reference; a real one
+        # names a subcommand, and an unknown word only counts before -t.
+        if (s !~ /^[a-z]+(\|[a-z]+)*$/) continue
+        ns = split(s, alt, "|"); known = 1
+        for (a = 1; a <= ns; a++) if (!(alt[a] in sub_ok)) known = 0
+        if (!known) { if (t[i + 2] == "-t") print "subcommand " s; continue }
+        refs++
+        q = 0; depth = 0
+        for (k = i + 2; k <= w; k++) {
+          x = t[k]
+          if (x == "`" || x == "#" || x == "--" || x == "tmux-pane" || x ~ /^\$/) break
+          if (x == "|" && depth == 0) break
+          seen[k] = 1
+          y = x; depth += gsub(/\[/, "", y); depth -= gsub(/\]/, "", y)
+          if (depth < 0) depth = 0
+          nq = gsub(sq, "&", x)
+          if (q || (nq % 2 == 1 && substr(x, 1, 1) == sq)) { if (nq % 2 == 1) q = !q; continue }
+          x = bare(x)
+          if (x !~ /^-/) continue
+          no = split(x, alt2, "|")
+          for (b = 1; b <= no; b++) {
+            if (alt2[b] == "" || alt2[b] ~ /^-[0-9]/) continue
+            ok = 0
+            for (a = 1; a <= ns; a++) if ((alt[a], alt2[b]) in opt) ok = 1
+            if (!ok) print s " " alt2[b]
+          }
+        }
+      }
+      for (i = 1; i <= w; i++) {
+        y = tolower(t[i])
+        if (y == "exit" || y == "exits") {
+          for (j = i + 1; j <= w; j++) {
+            c = t[j]; gsub(/[(),.;:]/, "", c)
+            if (c == "or" || c == "and" || c == "") continue
+            if (c !~ /^[0-9]+([\/-][0-9]+)*$/) break
+            np = split(c, part, /[\/-]/)
+            for (b = 1; b <= np; b++) if (!(part[b] in code_ok)) print "exit " part[b]
+          }
+        }
+        if (i in seen) continue
+        nb = split(bare(t[i]), part, "|")
+        for (b = 1; b <= nb; b++)
+          if (part[b] ~ /^--[a-z]/ && !(part[b] in any) && !(part[b] in foreign)) print "option " part[b]
+      }
+    }
+    # A Markdown fence (its backticks spaced out above), or a man page
+    # no-fill block.
+    code && (/^ *` *` *`/ || /^\.(fi|EE)( |$)/) { code = 0; next }
+    code { add($0); next }
+    /^ *` *` *`/ || /^\.(nf|EX)( |$)/ { add(rec); rec = ""; code = 1; next }
+    /^[ \t]*$/ || /^\.(PP|LP|P|TP|IP|SH|SS|RS|RE)( |$)/ { add(rec); rec = ""; next }
+    /^[ \t]*([-*]|[0-9]+\.) / { add(rec); rec = "" }
+    { rec = rec " " $0 }
+    END { add(rec); for (i = 1; i <= nr; i++) check(recs[i]); print "#refs " refs }'
 }
 
 usage() {
@@ -1722,6 +1840,7 @@ case $sub in
   mark) cmd_mark "$@" ;;
   -h | --help | help) help ;;
   --interface) interface ;;
+  --check-refs) check_refs "$@" ;;
   *)
     printf 'tmux-pane: unknown subcommand: %s\n' "$sub" >&2
     usage

@@ -515,6 +515,23 @@ with each option's default; and
 with the oldest supported tmux. The script keeps this list in one place; its
 tests check the code, the usage text, this page, the README and AGENTS.md
 against it, and other documentation can do the same.
+.PP
+.B tmux-pane \-\-check\-refs
+.I FILE ...
+is a maintenance aid for those documentation tests. It reads Markdown, text
+or man pages and prints one line for each reference that does not match the
+list: a
+.B tmux-pane
+subcommand that does not exist or an option it does not take, any other
+long option that no subcommand takes, or an unlisted status after
+.BR exit .
+It ends with
+.BI "#refs " N\fR,
+the number of references it read, so a caller can tell a clean document from
+a scan that read nothing. Check all of a repository's documents in one call:
+an option used where
+.B tmux-pane
+is not named belongs to another command.
 .SH ENVIRONMENT
 .TP
 .B TMUX

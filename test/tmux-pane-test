@@ -183,6 +183,14 @@ sed 's/\\-/-/g; s/\\f[BIRP]//g' "$man_page" >"$tmp/man.txt"
 check 'drift: tmux-pane(1) uses only listed --options' '' \
   "$(not_listed "$(opt_words "$man_page" | grep -- '^--')" "$all_opts")"
 check 'drift: tmux-pane(1) documents every option' '' "$(missing_from "$all_opts" "$(opt_words "$man_page")")"
+# TMUX_PANE_TEST_DISABLE: the features the tool can force off are the ones
+# tmux-pane(1) lists and the ones this suite forces off.
+dis_tool=$(grep -oE 'disabled [a-zA-Z-]+' "$TOOL" | awk '$2 != "FEATURE" { print $2 }' | sort -u | tr '\n' ' ')
+dis_man=$(awk '/^\.B TMUX_PANE_TEST_DISABLE$/ { on = 1; next } on && /^\.(TP|SH)/ { exit }
+  on && /^\.BR / { print $2 }' "$man_page" | sort -u | tr '\n' ' ')
+dis_test=$(grep -oE 'TMUX_PANE_TEST_DISABLE=[a-zA-Z,-]+' "$ROOT/test/tmux-pane-test" | sed 's/.*=//' | tr ',' '\n' | sort -u | tr '\n' ' ')
+check 'drift: tmux-pane(1) lists the features TMUX_PANE_TEST_DISABLE forces off' "$dis_tool" "$dis_man"
+check 'drift: the suite forces off every feature the tool can' "$dis_tool" "$dis_test"
 # Result kinds, inexact reasons, defaults and the floor: the code uses
 # exactly the listed ones, and the docs say the same.
 words() { tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' '; }
@@ -221,78 +229,39 @@ used=$(grep -oE '(die|exit|wait_end|wait_result_error) [0-9]+' "$TOOL" | awk '{ 
 check 'drift: every literal exit status is listed' '' "$(not_listed "$used" "$(printf '%s\n' "$exit_codes")")"
 
 # Every `tmux-pane SUB ...` reference in the docs names a real subcommand and
-# only that subcommand's options (alternatives such as send|read are split).
-# The interface goes in through the environment: BSD awk refuses a -v value
-# with a newline in it. ref_scan ends with "#refs N", the references it read,
-# so a checker that silently reads nothing fails its self-test.
-ref_scan() { # ref_scan FILE...: prints bad references, then "#refs N"
-  sed 's/\\-/-/g; s/\\f[BIRP]//g; s/`/ ` /g' "$@" | TP_IFACE=$iface awk -v sq="'" '
-    BEGIN {
-      n = split(ENVIRON["TP_IFACE"], L, "\n")
-      for (i = 1; i <= n; i++) {
-        m = split(L[i], f, " ")
-        if (f[1] == "subcommands") for (j = 2; j <= m; j++) sub_ok[f[j]] = 1
-      }
-      for (i = 1; i <= n; i++) {
-        m = split(L[i], f, " ")
-        if (!(f[1] in sub_ok)) continue
-        for (j = 2; j <= m; j++) opt[f[1], f[j]] = 1
-      }
-      refs = 0
-    }
-    END { print "#refs " refs }
-    {
-      w = split($0, t, " ")
-      for (i = 1; i < w; i++) {
-        if (t[i] != "tmux-pane") continue
-        s = t[i + 1]; gsub(/[][(),.;:]/, "", s)
-        # Prose ("tmux-pane drives ...") is not a reference; a real one
-        # names a subcommand, and an unknown word only counts before -t.
-        if (s !~ /^[a-z]+(\|[a-z]+)*$/) continue
-        if (t[i + 2] != "-t") { ns = split(s, alt, "|"); known = 1
-          for (a = 1; a <= ns; a++) if (!(alt[a] in sub_ok)) known = 0
-          if (!known) continue }
-        ns = split(s, alt, "|"); bad = 0
-        for (a = 1; a <= ns; a++) if (!(alt[a] in sub_ok)) { print "subcommand " alt[a]; bad = 1 }
-        if (bad) continue
-        refs++
-        q = 0
-        for (k = i + 2; k <= w; k++) {
-          x = t[k]
-          if (x == "`" || x == "#" || x == "|" || x == "--" || x ~ /^\$/) break
-          nq = gsub(sq, "&", x); if (q || nq % 2 == 1 && substr(x, 1, 1) == sq) { if (nq % 2 == 1) q = !q; continue }
-          if (x !~ /^-/) continue
-          gsub(/[][(),.;:"]/, "", x); sub(/=.*/, "", x)
-          no = split(x, alt2, "|")
-          for (b = 1; b <= no; b++) {
-            if (alt2[b] == "" || alt2[b] ~ /^-[0-9]/) continue
-            okk = 0
-            for (a = 1; a <= ns; a++) if ((alt[a], alt2[b]) in opt) okk = 1
-            if (!okk) print s " " alt2[b]
-          }
-        }
-      }
-    }'
-}
+# only its options, and bare options and exit statuses are listed ones. The
+# scanner is the tool's own --check-refs, the copy other repositories' doc
+# tests use too. Its "#refs N" line counts the references read, so a scan
+# that silently reads nothing fails here.
 ref_check() { # ref_check FILE...: prints bad references; fails loudly if the scan does
   local out
-  out=$(ref_scan "$@") || out='checker failed'
+  out=$("$BASH" "$TOOL" --check-refs "$@" 2>&1) || out="checker failed: $out"
   case $out in *'#refs '[0-9]*) ;; *) out="checker failed${out:+: $out}" ;; esac
   printf '%s\n' "$out" | grep -v '^#refs '
 }
-for doc in README.md AGENTS.md man/man1/tmux-pane.1 man/man1/term-pane-mark.1 man/man1/tmux-copy-last-output.1; do
-  check "drift: $doc names only real tmux-pane subcommands and options" '' "$(ref_check "$ROOT/$doc" | sort -u | tr '\n' ';')"
-done
+# One call over every document, so another command's options (named in a
+# record without tmux-pane) are known as theirs.
+docs=("$ROOT/README.md" "$ROOT/AGENTS.md" "$ROOT"/man/man1/*.1)
+check 'drift: the docs name only real tmux-pane subcommands, options and exits' '' \
+  "$(ref_check "${docs[@]}" | sort -u | tr '\n' ';')"
 check 'drift: help and usage examples use real options' '' "$(ref_check "$tmp/text.txt" | sort -u | tr '\n' ';')"
-# The checker itself catches a wrong option and a wrong subcommand.
-printf '%s\n' 'run `tmux-pane send -t %1 --enterr` or `tmux-pane bogus -t %1`' >"$tmp/bad.md"
-check 'drift: the reference check flags bad references' 'send --enterr;subcommand bogus;' "$(ref_check "$tmp/bad.md" | sort -u | tr '\n' ';')"
+# The checker itself: a wrong option, bracketed ones (also after a | inside
+# brackets), one wrapped onto the next line, a bare unknown option, a wrong
+# subcommand and unlisted exit statuses; prose numbers are not statuses.
+cat >"$tmp/bad.md" <<'EOF'
+- `tmux-pane send -t %1 --enterr [--typ]` or `tmux-pane bogus -t %1`.
+- `tmux-pane read -t %N [--line N | --al]` and `tmux-pane wait
+  -t %1 --wrapped`; keep `--sincee` low. After 5 retries it exits 99, or
+  exit 64 or 98; after 68 is fine.
+EOF
+check 'drift: the reference check flags bad references' \
+  'exit 98;exit 99;option --sincee;read --al;read --line;send --enterr;send --typ;subcommand bogus;wait --wrapped;' \
+  "$(ref_check "$tmp/bad.md" | sort -u | tr '\n' ';')"
 printf '%s\n' 'run `tmux-pane send -t %1 --enter '"'"'a -b'"'"'` and `tmux-pane read|wait -t %1' \
   '--since "$M"`' >"$tmp/good.md"
-check 'drift: the reference check reads known-good references' '#refs 2' "$(ref_scan "$tmp/good.md")"
+check 'drift: the reference check reads known-good references' '#refs 2' "$("$BASH" "$TOOL" --check-refs "$tmp/good.md")"
 check 'drift: the docs hold references for it to check' 1 \
-  "$([ "$(ref_scan "$ROOT/README.md" "$ROOT/man/man1/tmux-pane.1" | sed -n 's/^#refs //p')" -ge 5 ] && echo 1 || echo 0)"
-
+  "$([ "$("$BASH" "$TOOL" --check-refs "${docs[@]}" | sed -n 's/^#refs //p')" -ge 10 ] && echo 1 || echo 0)"
 if ! command -v tmux >/dev/null 2>&1; then
   if [ "${TMUX_TOOLS_REQUIRE_TMUX:-0}" = 1 ]; then
     printf 'FAIL: tmux required for tmux-pane-test\n' >&2
@@ -863,14 +832,14 @@ settle_file "$so"
 check 'rg_x12 --enter leaves the mode first' "$(hexfmt '\r')" "$(hexfile "$so")"
 check 'rg_x12 and the pane is out of the mode' 0 "$(T display -p -t "$sp" '#{pane_in_mode}')"
 
-# Before 3.5 there is no pane_key_mode, and extended-keys on would make every
-# modified key under sync a 67 (rg_x11); these cases want VT10x.
+# Before 3.5 there is no pane_key_mode, and extended-keys on would skip the
+# VT10x pre-check (rg_x11); these cases want VT10x.
 T set-option -s extended-keys off
 
-# rg_x2, rg_x13: synchronize-panes. Every portable key is written as bytes
-# that only the target receives, and the bytes equal what tmux's own
-# send-keys produces for the same key (a sync-off pane), in VT10x mode and
-# in application cursor and keypad mode.
+# rg_x2, rg_x13: synchronize-panes. Under sync every portable key reaches
+# only the target, and its bytes equal those the same send produces in a
+# pane with sync off, in VT10x mode and in application cursor and keypad
+# mode.
 keys_portable='Up C-Up M-Up S-Up C-M-S-Up Down Left Right Home C-Home End S-End F1 C-F1 F4 F5 S-F5 F12 C-M-F12 IC C-IC DC PPage NPage C-NPage PageUp PgDn BSpace M-BSpace Enter M-Enter Tab M-Tab BTab Escape M-Escape Space C-Space M-Space C-M-Space KP0 KP5 M-KP5 KP/ KP* KP- KP+ KP. KPEnter a z C-a C-z M-a C-M-a 1 M-1 C-/ C-[ C-\ C-] C-^ C-_ C-@ C-? M-? % M-% ? * ; M-;'
 diff_keys() { # diff_keys INIT LABEL
   local ref ref_out tgt tgt_out other other_out k
@@ -1263,6 +1232,12 @@ if tmux_ge 3 8; then
   sleep 0.3
   tp send -t "$sh" 'seq 20' --enter --wait prompt >/dev/null 2>&1
   check 'rg_m9 with 3.8 counters, trims stay exact' 1 "$(tp read -t "$sh" --since "$M" 2>/dev/null | grep -c '^\$ echo counted$')"
+  # Without the counters (forced off), the same read falls back to the
+  # trusted-row path, which cannot see past a trim.
+  env TMUX_PANE_TEST_DISABLE=counters "$BASH" -c 'exec "$@"' _ \
+    env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" read -S "$sock" -t "$sh" --since "$M" >/dev/null 2>"$tmp/inx.err"
+  check 'rg_m9 with the counters forced off, a trim is inexact' 4 "$?"
+  check_contains 'rg_m9 as trimmed' trimmed "$(cat "$tmp/inx.err")"
   T clear-history -t "$sh"
   inexact 'rg_m9 clear-history bumps the generation' "$sh" "$M" 'generation changed'
   M=$(tp send -t "$sh" "printf '\\033[3J'" --enter --print-marker)
