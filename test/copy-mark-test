@@ -360,6 +360,131 @@ _assert_eq "print no output: writes nothing" "" "$printed"
 _assert_contains "print no output: reports missing block" \
   "No command output found" "$(cat "$tmp/print-empty-message.log")"
 
+# Parser regressions (shared with tmux-pane; see its suite for the region
+# identity test). Bash prints the prompt right after output that has no final
+# newline, so line 1 arrives glued to that output.
+parse_print() { # parse_print CAPTURE_FILE [COUNT]
+  TMUX_CAPTURE_FILE="$1" TMUX_MESSAGE_LOG="$tmp/parse-message.log" \
+    PBCOPY_OUT="$tmp/parse-copy.txt" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/tmux-copy-last-output" --print ${2:+"$2"}
+}
+cat >"$tmp/glued.txt" <<'EOF'
+user@test:/repo (main)
+$ printf ok; false
+ok[1] user@test:/repo (main)
+$
+EOF
+_assert_eq "rg_p2 parser: glued output before a [N] status is the output" \
+  '$ printf ok; false
+ok' "$(parse_print "$tmp/glued.txt")"
+cat >"$tmp/glued-dots.txt" <<'EOF'
+user@test:/repo (main)
+$ printf 1.2.3
+1.2.3user@test:/repo (main)
+$
+EOF
+_assert_eq "rg_p3 parser: glued 1.2.3 splits from the prompt" \
+  '$ printf 1.2.3
+1.2.3' "$(parse_print "$tmp/glued-dots.txt")"
+cat >"$tmp/glued-twice.txt" <<'EOF'
+user@test:/repo (main)
+$ printf a
+auser@test:/repo (main)
+$ printf b
+buser@test:/repo (main)
+$
+EOF
+_assert_eq "rg_p5 parser: two glued outputs in a row agree on one identity" \
+  '$ printf a
+a
+
+$ printf b
+b' "$(parse_print "$tmp/glued-twice.txt" 2)"
+cat >"$tmp/root-prompt.txt" <<'EOF'
+root@box:/ (main)
+# id -u
+0
+root@box:/ (main)
+#
+EOF
+_assert_eq "rg_p12 parser: a # line 2 is a prompt" \
+  '# id -u
+0' "$(parse_print "$tmp/root-prompt.txt")"
+# A # line 2 also starts comments and headings, so its line 1 must start
+# with the identity: an address line in output followed by `# Install` stays
+# output.
+cat >"$tmp/root-in-output.txt" <<'EOF'
+user@test:/repo (main)
+$ cat notes.md
+git@github.com:me/tool.git
+# Install
+run it
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: an address and a # line in output are not a prompt" \
+  '$ cat notes.md
+git@github.com:me/tool.git
+# Install
+run it' "$(parse_print "$tmp/root-in-output.txt")"
+cat >"$tmp/root-glued.txt" <<'EOF'
+user@test:/repo (main)
+$ cat deploy.txt
+rsync -a build/ user@test:/srv/app
+# restart
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: the identity inside output before a # line is not a prompt" \
+  '$ cat deploy.txt
+rsync -a build/ user@test:/srv/app
+# restart' "$(parse_print "$tmp/root-glued.txt")"
+# Output that ends in a space (printf '%s ' x y) glues to the next prompt
+# with a space before the identity. It is a prompt when the rest of the line
+# repeats an unglued prompt; a line that only mentions the identity above a
+# $ line stays output.
+cat >"$tmp/glue-space.txt" <<'EOF'
+user@test:/repo (main)
+$ printf '%s ' x y
+x y user@test:/repo (main)
+$ echo next
+next
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: output ending in a space glued to the prompt is its own block" \
+  "\$ printf '%s ' x y
+x y 
+
+\$ echo next
+next" "$(parse_print "$tmp/glue-space.txt" 2)"
+cat >"$tmp/glue-mention.txt" <<'EOF'
+user@test:/repo (main)
+$ cat log.txt
+Copy to user@test:/srv
+$ not a prompt
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: a line that mentions the identity above a \$ line is output" \
+  '$ cat log.txt
+Copy to user@test:/srv
+$ not a prompt' "$(parse_print "$tmp/glue-mention.txt")"
+cat >"$tmp/status-prompt.txt" <<'EOF'
+user@test:/repo (main)
+$ false
+[1] user@test:/repo (main)
+$ echo after
+after
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: a leading [N] status keeps the prompt anchored" \
+  '$ false
+
+$ echo after
+after' "$(parse_print "$tmp/status-prompt.txt" 2)"
+
 echo
 echo "=== term-notify-sound ==="
 
@@ -706,7 +831,7 @@ for mark in pending:@term_notify_pending busy:@term_busy; do
   TMUX=/tmp/tmux-test TMUX_PANE=%20 TERM_PROGRAM=tmux TMUX_SET_LOG="$mark_log" \
     PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" clear "$name"
   _assert_exit "mark $name: clear succeeds" 0 "$?"
-  expected='set-option -pu -t %20 @term_busy_token ; set-option -p -t %20 @term_busy 1
+  expected='set-option -pu -t %20 @term_busy_token ; set-option -p -t %20 @term_busy 1 ; set-option -pF -t %20 @term_busy_seq #{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}
 if-shell -F -t %20 #{==:#{@term_busy_token},} set-option -pu -t %20 @term_busy ; set-option -pu -t %20 @term_busy_token '
   if [[ $name == pending ]]; then
     expected="set-option -pu -t %20 @term_notify_exit_status ; set-option -p -t %20 @term_notify_pending done
@@ -894,7 +1019,7 @@ log="$tmp/mark-republish-name.log"
 TMUX_SET_LOG="$tmp/mark-republish-name-set.log" TMUX_PUBLISH_LOG="$log" \
   PATH="$mock_bin:$PATH" "$ROOT/bin/term-pane-mark" set busy --pane 'work:1.0'
 _assert_file_content "mark: a pane name still sets the mark" \
-  'set-option -pu -t work:1.0 @term_busy_token ; set-option -p -t work:1.0 @term_busy 1' \
+  'set-option -pu -t work:1.0 @term_busy_token ; set-option -p -t work:1.0 @term_busy 1 ; set-option -pF -t work:1.0 @term_busy_seq #{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}' \
   "$tmp/mark-republish-name-set.log"
 _assert_file_missing "mark: a pane name is never parsed into a republish command" "$log"
 assert_invalid_mark "mark missing condition" clear pending --if
@@ -959,7 +1084,7 @@ assert_owned "a foreground owner publishes failure metadata first" \
   set pending --owner 4242 --exit-status 42
 
 assert_owned "the foreground program sets the mark" \
-  'set-option -pu -t %40 @term_busy_token ; set-option -p -t %40 @term_busy 1' set busy --owner 4242
+  'set-option -pu -t %40 @term_busy_token ; set-option -p -t %40 @term_busy 1 ; set-option -pF -t %40 @term_busy_seq #{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}' set busy --owner 4242
 assert_owned "the foreground program clears the mark" \
   'if-shell -F -t %40 #{==:#{@term_busy_token},} set-option -pu -t %40 @term_busy ; set-option -pu -t %40 @term_busy_token ' clear busy --owner 4242
 assert_owned "a background process group cannot set it" '' set busy --owner 4243
@@ -969,7 +1094,7 @@ assert_owned "another terminal's foreground cannot set it" '' set busy --owner 4
 assert_owned "an exited process is not asked about through ps" '' \
   set busy --owner 4246
 assert_owned "options combine with an explicit pane" \
-  'set-option -pu -t %41 @term_busy_token ; set-option -p -t %41 @term_busy 1' set busy --owner 4242 --pane %41
+  'set-option -pu -t %41 @term_busy_token ; set-option -p -t %41 @term_busy 1 ; set-option -pF -t %41 @term_busy_seq #{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}' set busy --owner 4242 --pane %41
 assert_owned "reset clears busy and sticky pending in one queue" \
   'set-option -pu -t %40 @term_busy ; set-option -pu -t %40 @term_busy_token ; if-shell -F -t %40 #{||:#{==:#{@term_notify_pending},waiting},#{==:#{@term_notify_pending},blocked}} set-option -pu -t %40 @term_notify_pending ; set-option -pu -t %40 @term_notify_exit_status ' \
   reset busy --owner 4242
@@ -983,20 +1108,21 @@ assert_owned "the foreground owner clears its sticky mark" \
   clear pending --if waiting --owner 4242
 
 # Without /proc, ps reports the process group, foreground group, and terminal.
-for case in '4242 4242 pts/9:set-option -pu -t %40 @term_busy_token ; set-option -p -t %40 @term_busy 1:foreground' \
-  '4242 4300 pts/9::background' '4242 4242 pts/10::another terminal' \
-  '4242 4242 ?::no terminal'; do
-  state=${case%%:*}
-  rest=${case#*:}
-  expected=${rest%%:*}
-  log="$tmp/mark-owner-ps-${case##*:}.log"
+for case in '4242 4242 pts/9=set-option -pu -t %40 @term_busy_token ; set-option -p -t %40 @term_busy 1 ; set-option -pF -t %40 @term_busy_seq #{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}=foreground' \
+  '4242 4300 pts/9==background' '4242 4242 pts/10==another terminal' \
+  '4242 4242 ?==no terminal'; do
+  # = separates the fields: the expected queue contains colons.
+  state=${case%%=*}
+  rest=${case#*=}
+  expected=${rest%%=*}
+  log="$tmp/mark-owner-ps-${case##*=}.log"
   TMUX=/tmp/tmux-test TMUX_PANE=%40 TERM_PROGRAM=tmux TMUX_SET_LOG="$log" \
     TMUX_PANE_TTY=/dev/pts/9 PS_STATE="$state" PATH="$mock_bin:$PATH" \
     "$ROOT/bin/term-pane-mark" set busy --owner 4242
   if [[ -n $expected ]]; then
-    _assert_file_content "mark owner via ps: ${case##*:} sets the mark" "$expected" "$log"
+    _assert_file_content "mark owner via ps: ${case##*=} sets the mark" "$expected" "$log"
   else
-    _assert_file_missing "mark owner via ps: ${case##*:} cannot set it" "$log"
+    _assert_file_missing "mark owner via ps: ${case##*=} cannot set it" "$log"
   fi
 done
 
@@ -1017,7 +1143,7 @@ for case in '34821:%5:pts/5' '35073:%257:pts/257 (major 137)' \
     TMUX_PANES="$proc_panes" PATH="$mock_bin:$PATH" \
     "$ROOT/bin/term-pane-mark" set busy
   _assert_file_content "mark: /proc resolves ${case##*:} without ps" \
-    "set-option -pu -t $expected @term_busy_token ; set-option -p -t $expected @term_busy 1" "$proc_log"
+    "set-option -pu -t $expected @term_busy_token ; set-option -p -t $expected @term_busy 1 ; set-option -pF -t $expected @term_busy_seq #{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}" "$proc_log"
 done
 
 # No controlling terminal in /proc is final: ps is not asked.
@@ -1036,6 +1162,6 @@ env -u TMUX -u TMUX_PANE -u TERM_PROGRAM TERM_PANE_MARK_PROC_ROOT="$proc_root" \
   TMUX_PANES="$proc_panes" PATH="$mock_bin:$PATH" \
   "$ROOT/bin/term-pane-mark" set busy
 _assert_file_content "mark: a non-pty /proc terminal falls back to ps" \
-  'set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1' "$tmp/mark-proc-console.log"
+  'set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1 ; set-option -pF -t %7 @term_busy_seq #{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}' "$tmp/mark-proc-console.log"
 
 _test_summary

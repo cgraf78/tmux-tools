@@ -48,12 +48,13 @@ jobs:
 
           for command in tmux-clip-paste tmux-continuum-default-server \
             tmux-continuum-save-gate tmux-copy-last-output \
-            tmux-command-palette tmux-agent-picker term-pane-mark \
+            tmux-command-palette tmux-agent-picker tmux-pane term-pane-mark \
             term-notify-sound term-pane-state; do
             [[ -L "$install_prefix/bin/$command" ]] || exit 1
             /bin/bash -n "$install_prefix/bin/$command"
           done
           /bin/bash "$install_prefix/bin/tmux-clip-paste" --help >/dev/null
+          /bin/bash "$install_prefix/bin/tmux-pane" --help >/dev/null
           TMUX= /bin/bash "$install_prefix/bin/tmux-continuum-default-server"
           /bin/bash "$install_prefix/bin/tmux-continuum-save-gate"
 
@@ -102,7 +103,7 @@ jobs:
           PATH="$stub_dir:$PATH" TMUX=/tmp/stub,1,0 TMUX_PANE=%7 \
             TERM_PROGRAM=tmux /bin/bash "$install_prefix/bin/term-pane-mark" \
             set busy
-          grep -qxF "set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1$publish" "$STUB_LOG"
+          grep -qxF "set-option -pu -t %7 @term_busy_token ; set-option -p -t %7 @term_busy 1 ; set-option -pF -t %7 @term_busy_seq #{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}$publish" "$STUB_LOG"
           : >"$STUB_LOG"
           PATH="$stub_dir:$PATH" /bin/bash "$install_prefix/bin/term-pane-mark" \
             set pending --kind waiting --pane %7
@@ -148,6 +149,18 @@ jobs:
           brew install tmux fzf
           TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_REQUIRE_FZF=1 \
             python3 test/tmux-agent-picker-fzf.py
+
+      # tmux-pane drives a real private tmux server, with the tool itself run
+      # under stock Bash 3.2 (the suite starts it with "$BASH"). The step
+      # above installed tmux.
+      - name: Drive tmux-pane with stock macOS Bash
+        shell: /bin/bash {0}
+        env:
+          TMUX_TOOLS_REQUIRE_TMUX: "1"
+        run: |-
+          set -euo pipefail
+          tmux -V
+          /bin/bash test/tmux-pane-test
 
   fzf:
     name: Real fzf (Ubuntu)

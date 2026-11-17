@@ -2,7 +2,7 @@
 
 ## About
 
-Nine Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
+Bash 3.2-compatible tmux helpers, one man page each. Stock macOS
 `/bin/bash` 3.2 is a hard contract with its own CI job.
 `tmux-copy-last-output`, `term-pane-mark`, and `term-notify-sound` were
 imported from cgraf78/cmdblocks@52aae58; that archived repo holds their
@@ -12,9 +12,9 @@ earlier history.
 
 - `bin/tmux-continuum-default-server`, `bin/tmux-continuum-save-gate`,
   `bin/tmux-clip-paste`, `bin/tmux-copy-last-output`,
-  `bin/tmux-command-palette`, `bin/tmux-agent-picker`, `bin/term-pane-mark`,
-  `bin/term-notify-sound`, `bin/term-pane-state`: the commands. Each must
-  stay self-contained.
+  `bin/tmux-command-palette`, `bin/tmux-agent-picker`, `bin/tmux-pane`,
+  `bin/term-pane-mark`, `bin/term-notify-sound`, `bin/term-pane-state`: the
+  commands. Each must stay self-contained.
 - `man/man1/`: one page per command. Detailed behavior lives here, not in
   the README.
 - `install.sh`: generated checkout installer (see below).
@@ -28,10 +28,10 @@ earlier history.
   `test/tmux-command-palette-client.py` and
   `test/tmux-agent-picker-client.py` (each with a stand-in fzf),
   `test/tmux-agent-picker-fzf.py` (the real fzf; both picker suites load
-  `test/tmux-agent-picker.conf`, the man page's example config) and
-  `test/term-pane-mark-token-test` (all on a private real tmux), plus
-  `test/tmux_version.py` (the version rule the Python clients share) and
-  `test/tmux-floor-lint.py`.
+  `test/tmux-agent-picker.conf`, the man page's example config),
+  `test/tmux-pane-test` and `test/term-pane-mark-token-test` (all on a
+  private real tmux), plus `test/tmux_version.py` (the version rule the
+  Python clients share) and `test/tmux-floor-lint.py`.
 
 ## Invariants
 
@@ -41,6 +41,7 @@ earlier history.
   `term-pane-state`, which ask their server for `#{version}` within a query
   they already make (or one extra `display-message -p`) and refuse an older
   one; `term-pane-state --print` reads no client rows and does not check.
+  `tmux-pane` carries the same block and checks `tmux -V` instead.
   When the picker's batched snapshot fails, it asks for the version alone,
   since an older server can reject the batch first. A version the rule
   cannot read counts as newest, so an unknown or unreleased build is never
@@ -56,14 +57,14 @@ earlier history.
   config keeps working. Don't turn those paths into errors.
 - `term-pane-mark` and `term-notify-sound` are best effort: missing tmux,
   panes, or helpers must not turn the caller's work into an error.
-- `@term_notify_pending`, `@term_notify_exit_status`, `@term_busy` and
-  `TERM_NOTIFY_TTY` are read or set by users' tmux configs, shell prompts,
-  and agent hooks. Don't rename them. `@term_busy` is `1`.
-  `@term_notify_pending` holds the attention kind: `done`, `waiting` or
+- `@term_notify_pending`, `@term_notify_exit_status`, `@term_busy`,
+  `@term_busy_seq` and `TERM_NOTIFY_TTY` are read or set by users' tmux
+  configs, shell prompts, and agent hooks. Don't rename them. `@term_busy` is
+  `1`. `@term_notify_pending` holds the attention kind: `done`, `waiting` or
   `blocked`; readers treat the legacy value `1` as `done`, and any non-empty
   value as pending. Exit status only accompanies `done`. Kinds, `--kind` and
-  `--if waiting|blocked|sticky` are a cross-repo contract with agent hooks
-  and the tmux config; don't add or rename one without updating them.
+  `--if waiting|blocked|sticky` are a cross-repo contract with agent hooks and
+  the tmux config; don't add or rename one without updating them.
 - `term-pane-state` reads the config predicates `@pane_busy`,
   `@pane_pending`, `@pane_waiting` (empty in older configs, so 0) and
   `@pane_failed`, and Termnav's leases `@termnav_child_attention`
@@ -112,9 +113,36 @@ earlier history.
   commands;
   `tmux-copy-last-output --print` exits 3 when it finds no block, and a
   tmux binding relies on that status.
-- `tmux-copy-last-output` parses one two-line prompt shape (header comment
-  and awk patterns in the script). If the patterns change, update the README
-  "Prompt format" section and the man page with them.
+- `term-pane-mark set busy` bumps `@term_busy_seq` with
+  `set-option -pF ... '#{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}'`
+  after `@term_busy 1`, in the same queue, so a count never exists without
+  its busy mark. `tmux-pane wait --agent` reads it; clearing busy leaves it.
+- `tmux-copy-last-output` and `tmux-pane` parse one two-line prompt shape
+  with the same awk program, carried byte for byte between
+  `# BEGIN prompt-parser` and `# END prompt-parser` in both scripts (each
+  command stays self-contained); `test/tmux-pane-test` fails if the two
+  regions differ or a marker is missing or doubled. If the parser changes,
+  change both copies and update the README "Prompt format" section and both
+  man pages with them.
+- `tmux-pane`'s one hard guardrail is an explicit, exact, existing `%N` on
+  the chosen server; never add a fallback to the current or any other pane,
+  and never add refusals (busy, sync, own pane) beyond it. Its exit codes
+  (0, the command's N, 1, 3, 4, 64-70, 124, 130/143), the `tp1:` marker
+  grammar, and the final stderr line
+  `result=<kind> exact=yes|no|- status=N|unknown [reason=R] [marker=M]` are
+  read by scripts and agents; change them only with their man page. Exit 4
+  belongs to a standalone `read --since` alone.
+- `tmux-pane`'s subcommands, options, exit statuses, result kinds, inexact
+  reasons, option defaults and tmux floor live once, in the interface block
+  at the top of the script (`tmux-pane --interface` prints it). Add or rename
+  one there first: `test/tmux-pane-test` fails until the code, the parser's
+  case labels, the usage and help text, `tmux-pane.1`, and every
+  `tmux-pane SUB ...` reference in the README, AGENTS.md and the man pages
+  agree with it. The reference check is `tmux-pane --check-refs FILE...`,
+  the one copy: cgraf78/dotfiles' agent-rules test runs it too, so keep its
+  output (bad references, then `#refs N`) stable. The only version gate is
+  `tp_tmux_floor`; newer behaviour is detected from tmux (the "Capabilities"
+  comment lists each detection).
 - Every `bin/` command needs a `man/man1/<cmd>.1` with `.SH NAME`, a row in
   `commands=()` in `support/install-checkout.sh`, and a ShellCheck inventory
   row; `test/tmux-tools-test` checks the first two.
@@ -126,20 +154,29 @@ earlier history.
 ## Testing
 
 - Local: `test/run`. It runs ShellCheck over the `program` rows of
-  `.github/shellcheck-files.txt` when `shellcheck` is installed, then the
-  suites. The real-fzf picker test skips without `fzf` unless
-  `TMUX_TOOLS_REQUIRE_FZF=1`.
+  `.github/shellcheck-files.txt` when `shellcheck` is installed, then every
+  suite listed under Layout. The real-fzf picker test skips without `fzf`
+  unless `TMUX_TOOLS_REQUIRE_FZF=1`.
 - `test/run` settles tmux once: without a supported tmux it prints one skip
   line and the real-tmux cases skip (the suites read `TMUX_TOOLS_TMUX`);
-  under `TMUX_TOOLS_REQUIRE_TMUX=1` a missing or older tmux fails instead.
-  When shared CI sets `CI_TMUX_FLOOR` it must match `tmux_minimum`, and
-  under `CI_TMUX_FLOOR_EXACT=1` tmux must be exactly that release.
+  under `TMUX_TOOLS_REQUIRE_TMUX=1` a missing or older tmux fails instead,
+  as does missing Python for the client tests. When shared CI sets
+  `CI_TMUX_FLOOR` it must match `tmux_minimum`, and under
+  `CI_TMUX_FLOOR_EXACT=1` tmux must be exactly that release.
 - CI: `TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_SKIP_SHELLCHECK=1 test/run`
   through shared shell CI with the `base,tmux-floor,python` profiles, which
   build the floor release on the leg whose distribution ships an older
-  tmux. The shared matrix has no `fzf`, so the
-  `fzf` job (Ubuntu) and the `macos-bash32` job install it and run
-  `test/tmux-agent-picker-fzf.py` with `TMUX_TOOLS_REQUIRE_FZF=1`.
+  tmux. The shared matrix has no `fzf`, so the `fzf` job (Ubuntu) and the
+  `macos-bash32` job install it and run `test/tmux-agent-picker-fzf.py`
+  with `TMUX_TOOLS_REQUIRE_FZF=1`.
+- tmux versions: `tmux-pane` supports 3.3 or newer, like every tool here.
+  3.6 is the primary target, and newer releases are first-class. Gates are
+  always "at least X", a version that does not parse counts as the newest,
+  and features are detected directly where tmux exposes them
+  (`list-commands paste-buffer` for `-S`, empty `pane_key_mode`, empty
+  history counters). Run `test/tmux-pane-test` on the oldest and newest tmux
+  you touch; `TMUX_PANE_TEST_DISABLE` forces each feature off for the other
+  side.
 - Stock Bash 3.2 (macOS): `PREFIX=$tmp /bin/bash install.sh`, then for each
   installed command `/bin/bash -n`, plus `tmux-clip-paste --help`,
   `TMUX= tmux-continuum-default-server`, `tmux-continuum-save-gate`, and
@@ -149,8 +186,9 @@ earlier history.
   stub that reports version 3.2a (the stub otherwise reports no version, which
   counts as newest), plus `test/tmux-agent-picker-test`
   (which runs every awk it finds, `/usr/bin/awk` among them), all run with
-  `/bin/bash`, as the
-  `macos-bash32` job does.
+  `/bin/bash`, as the `macos-bash32` job does. That job also installs tmux
+  and runs `/bin/bash test/tmux-pane-test`, which starts the tool with
+  `"$BASH"` so it runs under Bash 3.2.
 
 ## Test isolation
 

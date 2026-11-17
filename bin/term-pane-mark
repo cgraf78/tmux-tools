@@ -279,12 +279,20 @@ elif [ "$option" = @term_notify_pending ]; then
       set-option -p -t "$pane" "$option" "$kind" ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   fi
 elif [ "$action" = set ]; then
+  # @term_busy_seq counts busy sets, so a waiter (tmux-pane) can tell that a
+  # turn started and ended between two of its polls. It follows the busy mark
+  # in the same queue: tmux drops the rest of a queue after a failed command,
+  # so a counted turn always has its busy mark.
+  seq_bump=(\; set-option -pF -t "$pane" @term_busy_seq
+    '#{e|+:#{?@term_busy_seq,#{@term_busy_seq},0},1}')
   if [ -n "$token" ]; then
     tmux set-option -p -t "$pane" @term_busy_token "$token" \; \
-      set-option -p -t "$pane" "$option" 1 ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
+      set-option -p -t "$pane" "$option" 1 "${seq_bump[@]}" \
+      ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   else
     tmux set-option -pu -t "$pane" @term_busy_token \; \
-      set-option -p -t "$pane" "$option" 1 ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
+      set-option -p -t "$pane" "$option" 1 "${seq_bump[@]}" \
+      ${republish[@]+"${republish[@]}"} >/dev/null 2>&1 || true
   fi
 else
   # Events can arrive after a newer turn starts. Compare and clear inside the

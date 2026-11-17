@@ -9,6 +9,7 @@ program	bin/tmux-command-palette
 program	bin/tmux-continuum-default-server
 program	bin/tmux-continuum-save-gate
 program	bin/tmux-copy-last-output
+program	bin/tmux-pane
 program	install.sh
 program	scripts/checkout-installer.conf
 program	support/install-checkout.sh
@@ -16,6 +17,7 @@ program	test/copy-mark-helpers.sh
 program	test/copy-mark-test
 program	test/run
 program	test/tmux-continuum-test
+program	test/tmux-pane-test
 program	test/tmux-tools-harness-test
 program	test/tmux-tools-test
 program	test/term-pane-state-test

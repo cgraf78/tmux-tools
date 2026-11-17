@@ -2016,7 +2016,7 @@ fi
 tmux_supported_block() {
   sed -n '/^# BEGIN tmux_supported$/,/^# END tmux_supported$/p' "$1"
 }
-tmux_supported_tools='tmux-agent-picker tmux-command-palette tmux-copy-last-output tmux-clip-paste term-pane-state'
+tmux_supported_tools='tmux-agent-picker tmux-command-palette tmux-copy-last-output tmux-clip-paste term-pane-state tmux-pane'
 tmux_supported_reference=$(tmux_supported_block "$ROOT/bin/tmux-agent-picker")
 _assert_ne "tmux_supported block is present" "" "$tmux_supported_reference"
 for tool in $tmux_supported_tools; do

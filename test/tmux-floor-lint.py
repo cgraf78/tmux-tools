@@ -69,6 +69,22 @@ def _mentions_after(text: str, lower: str, key: str, minimum: tuple[int, int]) -
     return found
 
 
+def is_checkout() -> bool:
+    """Whether ROOT is the top of a Git checkout. A tree outside Git (a
+    release tarball, or one unpacked inside another repo) has no tracked
+    files to scan."""
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    path = top.stdout.decode(errors="replace").strip()
+    return top.returncode == 0 and bool(path) and pathlib.Path(path).resolve() == ROOT
+
+
 def files() -> list[pathlib.Path]:
     """Every tracked file, so no directory can drop out of the scan."""
     listed = subprocess.run(
@@ -106,6 +122,9 @@ def main() -> int:
         old_mentions(f"tmux {at}a, tmux {major}.{minor + 7}, tmux v{above}, Bash 3.2", floor) == []
     )
     offenders = []
+    if not is_checkout():
+        print("note: not a Git checkout, so the old-tmux lint is skipped")
+        return 0
     for path in files():
         relative = path.relative_to(ROOT).as_posix()
         if relative == SELF:
