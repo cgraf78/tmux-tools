@@ -42,7 +42,9 @@ earlier history.
   `#{version}` within a query they already make (or one extra
   `display-message -p`) and refuse an older one; `term-pane-state --print`
   reads no client rows and does not check. The client's `tmux -V` is never
-  the test: a new client can reach an old server.
+  the test: a new client can reach an old server. Only when the server does
+  not answer does `tmux-pane` ask `tmux -V`, to name a client too old to
+  reach a newer server rather than report no server.
   When the picker's batched snapshot fails, it asks for the version alone,
   since an older server can reject the batch first. A version the rule
   cannot read counts as newest, so an unknown or unreleased build is never

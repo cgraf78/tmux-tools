@@ -484,6 +484,17 @@ query_geom() { # query_geom: refresh g_* from one exact lookup.
 
 server_id() { tmx display-message -p '#{pid}.#{start_time}' 2>/dev/null; }
 
+# The server did not answer. A client older than the floor may be unable to
+# talk to a newer server at all, so name it rather than report no server;
+# this one tmux -V runs only on that failure.
+client_too_old() {
+  local v
+  v=$(tmux -V 2>/dev/null) || return 0
+  # The pattern is quoted: under extglob, which a BASH_ENV may turn on, a
+  # bare ( there stops matching.
+  tmux_supported "$v" || die 1 "${tmux_refusal/"(server is "/(client is }"
+}
+
 # The guardrail, in order: the server named by a marker first (a restarted
 # server is gone, whatever pane ids it happens to have), then the exact pane.
 check_target() { # check_target [MARKER_SERVER]
@@ -494,6 +505,8 @@ check_target() { # check_target [MARKER_SERVER]
   sid=${sv%% *}
   if [ -n "$sid" ]; then
     tmux_supported "${sv#* }" || die 1 "$tmux_refusal"
+  else
+    client_too_old
   fi
   if [ -n "${1:-}" ]; then
     [ "$sid" = "$1" ] || {

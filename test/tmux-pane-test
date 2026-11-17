@@ -530,6 +530,11 @@ if [ -n "\${SHIM_HOLD:-}" ]; then
     ;;
   esac
 fi
+# SHIM_CLIENT_VERSION=V: this client's tmux -V says V.
+if [ "\$1" = -V ] && [ -n "\${SHIM_CLIENT_VERSION:-}" ]; then
+  printf 'tmux %s\n' "\$SHIM_CLIENT_VERSION"
+  exit 0
+fi
 if [ -n "\${SHIM_FAIL_ON:-}" ]; then
   for a in "\$@"; do [ "\$a" = "\$SHIM_FAIL_ON" ] && exit 1; done
 fi
@@ -592,6 +597,27 @@ SHIM_VERSION=$floor tps "$tmp/version.log" mark -t "$decoy" >/dev/null 2>&1
 check 'versions: one query asks for the server id and version' 1 \
   "$(grep 'start_time' "$tmp/version.log" | grep -c 'version')"
 check 'versions: the client is never asked its version' 0 "$(grep -c -- '^-V' "$tmp/version.log")"
+# A server that does not answer: a client below the floor, which may be
+# unable to talk to a newer server, is named; any other client reports no
+# server. The id query is the one carrying #{version}.
+id_query='#{pid}.#{start_time} #{version}'
+res=$(SHIM_FAIL_ON=$id_query SHIM_CLIENT_VERSION=${below}a tps /dev/null mark -t "$decoy" 2>&1 >/dev/null)
+check 'versions: no answer through an older client is 1' 1 "$?"
+check 'versions: and names the client' "tmux-pane: needs tmux $floor or newer (client is ${below}a)" "$res"
+# The same under extglob, which a BASH_ENV may turn on: an unquoted ( in the
+# message's substitution pattern stops matching there.
+res=$(env -u TMUX -u TMUX_PANE SHIM_FAIL_ON="$id_query" SHIM_CLIENT_VERSION="${below}a" PATH="$tmp/shim:$PATH" \
+  "$BASH" -O extglob "$TOOL" mark -S "$sock" -t "$decoy" 2>&1 >/dev/null)
+check 'versions: and names the client under extglob too' \
+  "tmux-pane: needs tmux $floor or newer (client is ${below}a)" "$res"
+res=$(SHIM_FAIL_ON=$id_query SHIM_CLIENT_VERSION=$floor tps /dev/null mark -t "$decoy" 2>&1 >/dev/null)
+check 'versions: no answer through a supported client is 65' 65 "$?"
+check_contains 'versions: and says there is no server' 'tmux-pane: no tmux server' "$res"
+M=$(tps /dev/null mark -t "$decoy")
+res=$(SHIM_FAIL_ON=$id_query SHIM_CLIENT_VERSION=${below}a tps /dev/null wait -t "$decoy" --prompt --since "$M" 2>&1 >/dev/null)
+check 'versions: a wait with a marker through an older client is 1' 1 "$?"
+check 'versions: and still ends with its result line' \
+  "result=error exact=- status=unknown marker=$M" "$(printf '%s\n' "$res" | tail -n 1)"
 
 # --- guardrail ------------------------------------------------------------------
 

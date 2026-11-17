@@ -2125,6 +2125,26 @@ for tool in "${floor_docs[@]}"; do
   _assert_contains "README.md's floor bullet names $tool" "\`$tool\`" "$floor_bullet"
 done
 
+# Outside a Git checkout the floor lint skips with a note, except under
+# GitHub Actions, where it fails so CI can never skip it.
+if command -v python3 >/dev/null 2>&1; then
+  nogit=$(_tmpdir)
+  mkdir -p "$nogit/test" "$nogit/bin"
+  cp "$ROOT/test/tmux-floor-lint.py" "$ROOT/test/tmux_version.py" "$nogit/test/"
+  # tmux_version.py reads the floor from the picker's block.
+  cp "$ROOT/bin/tmux-agent-picker" "$nogit/bin/"
+  lint_status=0
+  lint_output=$(env -u GITHUB_ACTIONS PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$nogit/test/tmux-floor-lint.py" 2>&1) || lint_status=$?
+  _assert_eq 'the floor lint outside a checkout passes' 0 "$lint_status"
+  _assert_contains 'and notes the skip' 'not a Git checkout' "$lint_output"
+  lint_status=0
+  lint_output=$(GITHUB_ACTIONS=true PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$nogit/test/tmux-floor-lint.py" 2>&1) || lint_status=$?
+  _assert_eq 'the floor lint outside a checkout fails under GitHub Actions' 1 "$lint_status"
+  _assert_contains 'and says why' 'not a Git checkout under GitHub Actions' "$lint_output"
+fi
+
 if ((_failures > 0)); then
   printf '%s failure(s)\n' "$_failures" >&2
   exit 1
