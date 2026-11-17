@@ -353,13 +353,15 @@ comes from the pane title, when it has the dotfiles prompt's
 form and the screen confirms it, else from the identity most prompts in the
 recent history agree on, else nothing. The prompt parser is the one in
 .BR tmux-copy-last-output (1),
-with the same limits: output that repeats an earlier first line, or ends in
+with the same limits: output that repeats another first line, or ends in
 the identity glued to text with no space, directly above a line that starts
 with
 .B $
 or
 .B %
-splits a block there.
+splits a block there, and output ending in a space before a prompt whose
+first line differs (path, git state, a timing suffix) is split from the next
+block only at the last prompt.
 .SH WAIT
 Each poll is one small tmux queue every 0.2 seconds. The wait ends with 66
 and

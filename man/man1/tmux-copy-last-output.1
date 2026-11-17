@@ -63,18 +63,19 @@ second line also starts comments and headings in output, so its first line
 must start with the identity, never glued. Glue that ends in a space, as
 after
 .BR "printf '%s ' a b" ,
-counts only when the rest of its line, from the identity on, repeats an
-earlier first line or is the last prompt, so a line such as
+counts only when the rest of its line, from the identity on, repeats
+another first line in the capture or is the last prompt, so a line such as
 .B Copy to user@host:/srv
 above a
 .B $
-line stays output. Output that repeats an earlier first line, or ends in the
+line stays output. Output that repeats another first line, or ends in the
 identity glued to text with no space, directly above a
 .B $
 or
 .B %
 line still splits the block there; and glue ending in a space before a
-prompt whose path changed is found only at the last prompt.
+prompt whose first line differs (path, git state, a timing suffix) is found
+only at the last prompt, so earlier such blocks merge.
 .BR tmux-pane (1)
 carries the same parser.
 .PP

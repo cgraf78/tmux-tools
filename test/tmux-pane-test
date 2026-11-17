@@ -1472,6 +1472,13 @@ check 'parser: and the capture is its block' "$(printf '%s\n' "\$ printf '%s ' x
 tp send -t "$sh" 'false' --enter --wait prompt >/dev/null 2>&1
 check_contains 'parser: and read --last-output 2 keeps it apart' "x y" \
   "$(tp read -t "$sh" --last-output --count 2 2>/dev/null | head -n 2)"
+# A running command that prints space-ended glue and a `$ x` line, as its
+# last lines, is not at a prompt: the cursor is not on a bare line 2.
+start=$SECONDS
+waitp 'parser: a fake glued prompt from a running command (exit)' 0 \
+  "printf 'x me@host:/repo (main)\\n\$ x'; sleep 3; echo; echo FINISHED" --timeout 15
+check 'parser: the wait lasted until the command finished' 1 "$([ $((SECONDS - start)) -ge 3 ] && echo 1 || echo 0)"
+check_contains 'parser: and captured its end' FINISHED "$(cat "$tmp/w.out")"
 # Text that starts with a space is still exact.
 waitp 'rg_m18 text with a leading space (exit)' 0 ' echo spaced' --timeout 10
 check_contains 'rg_m18 text with a leading space is exact' 'exact=yes' "$(cat "$tmp/w.err")"

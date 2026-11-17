@@ -207,8 +207,10 @@ $ make test
   glued to it, as in `ok[1] user@host:~`. The `user@host:` that most prompts
   in the capture agree on marks where the prompt starts, so `ok` is still the
   output and `1` the status. Glue that ends in a space (`printf '%s ' a b`)
-  counts only when the rest of the line repeats an earlier line 1 or is the
-  last prompt, so `Copy to user@host:/srv` above a `$ ` line stays output. A
+  counts only when the rest of the line repeats another line 1 in the
+  capture or is the last prompt, so `Copy to user@host:/srv` above a `$ `
+  line stays output; a glued prompt whose line 1 differs (path, git state, a
+  timing suffix) is found only at the last prompt. A
   `#` line 2 also starts comments and headings in output, so its line 1 must
   start with the identity, never glued.
 
