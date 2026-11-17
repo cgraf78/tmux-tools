@@ -22,7 +22,8 @@ TMUX = shutil.which("tmux")
 if TMUX is None:
     if os.environ.get("TMUX_TOOLS_REQUIRE_TMUX") == "1":
         raise SystemExit("FAIL: real tmux is required")
-    raise SystemExit("SKIP: real tmux unavailable")
+    print("SKIP: real tmux unavailable")
+    raise SystemExit(0)
 
 VERSION = subprocess.run([TMUX, "-V"], text=True, capture_output=True, check=False).stdout
 MATCH = re.search(r"(\d+)\.(\d+)", VERSION)

@@ -20,7 +20,8 @@ TMUX = shutil.which("tmux")
 if TMUX is None:
     if os.environ.get("TMUX_TOOLS_REQUIRE_TMUX") == "1":
         raise SystemExit("FAIL: real tmux is required")
-    raise SystemExit("SKIP: real tmux unavailable")
+    print("SKIP: real tmux unavailable")
+    raise SystemExit(0)
 
 
 def poll(label: str, read: Callable[[], str], match: Callable[[str], bool]) -> str:

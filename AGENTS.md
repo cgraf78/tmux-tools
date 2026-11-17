@@ -12,9 +12,9 @@ earlier history.
 
 - `bin/tmux-continuum-default-server`, `bin/tmux-continuum-save-gate`,
   `bin/tmux-clip-paste`, `bin/tmux-copy-last-output`,
-  `bin/tmux-command-palette`, `bin/tmux-pane`, `bin/term-pane-mark`,
-  `bin/term-notify-sound`, `bin/term-pane-state`: the commands. Each must
-  stay self-contained.
+  `bin/tmux-command-palette`, `bin/tmux-agent-picker`, `bin/tmux-pane`,
+  `bin/term-pane-mark`, `bin/term-notify-sound`, `bin/term-pane-state`: the
+  commands. Each must stay self-contained.
 - `man/man1/`: one page per command. Detailed behavior lives here, not in
   the README.
 - `install.sh`: generated checkout installer (see below).
@@ -23,8 +23,12 @@ earlier history.
   `test/tmux-continuum-test`, `test/tmux-tools-test`,
   `test/copy-mark-test` (which sources `test/copy-mark-helpers.sh`),
   `test/term-pane-state-test` (mock tmux, plus
-  `test/term-pane-state-delegate.py`), `test/term-pane-state-client.py`,
-  `test/tmux-command-palette-client.py` (with a stand-in fzf),
+  `test/term-pane-state-delegate.py`), `test/tmux-agent-picker-test` (mock
+  tmux), `test/term-pane-state-client.py`,
+  `test/tmux-command-palette-client.py` and
+  `test/tmux-agent-picker-client.py` (each with a stand-in fzf),
+  `test/tmux-agent-picker-fzf.py` (the real fzf; both picker suites load
+  `test/tmux-agent-picker.conf`, the man page's example config),
   `test/tmux-pane-test` and `test/term-pane-mark-token-test` (all on a
   private real tmux).
 
@@ -63,7 +67,32 @@ earlier history.
   after its popup closes, so prompts open over the pane; before tmux 3.4 it
   names the key instead. Never run a binding's command text directly: its
   formats and prompts need the client's own key context.
-- Exit 64 is reserved for bad arguments to the pane, copy and palette commands;
+- `tmux-agent-picker` never consults `ps` or `/proc`: its rows come from tmux
+  formats and the config's predicates alone, since Termux reports a copied
+  program as the Android linker. Its targets are always ids (`%N`, `@N`,
+  `$N`), never names, and every command of a jump names the pane, with
+  `select-pane` before `select-window` in the client's own session, so no
+  bystander pane is made current (and acknowledged) on the way.
+- The picker fails loudly (the man page's DIAGNOSTICS owns the list).
+  Every failure goes through `fail`, and every tmux query through `ask`
+  (or `find_client`), never with `|| true`. `client_gone` runs in `fail`,
+  before any message, and in the EXIT trap; the trap's comment gives the
+  tmux 3.2a reason. Read fzf's status file before the popup's status, and
+  keep the quiet fzf statuses in `quiet_statuses` only. `message` falls back
+  to an untargeted message only on tmux 3.2's `display-message -c` usage
+  error. Never redirect fzf's stderr: fzf 0.27 draws its screen there.
+- `required_options` in the script is the one list of required config
+  options; the README's Required column and the man page's required list
+  follow it, as `test/tmux-tools-test` checks. An unset required option is
+  an error, and installs track `main`, so a new option the picker reads
+  must land in the cgraf78/dotfiles tmux config before the picker ships
+  reading it.
+- The picker's tests make stand-in agents by copying bash under the agent's
+  name (`codex`). No symlinks and no scripts: those report another
+  `pane_current_command`. The stand-in fzf may be a script, since the
+  picker never checks fzf's process name.
+- Exit 64 is reserved for bad arguments to the pane, copy, palette and picker
+  commands;
   `tmux-copy-last-output --print` exits 3 when it finds no block, and a
   tmux binding relies on that status.
 - `term-pane-mark set busy` bumps `@term_busy_seq` with
@@ -105,12 +134,16 @@ earlier history.
 
 - Local: `test/run`. It runs ShellCheck over the `program` rows of
   `.github/shellcheck-files.txt` when `shellcheck` is installed, then every
-  suite listed under Layout.
+  suite listed under Layout. The real-fzf picker test skips without `fzf`
+  unless `TMUX_TOOLS_REQUIRE_FZF=1`.
 - CI: `TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_SKIP_SHELLCHECK=1 test/run`
   through shared shell CI with the `base,tmux` profiles.
   `TMUX_TOOLS_REQUIRE_TMUX=1` turns a missing tmux (and Python, for the
-  two client tests) into a failure instead of a skip: the real-tmux
+  client tests) into a failure instead of a skip: the real-tmux
   `tmux-clip-paste` block, `test/tmux-pane-test` and the Python clients.
+  The shared matrix has no `fzf`, so the `fzf` job (Ubuntu) and the
+  `macos-bash32` job install it and run `test/tmux-agent-picker-fzf.py`
+  with `TMUX_TOOLS_REQUIRE_FZF=1`.
 - tmux versions: `tmux-pane` supports 3.2 and later. 3.6 is the primary
   target, and newer releases are first-class. Gates are always "at least
   X", a version that does not parse counts as the newest, and features are
@@ -123,9 +156,11 @@ earlier history.
   `TMUX= tmux-continuum-default-server`, `tmux-continuum-save-gate`, and
   stub-tmux smokes of `tmux-copy-last-output --print`,
   `tmux-command-palette --list`, `term-pane-mark`, and `term-notify-sound`,
-  all run with `/bin/bash`, as the `macos-bash32` job does. That job also
-  installs tmux and runs `/bin/bash test/tmux-pane-test`, which starts the
-  tool with `"$BASH"` so it runs under Bash 3.2.
+  the `tmux-agent-picker` usage status, plus `test/tmux-agent-picker-test`
+  (which runs every awk it finds, `/usr/bin/awk` among them), all run with
+  `/bin/bash`, as the `macos-bash32` job does. That job also installs tmux
+  and runs `/bin/bash test/tmux-pane-test`, which starts the tool with
+  `"$BASH"` so it runs under Bash 3.2.
 
 ## Test isolation
 
@@ -134,7 +169,8 @@ earlier history.
   `TERM_PANE_MARK_PROC_ROOT`), and must stay independent of a real tmux.
 - Real-tmux cases use a private server only: `-S` on a socket under the
   suite temp root (kept short for the macOS `AF_UNIX` limit) or a unique
-  `-L` name, always with `-f /dev/null`, and killed on exit. Never touch
+  `-L` name, always with `-f /dev/null` or a fixture config under `test/`,
+  and killed on exit. Never touch
   the default server.
 - To test ownership, fake `TMUX` and `TMUX_TMPDIR`; never point them at the
   real default socket.
@@ -155,7 +191,7 @@ earlier history.
   `.github/cgraf78-actions.lock`.
 - `.github/cgraf78-actions.lock` and every `uses: cgraf78/actions/...@sha`
   move together, only via `consumer-ci/sync.sh`.
-- The `Required` job needs `shell` and `macos-bash32`. `test/tmux-tools-test`
+- The `Required` job needs `shell`, `macos-bash32` and `fzf`. `test/tmux-tools-test`
   pins its text, so edit the two together.
 - `retry-infrastructure.yml` keys on the workflow name `Tests`; don't
   rename it.

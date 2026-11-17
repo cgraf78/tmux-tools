@@ -310,8 +310,8 @@ _assert_contains "CI publishes a stable Required check" \
   "name: Required" "$required_job"
 _assert_contains "CI Required still reports prerequisite failures" \
   "if: \${{ always() }}" "$required_job"
-_assert_contains "CI Required gates shared platforms and Bash 3.2" \
-  "needs: [shell, macos-bash32]" "$required_job"
+_assert_contains "CI Required gates shared platforms, Bash 3.2 and real fzf" \
+  "needs: [shell, macos-bash32, fzf]" "$required_job"
 _assert_contains "CI Required reads the shared-platform result" \
   "SHELL_RESULT: \${{ needs.shell.result }}" "$required_job"
 _assert_contains "CI Required reads the Bash 3.2 result" \
@@ -320,6 +320,22 @@ _assert_contains "CI Required enforces shared-platform success" \
   "test \"\$SHELL_RESULT\" = success" "$required_job"
 _assert_contains "CI Required enforces Bash 3.2 success" \
   "test \"\$BASH32_RESULT\" = success" "$required_job"
+_assert_contains "CI Required reads the real-fzf result" \
+  "FZF_RESULT: \${{ needs.fzf.result }}" "$required_job"
+_assert_contains "CI Required enforces real-fzf success" \
+  "test \"\$FZF_RESULT\" = success" "$required_job"
+# The shared matrix has no fzf, so these jobs install it and require it.
+for job in fzf macos-bash32; do
+  job_text=$(
+    awk -v job="$job" '
+      $0 == "  " job ":" { active = 1; next }
+      active && /^  [[:alnum:]_-]+:$/ { exit }
+      active { print }
+    ' "$ROOT/.github/workflows/test.yml"
+  )
+  _assert_contains "CI $job requires the real-fzf picker test" \
+    "TMUX_TOOLS_REQUIRE_FZF=1" "$job_text"
+done
 
 if [[ -f "$INSTALLER_WRAPPER" ]]; then
   _pass "install has a generated checkout wrapper"
@@ -374,6 +390,78 @@ for command in "${installed_commands[@]}"; do
     _fail "$command man page has a NAME section"
   fi
 done
+
+# tmux-agent-picker rejects bad arguments with 64 before it calls tmux.
+picker_usage_status() {
+  local status=0
+  PATH=/nonexistent "$BASH" "$ROOT/bin/tmux-agent-picker" "$@" >/dev/null 2>&1 ||
+    status=$?
+  printf '%s' "$status"
+}
+_assert_eq "agent picker requires --socket" 64 "$(picker_usage_status --list)"
+_assert_eq "agent picker requires an absolute socket" 64 \
+  "$(picker_usage_status --socket relative.sock --list)"
+_assert_eq "agent picker rejects --client twice" 64 \
+  "$(picker_usage_status --socket /s --client a --client b)"
+_assert_eq "agent picker rejects a preview pane that is not an id" 64 \
+  "$(picker_usage_status --socket /s --preview %x)"
+_assert_eq "agent picker rejects --list with --preview" 64 \
+  "$(picker_usage_status --socket /s --list --preview %1)"
+_assert_eq "agent picker needs a client to open the popup" 64 \
+  "$(picker_usage_status --socket /s)"
+# Every config option the picker evaluates is documented in its man page
+# and in the README's option table, so the three cannot drift apart.
+picker_options=$(grep -o '#{E:@[a-z_]*' "$ROOT/bin/tmux-agent-picker" | sed 's/^#{E://' | LC_ALL=C sort -u)
+_assert_ne "agent picker reads config options" "" "$picker_options"
+for option in $picker_options; do
+  if grep -q -- "$option" "$ROOT/man/man1/tmux-agent-picker.1" &&
+    grep -qF -- "\`$option\`" "$ROOT/README.md"; then
+    _pass "agent picker documents $option"
+  else
+    _fail "agent picker documents $option in its man page and the README"
+  fi
+done
+# The script's required_options is the one list of required options: the
+# README's Required column and the man page's required list follow it.
+picker_required=$(sed -n "s/^required_options='\(.*\)'$/\1/p" "$ROOT/bin/tmux-agent-picker")
+_assert_ne "agent picker names its required options" "" "$picker_required"
+picker_man_required=$(
+  awk '/^These are required:$/ { on = 1; next } /^These are optional/ { on = 0 }
+    on { print }' "$ROOT/man/man1/tmux-agent-picker.1"
+)
+for option in $picker_options; do
+  required=no
+  case " $picker_required " in *" $option "*) required=yes ;; esac
+  readme_required=$(
+    awk -F' [|] ' -v name="\`$option\`" '$1 == "| " name { print $2 }' "$ROOT/README.md"
+  )
+  _assert_eq "agent picker README marks $option required: $required" "$required" \
+    "$readme_required"
+  man_required=no
+  case $picker_man_required in *"$option"*) man_required=yes ;; esac
+  _assert_eq "agent picker man page lists $option as required: $required" "$required" \
+    "$man_required"
+done
+picker_options_line=" $(tr '\n' ' ' <<<"$picker_options")"
+for option in $picker_required; do
+  case $picker_options_line in
+    *" $option "*) _pass "agent picker reads required option $option" ;;
+    *) _fail "agent picker reads required option $option" ;;
+  esac
+done
+# The man page's example config is the one the picker tests run.
+picker_example=$(
+  awk '/A minimal example/ { found = 1 } found && /^\.nf$/ { on = 1; next }
+    on && /^\.fi$/ { exit } on { print }' "$ROOT/man/man1/tmux-agent-picker.1" |
+    sed 's/\\e/\\/g'
+)
+picker_example_missing=$(
+  printf '%s\n' "$picker_example" |
+    grep -vxF -f "$ROOT/test/tmux-agent-picker.conf"
+)
+_assert_ne "agent picker man page has an example config" "" "$picker_example"
+_assert_eq "agent picker tests run the man page example" "" \
+  "$picker_example_missing"
 
 install_prefix=$(_tmpdir)
 install_status=0
