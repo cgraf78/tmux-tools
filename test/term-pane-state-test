@@ -7,6 +7,8 @@ ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 # so these cases follow a floor bump.
 floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
 older_tmux=${floor_tmux%%.*}.$((${floor_tmux#*.} - 1))a
+# The mocks report the floor itself unless a case says otherwise.
+export floor_tmux
 tmp=$(
   umask 077
   mktemp -d "${TMPDIR:-/tmp}/tps.XXXXXXXX"
@@ -28,7 +30,7 @@ case " $* " in
     else
       [ -z "${STATE_SEEN:-}" ] || : >"$STATE_SEEN"
       printf '%s\n' "${STATE_CLIENTS:-}"
-    fi | sed "s/^./v${STATE_VERSION-3.4} &/"
+    fi | sed "s/^./v${STATE_VERSION-$floor_tmux} &/"
     ;;
   *) exit 1 ;;
 esac

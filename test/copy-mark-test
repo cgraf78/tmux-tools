@@ -13,6 +13,8 @@ ROOT="$(cd -- "$TEST_DIR/.." && pwd -P)"
 # so these cases follow a floor bump.
 floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
 older_tmux=${floor_tmux%%.*}.$((${floor_tmux#*.} - 1))a
+# The mocks report the floor itself unless a case says otherwise.
+export floor_tmux
 
 # shellcheck source=copy-mark-helpers.sh
 . "$TEST_DIR/copy-mark-helpers.sh"
@@ -39,7 +41,7 @@ case "$1" in
   display-message)
     # tmux drops a message for a client that has gone, silently.
     if [[ "${2:-}" == "-p" && "${3:-}" == "#{version}" ]]; then
-      printf '%s\n' "${TMUX_TEST_VERSION-3.4}"
+      printf '%s\n' "${TMUX_TEST_VERSION-$floor_tmux}"
     elif [[ -n "${TMUX_TEST_CLIENT_GONE:-}" && " $* " == *' -c '* ]]; then
       exit 0
     elif [[ "${2:-}" == "-p" && "${3:-}" == "#{client_tty}" ]]; then

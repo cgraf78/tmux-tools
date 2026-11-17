@@ -8,6 +8,8 @@ ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 # so these cases follow a floor bump.
 floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
 older_tmux=${floor_tmux%%.*}.$((${floor_tmux#*.} - 1))a
+# The mocks report the floor itself unless a case says otherwise.
+export floor_tmux
 PICKER=$ROOT/bin/tmux-agent-picker
 tmp=$(
   umask 077
@@ -30,10 +32,10 @@ case "$1 $2" in
     case $3 in
       R*)
         [ -z "${MOCK_SNAPSHOT_ERROR:-}" ] || { printf '%s\n' "$MOCK_SNAPSHOT_ERROR" >&2; exit 1; }
-        if [ "${MOCK_GARBLE:-0}" = 1 ]; then echo 'garbled'; else printf 'R %s%s\n' "${MOCK_VERSION-3.4}" "${MOCK_MISSING:-}"; fi
+        if [ "${MOCK_GARBLE:-0}" = 1 ]; then echo 'garbled'; else printf 'R %s%s\n' "${MOCK_VERSION-$floor_tmux}" "${MOCK_MISSING:-}"; fi
         cat "$MOCK_STATE"
         ;;
-      '#{version}') printf '%s\n' "${MOCK_VERSION-3.4}" ;;
+      '#{version}') printf '%s\n' "${MOCK_VERSION-$floor_tmux}" ;;
       *) [ "${MOCK_PANE_GONE:-0}" = 1 ] && exit 1 ;;
     esac
     ;;

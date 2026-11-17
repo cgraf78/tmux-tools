@@ -10,6 +10,7 @@ its file and words in ALLOWED.
 from __future__ import annotations
 
 import pathlib
+import subprocess
 import sys
 
 import tmux_version
@@ -23,8 +24,6 @@ ALLOWED = [
     ("bin/tmux-agent-picker", "tmux 3.2a, older than any"),
     ("man/man1/tmux-agent-picker.1", "tmux 3.2a, older than any"),
 ]
-
-SCANNED = ["README.md", "AGENTS.md", "install.sh", "bin", "man", "support", "test", ".github"]
 
 
 def joined(text: str) -> str:
@@ -71,14 +70,16 @@ def _mentions_after(text: str, lower: str, key: str, minimum: tuple[int, int]) -
 
 
 def files() -> list[pathlib.Path]:
-    found = []
-    for name in SCANNED:
-        path = ROOT / name
-        if path.is_dir():
-            found.extend(p for p in sorted(path.rglob("*")) if p.is_file())
-        elif path.is_file():
-            found.append(path)
-    return [p for p in found if "__pycache__" not in p.parts]
+    """Every tracked file, so no directory can drop out of the scan."""
+    listed = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "-z"], capture_output=True, check=False
+    )
+    if listed.returncode != 0:
+        raise SystemExit(f"FAIL: git ls-files: {listed.stderr.decode(errors='replace')}")
+    names = [name for name in listed.stdout.decode().split("\0") if name]
+    if "AGENTS.md" not in names:
+        raise SystemExit("FAIL: git ls-files lists no AGENTS.md")
+    return [ROOT / name for name in names]
 
 
 def main() -> int:
@@ -87,7 +88,11 @@ def main() -> int:
     if minor == 0:
         raise SystemExit(f"FAIL: the lint's samples cannot express a floor of {major}.0")
     # Samples built from the floor, so they stay true after a bump.
-    below, at, above = f"{major}.{minor - 1}", f"{major}.{minor}", f"{major}.{minor + 1}"
+    below, at, above = (
+        f"{major}.{minor - 1}",
+        f"{major}.{minor}",
+        f"{major}.{minor + 1}",
+    )
     older = f"{major - 1}.0"
     assert old_mentions(f"needs tmux\n# {below}a here", floor) == []
     assert len(old_mentions(joined(f"needs tmux\n# {below}a here"), floor)) == 1

@@ -93,6 +93,7 @@ VECTORS = [
     ("openbsd-7.6-current", "newest"),
     ("3.x", "unknown"),
     ("3.", "unknown"),
+    ("foo-2.9", "unknown"),
     ("", "unknown"),
 ]
 
@@ -105,6 +106,9 @@ def floor_rows(minimum: tuple[int, int]) -> list[tuple[str, str]]:
     below = f"{major}.{minor - 1}"
     floor = f"{major}.{minor}"
     above = f"{major}.{minor + 1}"
+    # The next major's first release, which a comparison of the minor alone
+    # would refuse.
+    next_major = f"{major + 1}.0"
     return [
         (below, below),
         (f"{below}a", below),
@@ -112,6 +116,7 @@ def floor_rows(minimum: tuple[int, int]) -> list[tuple[str, str]]:
         (f"next-{below}", below),
         (floor, floor),
         (above, above),
+        (next_major, next_major),
     ]
 
 
