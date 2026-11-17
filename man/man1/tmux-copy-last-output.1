@@ -60,14 +60,21 @@ that most prompts in the capture agree on, so the text before it is the
 command's output and the status is still read. A
 .B #
 second line also starts comments and headings in output, so its first line
-must start with the identity, never glued. Glue is output without its final
-newline, so it never ends in a space: a line that names the identity after a
-space is output. Output whose line ends in the identity glued to other text,
-directly above a
+must start with the identity, never glued. Glue that ends in a space, as
+after
+.BR "printf '%s ' a b" ,
+counts only when the rest of its line, from the identity on, repeats an
+earlier first line or is the last prompt, so a line such as
+.B Copy to user@host:/srv
+above a
+.B $
+line stays output. Output that repeats an earlier first line, or ends in the
+identity glued to text with no space, directly above a
 .B $
 or
 .B %
-line, still splits the block there.
+line still splits the block there; and glue ending in a space before a
+prompt whose path changed is found only at the last prompt.
 .BR tmux-pane (1)
 carries the same parser.
 .PP

@@ -91,6 +91,21 @@ check 'rg_p16 parser identity rejects a doubled marker' 1 "$?"
 parser_region "$tmp/missing" >/dev/null
 check 'rg_p16 parser identity rejects a missing region' 1 "$?"
 
+# Glue that ends in a space: at the cursor it is the prompt even when the
+# rest of its line 1 matches no earlier prompt (the command changed
+# directory), so a prompt wait sees it; a line that only mentions the
+# identity stays output (copy-mark-test has the history cases).
+prompt_parser='' # assigned by the region
+eval "$pane_region"
+printf '%s\n' 'me@host:/repo (main)' "\$ cd /srv; printf '%s ' x y" 'x y me@host:/srv (main)' '$' >"$tmp/glue-cursor"
+check 'parser: space-ended glue at the cursor is the prompt' 'prompt 0' \
+  "$(awk -v mode=state -v ident=me@host: "$prompt_parser" "$tmp/glue-cursor")"
+printf '%s\n' 'me@host:/repo (main)' '$ cat log' 'Copy to me@host:/srv' '$ not a prompt' \
+  'me@host:/repo (main)' '$' >"$tmp/glue-mention"
+check 'parser: a line mentioning the identity above a $ line is output' \
+  "$(printf '%s\n' '$ cat log' 'Copy to me@host:/srv' '$ not a prompt')" \
+  "$(awk -v count=1 -v ident=me@host: "$prompt_parser" "$tmp/glue-mention")"
+
 # rg_i7: polls sleep a fraction of a second; Bash 3.2's read -t takes whole
 # seconds, so the tool never uses it.
 check 'rg_i7 the tool never waits with read -t' '' "$(grep -nE 'read +(-[a-zA-Z]+ +)*-[a-zA-Z]*t +[0-9$]' "$TOOL" || true)"
@@ -215,7 +230,7 @@ done
 floor=$(iline floor)
 check_contains 'drift: tmux-pane(1) VERSIONS names the floor' "tmux $floor and later" "$man_flat"
 check_contains 'drift: tmux-pane(1) exit 1 names the floor' "older than $floor" "$man_flat"
-check_contains 'drift: the README names the floor' "tmux $floor or newer" "$(cat "$ROOT/README.md")"
+check_contains 'drift: the README names the floor' "For \`tmux-pane\`: tmux $floor or newer" "$(cat "$ROOT/README.md")"
 check_contains 'drift: AGENTS.md names the floor' "supports $floor and later" "$(cat "$ROOT/AGENTS.md")"
 # AGENTS.md spells the exit statuses as a list with ranges.
 agents_codes=$(tr '\n' ' ' <"$ROOT/AGENTS.md" | sed 's/  */ /g' | sed -n 's/.*Its exit codes (\([^)]*\)).*/\1/p' |
@@ -268,6 +283,16 @@ if ! command -v tmux >/dev/null 2>&1; then
     exit 1
   fi
   printf 'SKIP: tmux unavailable for tmux-pane-test\n'
+  exit "$((failures != 0))"
+fi
+# A tmux older than the floor is refused (the versions section checks that
+# through a shim); there is nothing to drive here.
+floor_vnum=$(tmux -V)
+floor_vnum=${floor_vnum#tmux }
+if [[ $floor_vnum =~ ^([0-9]+)\.([0-9]+) ]] &&
+  { [ "${BASH_REMATCH[1]}" -lt "${floor%%.*}" ] ||
+    { [ "${BASH_REMATCH[1]}" -eq "${floor%%.*}" ] && [ "$((10#${BASH_REMATCH[2]}))" -lt "${floor#*.}" ]; }; }; then
+  printf 'SKIP: tmux %s is older than the tmux-pane floor %s\n' "$floor_vnum" "$floor"
   exit "$((failures != 0))"
 fi
 
@@ -506,8 +531,10 @@ for v in 'tmux 3.6b' 'tmux 3.10' 'tmux next-3.9' 'tmux master' 'tmux openbsd-7.6
   SHIM_VERSION=$v tps /dev/null mark -t "$decoy" >/dev/null 2>&1
   check "versions: '$v' is supported" 0 "$?"
 done
-SHIM_VERSION='tmux 3.1' tps /dev/null mark -t "$decoy" >/dev/null 2>&1
-check 'versions: tmux 3.1 is refused with 1' 1 "$?"
+for v in 'tmux 3.1' 'tmux 3.2a'; do
+  SHIM_VERSION=$v tps /dev/null mark -t "$decoy" >/dev/null 2>&1
+  check "versions: '$v' (below the floor) is refused with 1" 1 "$?"
+done
 
 # --- guardrail ------------------------------------------------------------------
 
@@ -1438,6 +1465,13 @@ tps "$ulog" send -t "$sh" 'echo u' --enter --wait prompt --timeout 10 >/dev/null
 tps "$ulog" read -t "$sh" --last-output >/dev/null 2>&1
 check 'locale: every tmux call but -V passes -u' '' "$(grep -v -e '^-u ' -e '^-V $' "$ulog")"
 check 'locale: and the log saw the calls' 1 "$([ "$(wc -l <"$ulog")" -ge 5 ] && echo 1 || echo 0)"
+# Output that ends in a space, glued to the prompt, ends the wait (it hung
+# to 124 under a rule that rejected all space-ended glue) and keeps its block.
+waitp 'parser: printf "%s " output glued to the prompt (exit)' 0 "printf '%s ' x y" --timeout 10
+check 'parser: and the capture is its block' "$(printf '%s\n' "\$ printf '%s ' x y" 'x y')" "$(sed 's/ *$//' "$tmp/w.out")"
+tp send -t "$sh" 'false' --enter --wait prompt >/dev/null 2>&1
+check_contains 'parser: and read --last-output 2 keeps it apart' "x y" \
+  "$(tp read -t "$sh" --last-output --count 2 2>/dev/null | head -n 2)"
 # Text that starts with a space is still exact.
 waitp 'rg_m18 text with a leading space (exit)' 0 ' echo spaced' --timeout 10
 check_contains 'rg_m18 text with a leading space is exact' 'exact=yes' "$(cat "$tmp/w.err")"

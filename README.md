@@ -52,7 +52,7 @@ Small helpers for tmux setups that outgrow the defaults:
 - For `tmux-copy-last-output`'s clipboard copy: `clip` when installed; otherwise
   `pbcopy`, `wl-copy` with `WAYLAND_DISPLAY`, `xclip` with `DISPLAY`, or an
   explicitly selected tmux client whose terminal supports OSC 52.
-- For `tmux-pane`: tmux 3.2 or newer
+- For `tmux-pane`: tmux 3.3 or newer
 - For `tmux-command-palette`: `fzf`, and tmux 3.4 or newer to run the chosen
   key itself (older tmux asks you to press it)
 - For `tmux-agent-picker`: `fzf` 0.27.0 or newer, tmux 3.2 or newer, and a
@@ -206,9 +206,11 @@ $ make test
 - **Output without a final newline** (`printf ok`) leaves bash's next line 1
   glued to it, as in `ok[1] user@host:~`. The `user@host:` that most prompts
   in the capture agree on marks where the prompt starts, so `ok` is still the
-  output and `1` the status. Glue never ends in a space, so `copied to
-  user@host:/srv` is output. A `#` line 2 also starts comments and headings
-  in output, so its line 1 must start with the identity, never glued.
+  output and `1` the status. Glue that ends in a space (`printf '%s ' a b`)
+  counts only when the rest of the line repeats an earlier line 1 or is the
+  last prompt, so `Copy to user@host:/srv` above a `$ ` line stays output. A
+  `#` line 2 also starts comments and headings in output, so its line 1 must
+  start with the identity, never glued.
 
 These prompts match:
 

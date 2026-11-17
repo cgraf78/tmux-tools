@@ -408,20 +408,37 @@ _assert_eq "parser: the identity inside output before a # line is not a prompt" 
   '$ cat deploy.txt
 rsync -a build/ user@test:/srv/app
 # restart' "$(parse_print "$tmp/root-glued.txt")"
-# Glue is output with no final newline, so it never ends in whitespace: a
-# line that names the identity after a space is output.
+# Output that ends in a space (printf '%s ' x y) glues to the next prompt
+# with a space before the identity. It is a prompt when the rest of the line
+# repeats an unglued prompt; a line that only mentions the identity above a
+# $ line stays output.
 cat >"$tmp/glue-space.txt" <<'EOF'
 user@test:/repo (main)
+$ printf '%s ' x y
+x y user@test:/repo (main)
+$ echo next
+next
+user@test:/repo (main)
+$
+EOF
+_assert_eq "parser: output ending in a space glued to the prompt is its own block" \
+  "\$ printf '%s ' x y
+x y 
+
+\$ echo next
+next" "$(parse_print "$tmp/glue-space.txt" 2)"
+cat >"$tmp/glue-mention.txt" <<'EOF'
+user@test:/repo (main)
 $ cat log.txt
-copied to user@test:/repo (main)
+Copy to user@test:/srv
 $ not a prompt
 user@test:/repo (main)
 $
 EOF
-_assert_eq "parser: glue that ends in whitespace is output, not a prompt" \
+_assert_eq "parser: a line that mentions the identity above a \$ line is output" \
   '$ cat log.txt
-copied to user@test:/repo (main)
-$ not a prompt' "$(parse_print "$tmp/glue-space.txt")"
+Copy to user@test:/srv
+$ not a prompt' "$(parse_print "$tmp/glue-mention.txt")"
 cat >"$tmp/status-prompt.txt" <<'EOF'
 user@test:/repo (main)
 $ false

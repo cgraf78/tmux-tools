@@ -2,7 +2,7 @@
 
 ## About
 
-Nine Bash 3.2-compatible tmux helpers plus one man page each. Stock macOS
+Bash 3.2-compatible tmux helpers, one man page each. Stock macOS
 `/bin/bash` 3.2 is a hard contract with its own CI job.
 `tmux-copy-last-output`, `term-pane-mark`, and `term-notify-sound` were
 imported from cgraf78/cmdblocks@52aae58; that archived repo holds their
@@ -147,7 +147,7 @@ earlier history.
   The shared matrix has no `fzf`, so the `fzf` job (Ubuntu) and the
   `macos-bash32` job install it and run `test/tmux-agent-picker-fzf.py`
   with `TMUX_TOOLS_REQUIRE_FZF=1`.
-- tmux versions: `tmux-pane` supports 3.2 and later. 3.6 is the primary
+- tmux versions: `tmux-pane` supports 3.3 and later. 3.6 is the primary
   target, and newer releases are first-class. Gates are always "at least
   X", a version that does not parse counts as the newest, and features are
   detected directly where tmux exposes them (`list-commands paste-buffer`

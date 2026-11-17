@@ -353,8 +353,9 @@ comes from the pane title, when it has the dotfiles prompt's
 form and the screen confirms it, else from the identity most prompts in the
 recent history agree on, else nothing. The prompt parser is the one in
 .BR tmux-copy-last-output (1),
-with the same limit: output with a line that ends in the identity, glued to
-text that does not end in a space, directly above a line that starts with
+with the same limits: output that repeats an earlier first line, or ends in
+the identity glued to text with no space, directly above a line that starts
+with
 .B $
 or
 .B %
@@ -458,7 +459,7 @@ exact.
 A prompt wait: the command's status.
 .TP
 .B 1
-A tmux failure, or tmux older than 3.2.
+A tmux failure, or tmux older than 3.3.
 .TP
 .B 3
 .B read \-\-last\-output
@@ -552,7 +553,7 @@ A comma list of features to treat as missing, for tests:
 .BR counters ,
 .BR key-mode .
 .SH VERSIONS
-tmux 3.2 and later. Features are detected directly where tmux exposes them.
+tmux 3.3 and later. Features are detected directly where tmux exposes them.
 A version that does not parse counts as the newest. tmux 3.2 has no
 .B scroll-on-clear
 option and behaves as if it were on. Before 3.7,
