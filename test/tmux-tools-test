@@ -3,6 +3,12 @@
 set -uo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The floor and a release just below it, from the tools' own tmux_minimum,
+# so these cases follow a floor bump.
+floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
+older_tmux=${floor_tmux%%.*}.$((${floor_tmux#*.} - 1))a
+# The mocks report the floor itself unless a case says otherwise.
+export floor_tmux
 PATH="$ROOT/bin:$PATH"
 export NO_COLOR=1
 INSTALLER_WRAPPER="$ROOT/install.sh"
@@ -702,8 +708,8 @@ case "$1" in
     done
     [[ "$target" != %999 ]] || exit 1
     pane="${target#%}"
-    printf '%s:%%%s\n' "${TMUX_TOOLS_TEST_SERVER_PID:-101}" \
-      "${pane:-${TMUX_TOOLS_TEST_PANE_ID:-1}}"
+    printf '%s:%%%s:%s\n' "${TMUX_TOOLS_TEST_SERVER_PID:-101}" \
+      "${pane:-${TMUX_TOOLS_TEST_PANE_ID:-1}}" "${TMUX_TOOLS_TEST_VERSION-$floor_tmux}"
     ;;
   load-buffer | paste-buffer | delete-buffer)
     printf '%s\n' "$*" >>"$TMUX_TOOLS_TEST_TMUX_LOG"
@@ -786,6 +792,21 @@ _assert_eq "clip paste rejects stale TMUX_PANE instead of retargeting" \
   "1" "$stale_pane_rc"
 _assert_contains "clip paste explains stale pane resolution" \
   "cannot determine" "$stale_pane_output"
+old_server_output=$(
+  TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_VERSION=$older_tmux \
+    tmux-clip-paste --pane %2 --path 2>&1
+)
+old_server_rc=$?
+_assert_eq "clip paste refuses an older tmux" "1" "$old_server_rc"
+_assert_eq "clip paste names the floor and the server" \
+  "tmux-clip-paste: needs tmux $floor_tmux or newer (server is $older_tmux)" "$old_server_output"
+for version in master ''; do
+  _assert_eq "clip paste accepts tmux '$version'" \
+    "$clip_dir/tmux-tools-$(id -u)/clip-paste/101-2" "$(
+      TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_TOOLS_TEST_VERSION=$version \
+        tmux-clip-paste --pane %2 --path
+    )"
+done
 invalid_pane_output=$(tmux-clip-paste --pane 2 --file "$clip_file" --path 2>&1)
 invalid_pane_rc=$?
 _assert_eq "clip paste rejects malformed explicit pane IDs" "2" "$invalid_pane_rc"
@@ -1851,9 +1872,9 @@ shift
 case "$command" in
   display-message)
     if [[ "$TMUX_TOOLS_TEST_ROLE" == A ]]; then
-      printf '303:%%1\n'
+      printf '303:%%1:%s\n' "$floor_tmux"
     else
-      printf '303:%%2\n'
+      printf '303:%%2:%s\n' "$floor_tmux"
     fi
     ;;
   load-buffer)
@@ -1946,7 +1967,7 @@ barrier_buffers=$(printf '%s\n' "$barrier_dir"/buffer-*)
 _assert_eq "clip race deletes all named buffers" \
   "$barrier_dir/buffer-*" "$barrier_buffers"
 
-if command -v tmux >/dev/null 2>&1; then
+if [[ ${TMUX_TOOLS_TMUX:-ok} == ok ]] && command -v tmux >/dev/null 2>&1; then
   real_tmux=$(command -v tmux)
   socket=$_suite_tmux_socket
   tool_bin=$(_tmpdir)
@@ -1985,9 +2006,143 @@ MOCK
 
   "$real_tmux" -S "$socket" kill-server >/dev/null 2>&1 || :
 elif [[ ${TMUX_TOOLS_REQUIRE_TMUX:-0} == 1 ]]; then
-  _fail "tmux server integration checks require tmux"
+  _fail "tmux server integration checks require a supported tmux"
 else
-  printf 'skip - tmux server integration checks (tmux not installed)\n'
+  printf 'skip - tmux server integration checks (no supported tmux)\n'
+fi
+
+# tmux_supported is the one tmux version rule, copied into each tool that
+# checks its server: every listed tool carries an identical copy.
+tmux_supported_block() {
+  sed -n '/^# BEGIN tmux_supported$/,/^# END tmux_supported$/p' "$1"
+}
+tmux_supported_tools='tmux-agent-picker tmux-command-palette tmux-copy-last-output tmux-clip-paste term-pane-state tmux-pane'
+tmux_supported_reference=$(tmux_supported_block "$ROOT/bin/tmux-agent-picker")
+_assert_ne "tmux_supported block is present" "" "$tmux_supported_reference"
+for tool in $tmux_supported_tools; do
+  _assert_eq "$tool carries the identical tmux_supported block" \
+    "$tmux_supported_reference" "$(tmux_supported_block "$ROOT/bin/$tool")"
+done
+for tool in "$ROOT"/bin/*; do
+  case " $tmux_supported_tools " in *" ${tool##*/} "*) continue ;; esac
+  _assert_eq "${tool##*/} is not an undeclared tmux_supported copy" '' \
+    "$(tmux_supported_block "$tool")"
+done
+# The command palette refuses an older server before it looks for fzf or
+# reads a binding, and tells the client why.
+palette_bin=$(_tmpdir)
+palette_log=$(_tmpdir)/tmux.log
+cat >"$palette_bin/tmux" <<'MOCK'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$TMUX_TOOLS_TEST_TMUX_LOG"
+[[ "$*" != 'display-message -p #{version}' ]] || printf '%s\n' "$TMUX_TOOLS_TEST_VERSION"
+# As an older server can, answer a client-targeted message with a usage error.
+[[ "$1 $2" != 'display-message -c' ]] || { echo 'usage: display-message [-aIpv]' >&2; exit 1; }
+MOCK
+chmod +x "$palette_bin/tmux"
+palette_output=$(
+  TMUX_TOOLS_TEST_TMUX_LOG=$palette_log TMUX_TOOLS_TEST_VERSION=$older_tmux \
+    PATH="$palette_bin:$PATH" "$ROOT/bin/tmux-command-palette" --client /dev/ttys1 2>&1
+)
+_assert_eq "the command palette refuses an older tmux" 1 "$?"
+_assert_eq "the command palette names the floor and the server" \
+  "tmux-command-palette: needs tmux $floor_tmux or newer (server is $older_tmux)" "$palette_output"
+_assert_eq "the command palette tells the client and asks nothing else" \
+  "display-message -p #{version}
+display-message -c /dev/ttys1 tmux-command-palette: needs tmux $floor_tmux or newer (server is $older_tmux)" \
+  "$(cat "$palette_log")"
+
+# The canonical vectors, shared verbatim by every repository that checks the
+# tmux floor: each version and how it reads (MAJOR.MINOR, newest or
+# unknown). Whether each is supported follows from the floor, so the table
+# holds no floor; rows at the floor's own edge are generated from it.
+tmux_supported_vectors='1.8:1.8 2.9a:2.9 next-2.9:2.9 3.0:3.0 3.1c:3.1 3.2:3.2
+3.2a:3.2 3.2-rc3:3.2 next-3.2:3.2 next-3.2-rc:3.2 3.3:3.3 3.3a:3.3 3.3-rc:3.3
+next-3.3:3.3 3.4:3.4 3.10:3.10 next-3.10:3.10 master:newest
+openbsd-7.6:newest openbsd-7.6-current:newest 3.x:unknown 3.:unknown foo-2.9:unknown :unknown'
+# test/tmux_version.py holds the same table for the Python clients.
+if command -v python3 >/dev/null 2>&1; then
+  # shellcheck disable=SC2086 # One row per line.
+  _assert_eq "test/tmux_version.py holds the canonical vectors" \
+    "$(printf '%s\n' $tmux_supported_vectors)" \
+    "$(PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$ROOT/test" python3 -c \
+      'import tmux_version as v; print("\n".join(f"{a}:{b}" for a, b in v.VECTORS))')"
+fi
+tmux_floor=$(sed -n 's/^tmux_minimum=//p' <<<"$tmux_supported_reference")
+floor_major=${tmux_floor%%.*}
+floor_minor=${tmux_floor#*.}
+if [[ $tmux_floor != *.* || $floor_major$floor_minor == *[!0-9]* ]] || ((floor_minor == 0)); then
+  _fail "the floor-edge rows cannot express tmux_minimum=$tmux_floor"
+else
+  below=$floor_major.$((floor_minor - 1))
+  above=$floor_major.$((floor_minor + 1))
+  tmux_supported_vectors+=" $below:$below ${below}a:$below $below-rc:$below"
+  tmux_supported_vectors+=" next-$below:$below $tmux_floor:$tmux_floor $above:$above"
+  # The next major's first release, which a comparison of the minor alone
+  # would refuse.
+  next_major=$((floor_major + 1)).0
+  tmux_supported_vectors+=" $next_major:$next_major"
+fi
+for vector in $tmux_supported_vectors; do
+  version=${vector%:*}
+  reads=${vector##*:}
+  case $reads in
+    newest | unknown) want=yes ;;
+    *)
+      major=${reads%%.*} minor=${reads#*.}
+      if ((major > floor_major || (major == floor_major && minor >= floor_minor))); then
+        want=yes
+      else
+        want="no:needs tmux $tmux_floor or newer (server is $version)"
+      fi
+      ;;
+  esac
+  for reported in "$version" "tmux $version"; do
+    verdict=$(
+      eval "$tmux_supported_reference"
+      # shellcheck disable=SC2154 # The block sets tmux_refusal.
+      if tmux_supported "$reported"; then echo yes; else echo "no:$tmux_refusal"; fi
+    )
+    _assert_eq "tmux_supported reads '$reported'" "$want" "$verdict"
+  done
+done
+
+# Each checking tool's man page states the floor, and so does the README's
+# Requirements bullet itself, which names every tool that checks.
+read -r -a floor_docs <<<"$tmux_supported_tools"
+for doc in "${floor_docs[@]/%/.1}"; do
+  _assert_contains "man/man1/$doc states the floor" "tmux $tmux_floor or newer" \
+    "$(tr '\n' ' ' <"$ROOT/man/man1/$doc")"
+done
+floor_bullet=$(awk '/^## Requirements$/ { on = 1; next } on && /^## / { exit }
+  on && /^- / { if (bullet != "") exit; if ($0 ~ /^- tmux /) bullet = $0; next }
+  on && bullet != "" && /^  / { bullet = bullet " " substr($0, 3) }
+  on && bullet != "" && !/^  / { exit }
+  END { print bullet }' "$ROOT/README.md")
+_assert_contains "README.md's Requirements bullet states the floor" \
+  "- tmux $tmux_floor or newer. " "$floor_bullet"
+for tool in "${floor_docs[@]}"; do
+  _assert_contains "README.md's floor bullet names $tool" "\`$tool\`" "$floor_bullet"
+done
+
+# Outside a Git checkout the floor lint skips with a note, except under
+# GitHub Actions, where it fails so CI can never skip it.
+if command -v python3 >/dev/null 2>&1; then
+  nogit=$(_tmpdir)
+  mkdir -p "$nogit/test" "$nogit/bin"
+  cp "$ROOT/test/tmux-floor-lint.py" "$ROOT/test/tmux_version.py" "$nogit/test/"
+  # tmux_version.py reads the floor from the picker's block.
+  cp "$ROOT/bin/tmux-agent-picker" "$nogit/bin/"
+  lint_status=0
+  lint_output=$(env -u GITHUB_ACTIONS PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$nogit/test/tmux-floor-lint.py" 2>&1) || lint_status=$?
+  _assert_eq 'the floor lint outside a checkout passes' 0 "$lint_status"
+  _assert_contains 'and notes the skip' 'not a Git checkout' "$lint_output"
+  lint_status=0
+  lint_output=$(GITHUB_ACTIONS=true PYTHONDONTWRITEBYTECODE=1 \
+    python3 "$nogit/test/tmux-floor-lint.py" 2>&1) || lint_status=$?
+  _assert_eq 'the floor lint outside a checkout fails under GitHub Actions' 1 "$lint_status"
+  _assert_contains 'and says why' 'not a Git checkout under GitHub Actions' "$lint_output"
 fi
 
 if ((_failures > 0)); then

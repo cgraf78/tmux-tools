@@ -6,6 +6,34 @@
 
 set -euo pipefail
 
+# BEGIN tmux_supported
+# Whether the tmux server reporting VERSION (#{version}) is supported; on
+# refusal, tmux_refusal holds the message. master and openbsd-* are newer
+# than any release; otherwise one leading next- is ignored and the leading
+# MAJOR.MINOR compares, so 3.3a, 3.3-rc and next-3.3 read as 3.3. A version
+# this cannot read counts as newest. Every copy is identical (see
+# test/tmux-tools-test).
+tmux_minimum=3.3
+tmux_supported() {
+  local version=${1#tmux } major minor
+  local floor_major=${tmux_minimum%%.*} floor_minor=${tmux_minimum#*.}
+  tmux_refusal=
+  case $version in master | openbsd-*) return 0 ;; esac
+  version=${version#next-}
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  case $version in *.*) ;; *) return 0 ;; esac
+  case $major in '' | *[!0-9]*) return 0 ;; esac
+  case $minor in '' | *[!0-9]*) return 0 ;; esac
+  if ((10#$major > floor_major || (10#$major == floor_major && 10#$minor >= floor_minor))); then
+    return 0
+  fi
+  tmux_refusal="needs tmux $tmux_minimum or newer (server is ${1#tmux })"
+  return 1
+}
+# END tmux_supported
+
 _usage() {
   cat <<'EOF'
 Usage: tmux-clip-paste [--file FILE] [--pane PANE]
@@ -68,27 +96,37 @@ _validate_pane() {
   [[ "$pane" == %* && -n "${pane#%}" && "${pane#%}" != *[!0-9]* ]]
 }
 
+# Resolve the server and pane, and refuse an older server. The version comes
+# last, so a colon in it (no release has one) cannot shift the other fields.
 _resolve_identity() {
   local requested_pane="$target_pane"
-  local identity resolved_pane
+  local identity resolved_pane version
 
   if [[ -z "$requested_pane" && -n "${TMUX_PANE:-}" ]]; then
     requested_pane="$TMUX_PANE"
   fi
   if [[ -n "$requested_pane" ]]; then
     _validate_pane "$requested_pane" || _fail "invalid tmux pane ID: $requested_pane"
-    identity=$(tmux display-message -p -t "$requested_pane" '#{pid}:#{pane_id}') ||
+    identity=$(tmux display-message -p -t "$requested_pane" '#{pid}:#{pane_id}:#{version}') ||
       _fail "cannot determine the current tmux server and pane"
   else
-    identity=$(tmux display-message -p '#{pid}:#{pane_id}') ||
+    identity=$(tmux display-message -p '#{pid}:#{pane_id}:#{version}') ||
       _fail "cannot determine the current tmux server and pane"
   fi
   server_pid="${identity%%:*}"
   resolved_pane="${identity#*:}"
+  version="${resolved_pane#*:}"
+  [[ "$resolved_pane" == *:* ]] || version=
+  resolved_pane="${resolved_pane%%:*}"
   if [[ -z "$server_pid" || "$server_pid" == *[!0-9]* ||
     "$resolved_pane" != %* || -z "${resolved_pane#%}" ||
     "${resolved_pane#%}" == *[!0-9]* ]]; then
     _fail "tmux returned an invalid server or pane identity: $identity"
+  fi
+  if ! tmux_supported "$version"; then
+    tmux display-message -t "$resolved_pane" "tmux-clip-paste: $tmux_refusal" \
+      >/dev/null 2>&1 || :
+    _fail "$tmux_refusal"
   fi
   if [[ -n "$requested_pane" && "$resolved_pane" != "$requested_pane" ]]; then
     _fail "tmux resolved $requested_pane as unexpected pane $resolved_pane"

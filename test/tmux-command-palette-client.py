@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import os
 import pty
-import re
 import select
 import shutil
 import signal
@@ -16,19 +15,14 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import tmux_version
+
 ROOT = Path(__file__).resolve().parent.parent
 PALETTE = ROOT / "bin/tmux-command-palette"
-TMUX = shutil.which("tmux")
-if TMUX is None:
-    if os.environ.get("TMUX_TOOLS_REQUIRE_TMUX") == "1":
-        raise SystemExit("FAIL: real tmux is required")
-    print("SKIP: real tmux unavailable")
-    raise SystemExit(0)
+TMUX, VERSION = tmux_version.require_tmux()
 
-VERSION = subprocess.run([TMUX, "-V"], text=True, capture_output=True, check=False).stdout
-MATCH = re.search(r"(\d+)\.(\d+)", VERSION)
 # send-keys -K, which types the chosen key for the client, arrived in tmux 3.4.
-TYPES_FOR_CLIENT = MATCH is not None and (int(MATCH[1]), int(MATCH[2])) >= (3, 4)
+TYPES_FOR_CLIENT = tmux_version.at_least(VERSION, (3, 4))
 
 # The popup runs this stand-in instead of fzf. It records its arguments and
 # the entries it was offered, then prints the first entry containing

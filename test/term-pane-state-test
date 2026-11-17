@@ -3,6 +3,12 @@
 set -uo pipefail
 unset BASH_ENV ENV
 ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+# The floor and a release just below it, from the tools' own tmux_minimum,
+# so these cases follow a floor bump.
+floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
+older_tmux=${floor_tmux%%.*}.$((${floor_tmux#*.} - 1))a
+# The mocks report the floor itself unless a case says otherwise.
+export floor_tmux
 tmp=$(
   umask 077
   mktemp -d "${TMPDIR:-/tmp}/tps.XXXXXXXX"
@@ -18,12 +24,13 @@ case " $* " in
     printf '%s\n' "${STATE_ROWS:-}"
     ;;
   *' list-clients '*)
+    # Each row leads with the server's version, as the client format asks.
     if [ -n "${STATE_SEEN:-}" ] && [ -f "$STATE_SEEN" ]; then
       printf '%s\n' "${STATE_SECOND_CLIENTS:-${STATE_CLIENTS:-}}"
     else
       [ -z "${STATE_SEEN:-}" ] || : >"$STATE_SEEN"
       printf '%s\n' "${STATE_CLIENTS:-}"
-    fi
+    fi | sed "s/^./v${STATE_VERSION-$floor_tmux} &/"
     ;;
   *) exit 1 ;;
 esac
@@ -270,6 +277,21 @@ check 'session publish evaluates each client'"'"'s own selected pane' \
   $'1\n1' "$(awk '{ for (i = 1; i < NF; i++) if ($i == "--pending") print $(i + 1) }' "$STATE_NATIVE_CALLS")"
 check 'session publish never prints a snapshot' '' \
   "$("$ROOT/bin/term-pane-state" --socket /private/test.sock --session "\$7" 2>/dev/null)"
+# An older server is refused, by name, and nothing is published; a version
+# the rule cannot read counts as newest.
+STATE_VERSION=$older_tmux session_publish
+check 'session publish refuses an older tmux' 1 "$?"
+check 'session publish to an older tmux publishes nothing' 0 "$(native_calls)"
+check 'an older tmux is named' "term-pane-state: needs tmux $floor_tmux or newer (server is $older_tmux)" \
+  "$(STATE_VERSION=$older_tmux "$ROOT/bin/term-pane-state" --socket /private/test.sock \
+    --session "\$7" 2>&1 >/dev/null)"
+STATE_VERSION=$older_tmux publish
+check 'client publish refuses an older tmux' 1 "$?"
+check 'client publish to an older tmux publishes nothing' 0 "$(native_calls)"
+for version in master ''; do
+  STATE_VERSION=$version session_publish
+  check "session publish accepts tmux '$version'" 0 "$?"
+done
 export STATE_CLIENTS=''
 session_publish
 check 'a session without terminal clients has nothing to do' 0 "$?"

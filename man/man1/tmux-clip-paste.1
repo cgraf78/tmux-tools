@@ -94,6 +94,12 @@ The optional dotfiles clip command owns successful selection and the private
 per-operation handoff. Without it, prepare a complete private file and call
 tmux-clip-paste with --file and --pane. Never unconditionally consume a shared
 handoff after a cancelled picker.
+.SH COMPATIBILITY
+tmux 3.3 or newer. The command reads its server's
+.B #{version}
+along with the server and pane it resolves, and refuses an older tmux: it
+shows the reason on a client of the pane's session and on standard error,
+and exits 1. A version it cannot read counts as newer.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -101,8 +107,8 @@ Text was pasted, a payload was published, an empty handoff file was removed,
 no handoff file was available, or the handoff path was printed.
 .TP
 .B 1
-A runtime operation failed, including tmux identity, buffer, filesystem,
-claim, or publication operations.
+The tmux server is older than tmux 3.3, or a runtime operation failed, including
+tmux identity, buffer, filesystem, claim, or publication operations.
 .TP
 .B 2
 Usage error.

@@ -241,10 +241,16 @@ for d in $(iline default); do
   check_contains "drift: tmux-pane(1) gives $o's default" "$o S (default $v" "$man_flat"
 done
 floor=$(iline floor)
-check_contains 'drift: tmux-pane(1) VERSIONS names the floor' "tmux $floor and later" "$man_flat"
+check_contains 'drift: tmux-pane(1) VERSIONS names the floor' "tmux $floor or newer" "$man_flat"
 check_contains 'drift: tmux-pane(1) exit 1 names the floor' "older than $floor" "$man_flat"
-check_contains 'drift: the README names the floor' "For \`tmux-pane\`: tmux $floor or newer" "$(cat "$ROOT/README.md")"
-check_contains 'drift: AGENTS.md names the floor' "supports $floor and later" "$(cat "$ROOT/AGENTS.md")"
+# (tmux-tools-test checks the README's floor bullet names this tool.)
+# A tp_ name the docs give must still be the script's.
+stale=''
+while IFS= read -r name; do
+  grep -qw -- "$name" "$TOOL" || stale="$stale $name"
+done < <(grep -ohw 'tp_[a-z_][a-z_]*' "$ROOT/README.md" "$ROOT/AGENTS.md" "$ROOT"/man/man1/*.1 | sort -u)
+check 'drift: every tp_ name in the docs is in the script' '' "$stale"
+check_contains 'drift: AGENTS.md names the floor' "supports $floor or newer" "$(cat "$ROOT/AGENTS.md")"
 # AGENTS.md spells the exit statuses as a list with ranges.
 agents_codes=$(tr '\n' ' ' <"$ROOT/AGENTS.md" | sed 's/  */ /g' | sed -n 's/.*Its exit codes (\([^)]*\)).*/\1/p' |
   tr ',/' '  ' | awk '{ for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+-[0-9]+$/) { split($i, r, "-"); for (j = r[1]; j <= r[2]; j++) print j } else if ($i ~ /^[0-9]+$/) print $i }' | sort -n | tr '\n' ' ')
@@ -296,22 +302,25 @@ printf '%s\n' 'run `tmux-pane send -t %1 --enter '"'"'a -b'"'"'` and `tmux-pane 
 check 'drift: the reference check reads known-good references' '#refs 2' "$("$BASH" "$TOOL" --check-refs "$tmp/good.md")"
 check 'drift: the docs hold references for it to check' 1 \
   "$([ "$("$BASH" "$TOOL" --check-refs "${docs[@]}" | sed -n 's/^#refs //p')" -ge 10 ] && echo 1 || echo 0)"
-if ! command -v tmux >/dev/null 2>&1; then
+# Settle tmux by the tools' own rule: test/run passes its verdict in
+# TMUX_TOOLS_TMUX, and a direct run applies the tool's tmux_supported block.
+# A tmux older than the floor is refused (the versions section checks that
+# through a shim), so there is nothing to drive on it.
+tmux_verdict=${TMUX_TOOLS_TMUX:-}
+if [ -z "$tmux_verdict" ]; then
+  if ! tmux_reported=$(tmux -V 2>/dev/null); then
+    tmux_verdict=missing
+  else
+    eval "$(sed -n '/^# BEGIN tmux_supported$/,/^# END tmux_supported$/p' "$TOOL")"
+    if tmux_supported "$tmux_reported"; then tmux_verdict=ok; else tmux_verdict=unsupported; fi
+  fi
+fi
+if [ "$tmux_verdict" != ok ]; then
   if [ "${TMUX_TOOLS_REQUIRE_TMUX:-0}" = 1 ]; then
-    printf 'FAIL: tmux required for tmux-pane-test\n' >&2
+    printf 'FAIL: a supported tmux is required for tmux-pane-test (%s)\n' "$tmux_verdict" >&2
     exit 1
   fi
-  printf 'SKIP: tmux unavailable for tmux-pane-test\n'
-  exit "$((failures != 0))"
-fi
-# A tmux older than the floor is refused (the versions section checks that
-# through a shim); there is nothing to drive here.
-floor_vnum=$(tmux -V)
-floor_vnum=${floor_vnum#tmux }
-if [[ $floor_vnum =~ ^([0-9]+)\.([0-9]+) ]] &&
-  { [ "${BASH_REMATCH[1]}" -lt "${floor%%.*}" ] ||
-    { [ "${BASH_REMATCH[1]}" -eq "${floor%%.*}" ] && [ "$((10#${BASH_REMATCH[2]}))" -lt "${floor#*.}" ]; }; }; then
-  printf 'SKIP: tmux %s is older than the tmux-pane floor %s\n' "$floor_vnum" "$floor"
+  printf 'SKIP: no supported tmux for tmux-pane-test (%s)\n' "$tmux_verdict"
   exit "$((failures != 0))"
 fi
 
@@ -499,12 +508,31 @@ mkdir -p "$tmp/shim"
 cat >"$tmp/shim/tmux" <<EOF
 #!/usr/bin/env bash
 { printf '%q ' "\$@"; printf '\n'; } >>"\${SHIM_LOG:-/dev/null}"
-if [ "\$1" = -V ] && [ -n "\${SHIM_VERSION+x}" ]; then
-  printf '%s\n' "\$SHIM_VERSION"
-  exit 0
+# SHIM_VERSION=V: the server reports V as its #{version}, whatever this
+# (newer) client is.
+if [ -n "\${SHIM_VERSION+x}" ]; then
+  n=0 pat='#{version}'
+  for a in "\$@"; do
+    n=\$((n + 1))
+    case \$a in *"\$pat"*) set -- "\${@:1:n-1}" "\${a//"\$pat"/\$SHIM_VERSION}" "\${@:n+1}" ;; esac
+  done
 fi
 if [ -n "\${SHIM_PASTE_USAGE:-}" ] && [ "\$*" = "-u -S $sock list-commands paste-buffer" ]; then
   printf '%s\n' "\$SHIM_PASTE_USAGE"
+  exit 0
+fi
+# SHIM_HOLD=FLAG: the wait loop's poll (a capture from row 0, stderr sent to
+# /dev/null) creates FLAG and takes two seconds, so a signal lands mid-call.
+if [ -n "\${SHIM_HOLD:-}" ]; then
+  case " \$* " in *" capture-pane -p -t "*" -S 0 -E - "*)
+    : >"\$SHIM_HOLD"
+    sleep 2
+    ;;
+  esac
+fi
+# SHIM_CLIENT_VERSION=V: this client's tmux -V says V.
+if [ "\$1" = -V ] && [ -n "\${SHIM_CLIENT_VERSION:-}" ]; then
+  printf 'tmux %s\n' "\$SHIM_CLIENT_VERSION"
   exit 0
 fi
 if [ -n "\${SHIM_FAIL_ON:-}" ]; then
@@ -546,14 +574,50 @@ tps() { # tps LOG SUBCOMMAND ARGS...: run through the shim
 # --- versions -------------------------------------------------------------------
 
 # Gates are "at least X"; a version that does not parse counts as the newest.
-for v in 'tmux 3.6b' 'tmux 3.10' 'tmux next-3.9' 'tmux master' 'tmux openbsd-7.6' ''; do
+# The edge rows come from the floor, so bumping it needs no edit here.
+below=${floor%%.*}.$((${floor#*.} - 1))
+# The server's #{version} decides, through a client newer than any of them.
+for v in "$floor" 3.6b 3.10 next-3.9 master openbsd-7.6 ''; do
   SHIM_VERSION=$v tps /dev/null mark -t "$decoy" >/dev/null 2>&1
-  check "versions: '$v' is supported" 0 "$?"
+  check "versions: a server reporting '$v' is supported" 0 "$?"
 done
-for v in 'tmux 3.1' 'tmux 3.2a'; do
+for v in "$below" "${below}a" "next-$below"; do
   SHIM_VERSION=$v tps /dev/null mark -t "$decoy" >/dev/null 2>&1
-  check "versions: '$v' (below the floor) is refused with 1" 1 "$?"
+  check "versions: a server reporting '$v' (below the floor) is refused with 1" 1 "$?"
 done
+check 'versions: the refusal names the floor and the server' \
+  "tmux-pane: needs tmux $floor or newer (server is ${below}a)" \
+  "$(SHIM_VERSION="${below}a" tps /dev/null mark -t "$decoy" 2>&1 >/dev/null)"
+check 'versions: a wait on an older server still ends with result=error' \
+  'result=error exact=- status=unknown' \
+  "$(SHIM_VERSION="${below}a" tps /dev/null wait -t "$decoy" --prompt 2>&1 >/dev/null | tail -n 1)"
+# The version rides the server id query, and the client's tmux -V is never
+# asked: it says nothing about the server.
+SHIM_VERSION=$floor tps "$tmp/version.log" mark -t "$decoy" >/dev/null 2>&1
+check 'versions: one query asks for the server id and version' 1 \
+  "$(grep 'start_time' "$tmp/version.log" | grep -c 'version')"
+check 'versions: the client is never asked its version' 0 "$(grep -c -- '^-V' "$tmp/version.log")"
+# A server that does not answer: a client below the floor, which may be
+# unable to talk to a newer server, is named; any other client reports no
+# server. The id query is the one carrying #{version}.
+id_query='#{pid}.#{start_time} #{version}'
+res=$(SHIM_FAIL_ON=$id_query SHIM_CLIENT_VERSION=${below}a tps /dev/null mark -t "$decoy" 2>&1 >/dev/null)
+check 'versions: no answer through an older client is 1' 1 "$?"
+check 'versions: and names the client' "tmux-pane: needs tmux $floor or newer (client is ${below}a)" "$res"
+# The same under extglob, which a BASH_ENV may turn on: an unquoted ( in the
+# message's substitution pattern stops matching there.
+res=$(env -u TMUX -u TMUX_PANE SHIM_FAIL_ON="$id_query" SHIM_CLIENT_VERSION="${below}a" PATH="$tmp/shim:$PATH" \
+  "$BASH" -O extglob "$TOOL" mark -S "$sock" -t "$decoy" 2>&1 >/dev/null)
+check 'versions: and names the client under extglob too' \
+  "tmux-pane: needs tmux $floor or newer (client is ${below}a)" "$res"
+res=$(SHIM_FAIL_ON=$id_query SHIM_CLIENT_VERSION=$floor tps /dev/null mark -t "$decoy" 2>&1 >/dev/null)
+check 'versions: no answer through a supported client is 65' 65 "$?"
+check_contains 'versions: and says there is no server' 'tmux-pane: no tmux server' "$res"
+M=$(tps /dev/null mark -t "$decoy")
+res=$(SHIM_FAIL_ON=$id_query SHIM_CLIENT_VERSION=${below}a tps /dev/null wait -t "$decoy" --prompt --since "$M" 2>&1 >/dev/null)
+check 'versions: a wait with a marker through an older client is 1' 1 "$?"
+check 'versions: and still ends with its result line' \
+  "result=error exact=- status=unknown marker=$M" "$(printf '%s\n' "$res" | tail -n 1)"
 
 # --- guardrail ------------------------------------------------------------------
 
@@ -805,7 +869,7 @@ SHIM_FAIL_ON=paste-buffer tps "$tmp/fail.log" send -t "$sp" 'never' >/dev/null 2
 left=$(T list-buffers -F '#{buffer_name}' | grep '^tmux-pane\.' | grep -v '^tmux-pane\.other$' || true)
 check 'rg_x8 a failed send leaves no buffers of its own' '' "$left"
 check 'rg_x8 a similar user buffer survives' keep "$(T show-buffer -b tmux-pane.other)"
-# A send's own pasted buffers are gone by its exit; tmux 3.2 would turn a
+# A send's own pasted buffers are gone by its exit; tmux before 3.4 turns a
 # delete-buffer -b of a missing name into deleting the newest buffer, here
 # the user's.
 T set-buffer -b user-newest mine
@@ -1454,14 +1518,40 @@ T2 kill-server >/dev/null 2>&1
 # A wait stopped by a signal still ends with a result line and its marker.
 sh=$(shellpane)
 env -u TMUX -u TMUX_PANE "$BASH" "$TOOL" send -S "$sock" -t "$sh" 'sleep 30' --enter --wait prompt \
-  >/dev/null 2>"$tmp/sig.err" &
+  --print-marker >"$tmp/sig.out" 2>"$tmp/sig.err" &
 pid=$!
-sleep 1.5
+# Only once the wait has its marker, which --print-marker prints just
+# before the wait starts.
+n=0
+until [ -s "$tmp/sig.out" ] || [ "$n" -ge 100 ]; do
+  n=$((n + 1))
+  sleep 0.1
+done
 kill -TERM "$pid"
 wait "$pid"
 check 'wait: SIGTERM is 143' 143 "$?"
 check_contains 'wait: and ends with a result line and the marker' 'result=error exact=- status=unknown marker=tp1:' \
   "$(tail -n 1 "$tmp/sig.err")"
+T send-keys -t "$sh" C-c
+killpane "$sh"
+# A signal that lands inside a tmux call whose stderr goes to /dev/null still
+# reaches the caller's stderr.
+sh=$(shellpane)
+hold="$tmp/hold.flag"
+# Not through tps: $! must be the tool itself, not a subshell around it.
+env -u TMUX -u TMUX_PANE SHIM_HOLD="$hold" PATH="$tmp/shim:$PATH" "$BASH" "$TOOL" send -S "$sock" \
+  -t "$sh" 'sleep 30' --enter --wait prompt >/dev/null 2>"$tmp/sig.err" &
+pid=$!
+n=0
+until [ -e "$hold" ] || [ "$n" -ge 100 ]; do
+  n=$((n + 1))
+  sleep 0.1
+done
+kill -TERM "$pid"
+wait "$pid"
+check 'wait: SIGTERM mid-call is 143' 143 "$?"
+check_contains 'wait: and still ends with a result line and the marker' \
+  'result=error exact=- status=unknown marker=tp1:' "$(tail -n 1 "$tmp/sig.err")"
 T send-keys -t "$sh" C-c
 killpane "$sh"
 # Waits that fail before they start still end with a result= line.

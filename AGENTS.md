@@ -30,10 +30,31 @@ earlier history.
   `test/tmux-agent-picker-fzf.py` (the real fzf; both picker suites load
   `test/tmux-agent-picker.conf`, the man page's example config),
   `test/tmux-pane-test` and `test/term-pane-mark-token-test` (all on a
-  private real tmux).
+  private real tmux), plus `test/tmux_version.py` (the version rule the
+  Python clients share) and `test/tmux-floor-lint.py`.
 
 ## Invariants
 
+- tmux 3.3 is the floor. `tmux_minimum` in the `tmux_supported` block is
+  its one statement: the block is identical in `tmux-agent-picker`,
+  `tmux-command-palette`, `tmux-copy-last-output`, `tmux-clip-paste`,
+  `term-pane-state` and `tmux-pane`, which ask their server for
+  `#{version}` within a query they already make (or one extra
+  `display-message -p`) and refuse an older one; `term-pane-state --print`
+  reads no client rows and does not check. The client's `tmux -V` is never
+  the test: a new client can reach an old server. Only when the server does
+  not answer does `tmux-pane` ask `tmux -V`, to name a client too old to
+  reach a newer server rather than report no server.
+  When the picker's batched snapshot fails, it asks for the version alone,
+  since an older server can reject the batch first. A version the rule
+  cannot read counts as newest, so an unknown or unreleased build is never
+  refused. `test/tmux-tools-test` checks the copies, the canonical version
+  table, the README and the man pages against it; `test/tmux_version.py`
+  reads it; `test/tmux-floor-lint.py` fails on any "tmux <version>" or
+  "older than <version>" below the floor outside its allowlist, so a
+  stated floor goes stale loudly. Feature
+  checks above the floor (send-keys -K from 3.4, popup focus events from
+  3.6) stay capability checks.
 - The continuum commands are activation helpers: they exit quietly when
   plugins, tmux state, or socket identity are missing, so a partial tmux
   config keeps working. Don't turn those paths into errors.
@@ -76,11 +97,11 @@ earlier history.
 - The picker fails loudly (the man page's DIAGNOSTICS owns the list).
   Every failure goes through `fail`, and every tmux query through `ask`
   (or `find_client`), never with `|| true`. `client_gone` runs in `fail`,
-  before any message, and in the EXIT trap; the trap's comment gives the
-  tmux 3.2a reason. Read fzf's status file before the popup's status, and
-  keep the quiet fzf statuses in `quiet_statuses` only. `message` falls back
-  to an untargeted message only on tmux 3.2's `display-message -c` usage
-  error. Never redirect fzf's stderr: fzf 0.27 draws its screen there.
+  before any message, and in the EXIT trap. Read fzf's status file before
+  the popup's status, and keep the quiet fzf statuses in `quiet_statuses`
+  only. `message` only ever targets the picker's own client: tmux drops a
+  message for a client that has gone. Never redirect fzf's stderr: fzf 0.27
+  draws its screen there.
 - `required_options` in the script is the one list of required config
   options; the README's Required column and the man page's required list
   follow it, as `test/tmux-tools-test` checks. An unset required option is
@@ -123,8 +144,10 @@ earlier history.
   agree with it. The reference check is `tmux-pane --check-refs FILE...`,
   the one copy: cgraf78/dotfiles' agent-rules test runs it too, so keep its
   output (bad references, then `#refs N`) stable. The only version gate is
-  `tp_tmux_floor`; newer behaviour is detected from tmux (the "Capabilities"
-  comment lists each detection).
+  the shared floor (`tmux_minimum` in the `tmux_supported` block), checked
+  on the server's `#{version}`; newer behaviour is detected from tmux (the
+  "Capabilities" comment lists each detection). `test/tmux-pane-test` fails
+  on a `tp_` name in the docs that the script no longer has.
 - Every `bin/` command needs a `man/man1/<cmd>.1` with `.SH NAME`, a row in
   `commands=()` in `support/install-checkout.sh`, and a ShellCheck inventory
   row; `test/tmux-tools-test` checks the first two.
@@ -139,30 +162,34 @@ earlier history.
   `.github/shellcheck-files.txt` when `shellcheck` is installed, then every
   suite listed under Layout. The real-fzf picker test skips without `fzf`
   unless `TMUX_TOOLS_REQUIRE_FZF=1`.
+- `test/run` settles tmux once: without a supported tmux it prints one skip
+  line and the real-tmux cases skip (the suites read `TMUX_TOOLS_TMUX`);
+  under `TMUX_TOOLS_REQUIRE_TMUX=1` a missing or older tmux fails instead,
+  as does missing Python for the client tests. When shared CI sets
+  `CI_TMUX_FLOOR` it must match `tmux_minimum`, and under
+  `CI_TMUX_FLOOR_EXACT=1` tmux must be exactly that release.
 - CI: `TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_SKIP_SHELLCHECK=1 test/run`
-  through shared shell CI with the `base,tmux` profiles.
-  `TMUX_TOOLS_REQUIRE_TMUX=1` turns a missing tmux (and Python, for the
-  client tests) into a failure instead of a skip: the real-tmux
-  `tmux-clip-paste` block, `test/tmux-pane-test` and the Python clients.
-  The shared matrix has no `fzf`, so the `fzf` job (Ubuntu) and the
+  through shared shell CI with the `base,tmux-floor,python` profiles, which
+  build the floor release on the leg whose distribution ships an older
+  tmux. The shared matrix has no `fzf`, so the `fzf` job (Ubuntu) and the
   `macos-bash32` job install it and run `test/tmux-agent-picker-fzf.py`
   with `TMUX_TOOLS_REQUIRE_FZF=1`.
-- tmux versions: `tmux-pane` supports 3.3 and later. 3.6 is the primary
-  target, and newer releases are first-class. Gates are always "at least
-  X", a version that does not parse counts as the newest, and features are
-  detected directly where tmux exposes them (`list-commands paste-buffer`
-  for `-S`, empty `pane_key_mode`, empty history counters). Run
-  `test/tmux-pane-test` on the oldest and newest tmux you touch;
-  `TMUX_PANE_TEST_DISABLE` forces each feature off for the other side.
-  Below the floor the suite skips, so the CentOS CI leg (tmux 3.2a) moves
-  to a source-built 3.3a through the cgraf78/actions `tmux-floor` profile
-  (cgraf78/actions#163); until that lands, 3.3 is verified locally.
+- tmux versions: `tmux-pane` supports 3.3 or newer, like every tool here.
+  3.6 is the primary target, and newer releases are first-class. Gates are
+  always "at least X", a version that does not parse counts as the newest,
+  and features are detected directly where tmux exposes them
+  (`list-commands paste-buffer` for `-S`, empty `pane_key_mode`, empty
+  history counters). Run `test/tmux-pane-test` on the oldest and newest tmux
+  you touch; `TMUX_PANE_TEST_DISABLE` forces each feature off for the other
+  side.
 - Stock Bash 3.2 (macOS): `PREFIX=$tmp /bin/bash install.sh`, then for each
   installed command `/bin/bash -n`, plus `tmux-clip-paste --help`,
   `TMUX= tmux-continuum-default-server`, `tmux-continuum-save-gate`, and
   stub-tmux smokes of `tmux-copy-last-output --print`,
   `tmux-command-palette --list`, `term-pane-mark`, and `term-notify-sound`,
-  the `tmux-agent-picker` usage status, plus `test/tmux-agent-picker-test`
+  the `tmux-agent-picker` usage status, `tmux-copy-last-output` refusing a
+  stub that reports version 3.2a (the stub otherwise reports no version, which
+  counts as newest), plus `test/tmux-agent-picker-test`
   (which runs every awk it finds, `/usr/bin/awk` among them), all run with
   `/bin/bash`, as the `macos-bash32` job does. That job also installs tmux
   and runs `/bin/bash test/tmux-pane-test`, which starts the tool with

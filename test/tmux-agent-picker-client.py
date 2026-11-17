@@ -16,22 +16,13 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import tmux_version
+
 ROOT = Path(__file__).resolve().parent.parent
 PICKER = ROOT / "bin/tmux-agent-picker"
-TMUX = shutil.which("tmux")
-if TMUX is None:
-    if os.environ.get("TMUX_TOOLS_REQUIRE_TMUX") == "1":
-        raise SystemExit("FAIL: real tmux is required")
-    print("SKIP: real tmux unavailable")
-    raise SystemExit(0)
-VERSION = subprocess.run([TMUX, "-V"], text=True, capture_output=True, check=False).stdout
-MATCH = re.search(r"(\d+)\.(\d+)", VERSION)
-# tmux 3.6 sends focus events to the pane as a popup opens and closes. A
-# build from git says "tmux master", newer than any release, and a release
-# candidate "tmux next-3.7"; anything else unparsed fails rather than guess.
-if MATCH is None and "master" not in VERSION:
-    raise SystemExit(f"FAIL: unrecognised tmux version {VERSION!r}")
-POPUP_FOCUS = MATCH is None or (int(MATCH[1]), int(MATCH[2])) >= (3, 6)
+TMUX, VERSION = tmux_version.require_tmux()
+# tmux 3.6 sends focus events to the pane as a popup opens and closes.
+POPUP_FOCUS = tmux_version.at_least(VERSION, (3, 6))
 
 # The fixture config: the man page's example predicates and acknowledgement
 # hooks. The binding runs the picker through run-picker (below).
@@ -668,8 +659,7 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
         print("PASS: a missing fzf is reported as a message")
 
         # A detach or display-popup -C mid-pick closes the popup under fzf:
-        # the run exits 0 and says nothing, to that client or another. A
-        # failing run-shell for a gone client crashes a tmux 3.2a server.
+        # the run exits 0 and says nothing, to that client or another.
         tmux("set-environment", "-g", "PATH", env["PATH"])
         tmux("set-option", "-g", "@window_counted", window_counted)
         witness_pid, witness = attach("zeta")

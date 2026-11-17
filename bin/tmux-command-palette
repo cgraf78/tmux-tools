@@ -12,6 +12,34 @@
 
 set -euo pipefail
 
+# BEGIN tmux_supported
+# Whether the tmux server reporting VERSION (#{version}) is supported; on
+# refusal, tmux_refusal holds the message. master and openbsd-* are newer
+# than any release; otherwise one leading next- is ignored and the leading
+# MAJOR.MINOR compares, so 3.3a, 3.3-rc and next-3.3 read as 3.3. A version
+# this cannot read counts as newest. Every copy is identical (see
+# test/tmux-tools-test).
+tmux_minimum=3.3
+tmux_supported() {
+  local version=${1#tmux } major minor
+  local floor_major=${tmux_minimum%%.*} floor_minor=${tmux_minimum#*.}
+  tmux_refusal=
+  case $version in master | openbsd-*) return 0 ;; esac
+  version=${version#next-}
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  case $version in *.*) ;; *) return 0 ;; esac
+  case $major in '' | *[!0-9]*) return 0 ;; esac
+  case $minor in '' | *[!0-9]*) return 0 ;; esac
+  if ((10#$major > floor_major || (10#$major == floor_major && 10#$minor >= floor_minor))); then
+    return 0
+  fi
+  tmux_refusal="needs tmux $tmux_minimum or newer (server is ${1#tmux })"
+  return 1
+}
+# END tmux_supported
+
 usage() {
   printf 'usage: tmux-command-palette --client CLIENT\n       tmux-command-palette --list\n' >&2
   exit 64
@@ -43,10 +71,10 @@ fi
 
 tab=$(printf '\t')
 
-# Show a message on the client. tmux 3.2 parses display-message -c as a flag
-# without a value, so there the message goes to the session's latest client.
+# Show a message on the client. tmux drops a message for a client that has
+# gone, silently; it never goes to another client in its place.
 message() {
-  tmux display-message -c "$client" "$1" 2>/dev/null || tmux display-message "$1"
+  tmux display-message -c "$client" "$1"
 }
 
 # Print one entry per line: the visible text (the note, padding, then the key
@@ -97,6 +125,17 @@ entries() {
 if [[ "$list" == true ]]; then
   entries
   exit 0
+fi
+
+# An older server is refused before anything else is asked of it. A server
+# that does not answer is not refused here; the calls below report it.
+if version=$(tmux display-message -p '#{version}' 2>/dev/null) &&
+  ! tmux_supported "$version"; then
+  printf 'tmux-command-palette: %s\n' "$tmux_refusal" >&2
+  # An older tmux may answer display-message -c with its usage line; the
+  # refusal above is the one thing to say.
+  message "tmux-command-palette: $tmux_refusal" 2>/dev/null || true
+  exit 1
 fi
 
 # type -P finds only an executable: the popup runs fzf from PATH.

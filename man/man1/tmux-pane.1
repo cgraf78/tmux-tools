@@ -560,7 +560,14 @@ A comma list of features to treat as missing, for tests:
 .BR counters ,
 .BR key-mode .
 .SH VERSIONS
-tmux 3.3 and later. Features are detected directly where tmux exposes them.
+tmux 3.3 or newer, as the server reports its
+.BR #{version} ;
+an older server is refused with status 1, whatever the client's version.
+When the server does not answer and the client's
+.B tmux \-V
+is older, that is the error, also status 1: an old client may be unable to
+talk to a newer server.
+Features are detected directly where tmux exposes them.
 A version that does not parse counts as the newest. Before 3.7,
 .B paste-buffer
 has no

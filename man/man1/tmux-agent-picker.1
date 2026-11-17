@@ -233,7 +233,8 @@ when it is gone. The popup's preview runs this, and reads
 A failure exits 1 and shows its reason on the client as a message as well
 as on standard error, since
 .B run-shell
-discards a command's standard error. Failures are: a tmux query that fails
+discards a command's standard error. Failures are: a server older than tmux 3.3,
+a tmux query that fails
 or answers the snapshot with something unexpected, a required option left
 unset, a quote in a quoted path (below), a popup tmux could not open, an fzf
 error, a chosen line that is not one of the rows, and a jump that fails while
@@ -246,20 +247,20 @@ A client that detaches while the popup is open, or a popup closed under fzf
 .BR "display-popup -C" ),
 is not a failure: the command exits 0 and says nothing. Nor is any failure
 once the client has gone, since nobody is left to tell, and since
-tmux 3.2a crashes its server when a key binding's blocking
+tmux 3.2a, older than any supported tmux, crashed its server when a key
+binding's blocking
 .B run-shell
-exits non-zero after its client has detached.
+exited non-zero after its client had detached.
 .SH COMPATIBILITY
-tmux 3.2 or newer, and
+tmux 3.3 or newer, and
 .BR fzf (1)
 0.27.0 or newer, the first to accept the
 .B border-top
 preview window option (checked by hand against 0.27.0 and 0.26.0; CI runs
-the distributions' own fzf). tmux 3.2 cannot target a message at a client: it rejects
-.B display-message -c
-.I client
-with its usage line, and only then does a message go to the session's most
-recently active client instead. Before
+the distributions' own fzf). The command reads its server's
+.B #{version}
+with its first query and refuses an older tmux, as a failure; a version it
+cannot read counts as newer. Before
 tmux 3.6 a popup sends no focus events, so opening the picker acknowledges
 nothing.
 .PP

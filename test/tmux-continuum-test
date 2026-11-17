@@ -243,7 +243,7 @@ assert_file_missing "save gate invalid state: avoids speculative clock math" \
 
 rm -f "$save_log" "$date_log"
 
-if real_tmux=$(command -v tmux); then
+if [[ ${TMUX_TOOLS_TMUX:-ok} == ok ]] && real_tmux=$(command -v tmux); then
   quote_socket="tmux-tools-continuum-$RANDOM-$$"
   quote_marker="$test_home/hostile-option-executed"
   quote_status=0
