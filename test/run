@@ -28,6 +28,7 @@ fi
 "$ROOT/test/tmux-continuum-test"
 "$ROOT/test/tmux-tools-test"
 "$ROOT/test/copy-mark-test"
+"$ROOT/test/tmux-pane-test"
 "$ROOT/test/term-pane-state-test"
 if command -v python3 >/dev/null 2>&1; then
   python3 "$ROOT/test/term-pane-state-client.py"

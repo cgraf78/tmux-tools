@@ -22,6 +22,9 @@ Small helpers for tmux setups that outgrow the defaults:
   workstation over SSH. It is like "copy last
   output" in Warp or iTerm2, but inside tmux. **It needs a specific two-line
   prompt; see [Prompt format](#prompt-format).**
+- **`tmux-pane`**: type into one exact tmux pane, read what it shows, and
+  wait until the agent or shell command in it is done. Scripts and coding
+  agents use it to drive other panes; it never guesses the target.
 - **`tmux-command-palette`**: find a key binding by its description in an fzf
   popup and run it, like an editor's command palette. It lists every root and
   prefix binding that has a note (`bind-key -N`).
@@ -49,6 +52,7 @@ Small helpers for tmux setups that outgrow the defaults:
 - For `tmux-copy-last-output`'s clipboard copy: `clip` when installed; otherwise
   `pbcopy`, `wl-copy` with `WAYLAND_DISPLAY`, `xclip` with `DISPLAY`, or an
   explicitly selected tmux client whose terminal supports OSC 52.
+- For `tmux-pane`: tmux 3.3 or newer
 - For `tmux-command-palette`: `fzf`, and tmux 3.4 or newer to run the chosen
   key itself (older tmux asks you to press it)
 - For `tmux-agent-picker`: `fzf` 0.27.0 or newer, tmux 3.2 or newer, and a
@@ -186,8 +190,8 @@ not record, the copied message includes that report.
 
 #### Prompt format
 
-`tmux-copy-last-output` finds command boundaries by reading the pane text for
-a two-line prompt. It recognizes exactly this shape:
+`tmux-copy-last-output` and `tmux-pane` find command boundaries by reading the
+pane text for a two-line prompt. They recognize exactly this shape:
 
 ```text
 [0] user@host:~/src/project (main)
@@ -197,8 +201,18 @@ $ make test
 - **Line 1** starts with `user@host:`, optionally preceded by an exit code
   such as `[0] `. The user name may contain only letters, digits, and `_`;
   the host may also contain `.` and `-`. Anything after the colon is ignored.
-- **Line 2**, immediately below, is `$` (bash) or `%` (zsh), optionally
-  followed by a space and the command.
+- **Line 2**, immediately below, is `$` (bash), `%` (zsh) or `#` (root),
+  optionally followed by a space and the command.
+- **Output without a final newline** (`printf ok`) leaves bash's next line 1
+  glued to it, as in `ok[1] user@host:~`. The `user@host:` that most prompts
+  in the capture agree on marks where the prompt starts, so `ok` is still the
+  output and `1` the status. Glue that ends in a space (`printf '%s ' a b`)
+  counts only when the rest of the line repeats another line 1 in the
+  capture or is the last prompt, so `Copy to user@host:/srv` above a `$ `
+  line stays output; a glued prompt whose line 1 differs (path, git state, a
+  timing suffix) is found only at the last prompt. A
+  `#` line 2 also starts comments and headings in output, so its line 1 must
+  start with the identity, never glued.
 
 These prompts match:
 
@@ -212,10 +226,45 @@ PS1='[$?] \u@\h:\w\n$ '
 PROMPT=$'[%?] %n@%m:%~\n%% '
 ```
 
-With any other prompt, the command finds no blocks: it shows a tmux message,
-"No command output found", and copies nothing. With `--print` it also exits
-with status 3. Prompt colors are fine, because tmux captures the text without
-them.
+With any other prompt, `tmux-copy-last-output` finds no blocks: it shows a
+tmux message, "No command output found", and copies nothing. With `--print`
+it also exits with status 3. Prompt colors are fine, because tmux captures
+the text without them.
+
+### `tmux-pane`
+
+`tmux-pane` drives another pane: an agent in one pane can hand work to an
+agent or a shell in another and collect the result.
+
+```sh
+tmux-pane send -t %7 'make test' --enter --wait prompt   # exits with make's status
+tmux-pane send -t %8 'review the diff' --enter --wait agent
+tmux-pane read -t %7 --last-output
+```
+
+- `tmux-pane send -t %N [TEXT | - | --keys 'K ...']... [--enter]` pastes
+  text byte for byte through a paste buffer of its own and sends named keys,
+  as one tmux command queue so senders cannot interleave. It works with
+  `synchronize-panes` on (only the target receives anything) and leaves copy
+  mode before keys. `--wait agent|prompt` waits as `wait` does.
+- `tmux-pane read -t %N [--lines N | --all | --last-output]` prints the
+  screen, history, or the last command blocks with their status;
+  `--since MARKER` starts at a marker.
+- `tmux-pane wait -t %N --agent|--prompt [--since MARKER] [--capture]` waits
+  for an agent's turn to finish (through `term-pane-mark`'s marks) or for the
+  shell prompt to come back. Every wait ends with a `result=` line on stderr
+  that carries a marker to resume from after a timeout or a question.
+- `tmux-pane mark -t %N` prints a marker for a later `read --since` or
+  `wait --since`.
+
+The target must be an exact `%N` pane id on the chosen server (`-L` or `-S`
+for another); anything else is refused, and there is no fallback to the
+current pane. Find one with `tmux list-panes -a -F '#{pane_id}
+#{session_name}:#{window_index}.#{pane_index} #{pane_current_command}'`.
+`man tmux-pane` has the details: markers and when `--since` is exact, key
+encoding under `synchronize-panes`, the agent and prompt waits, and the exit
+codes. `tmux-pane --interface` prints every subcommand, option, exit code,
+result kind, inexact reason and default.
 
 ### `tmux-command-palette`
 
@@ -296,8 +345,10 @@ STATUS in `man tmux-agent-picker` list them.
   `--owner PID` limits changes to that process while it runs in the pane's
   foreground, so programs an agent launches cannot clear the agent's mark.
 
-`@term_busy` is set to `1`. `@term_notify_pending` holds the kind of
-attention, chosen with `--kind`:
+`@term_busy` is set to `1`, and each set also adds one to `@term_busy_seq`,
+so `tmux-pane wait --agent` sees a turn that started and ended between two
+looks. `@term_notify_pending` holds the kind of attention, chosen with
+`--kind`:
 
 | Kind | Meaning |
 | --- | --- |
@@ -398,6 +449,7 @@ Or run the focused command test directly:
 test/tmux-tools-test
 test/tmux-continuum-test
 test/copy-mark-test
+test/tmux-pane-test
 test/tmux-agent-picker-test
 ```
 

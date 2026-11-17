@@ -257,4 +257,16 @@ tmux -S "$socket" set-option -p -t "$selected" @termnav_child_attention "$old"
 "$ROOT/bin/term-pane-state" --socket "$socket" --session "\$0" --print >/dev/null
 check 'an expired attention lease is removed from its own pane' '' \
   "$(tmux -S "$socket" show-options -pqv -t "$pane" @termnav_child_attention)"
+
+# @term_busy_seq counts busy sets so a waiter sees a turn that started and
+# ended between two polls. Clears leave it alone.
+seq_value() { tmux -S "$socket" show-options -pqv -t "$pane" @term_busy_seq; }
+tmux -S "$socket" set-option -pu -t "$pane" @term_busy_seq
+mark set busy --token seq:one 2>/dev/null
+check 'a busy set starts the turn counter at 1' 1 "$(seq_value)"
+mark clear busy --token seq:one 2>/dev/null
+check 'a busy clear leaves the turn counter' 1 "$(seq_value)"
+mark set busy 2>/dev/null
+check 'an untagged busy set counts too' 2 "$(seq_value)"
+check 'the counted turn has its busy mark' 1 "$(value)"
 exit "$((failures != 0))"

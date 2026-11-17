@@ -1,0 +1,1870 @@
+#!/usr/bin/env bash
+# tmux-pane — type into one exact tmux pane, read it, and wait on it.
+#
+# Agents and people use it to drive another pane: an agent TUI (Claude,
+# Codex, Muse) or a shell. It is permissive about everything except the
+# target: busy, idle and synchronized panes are all fine, and raw tmux
+# send-keys is never blocked. The one guardrail is the target itself, an
+# explicit, exact, existing pane id (%N) on the chosen server; nothing ever
+# falls back to the current, last or marked pane, because an empty target
+# once typed into the wrong pane and killed a running agent.
+#
+# Subcommands: send, read, wait, mark. `man tmux-pane` has the details; this
+# file explains why the code looks the way it does.
+
+set -u
+# Key lists are split on whitespace; a name like ? or KP* must never glob.
+set -f
+
+# --- interface: the one list ----------------------------------------------------
+# Subcommands, their options, the exit statuses, the result kinds and inexact
+# reasons a wait or read reports, the option defaults and the tmux floor live
+# here and nowhere else. Each parser accepts exactly its list, and
+# test/tmux-pane-test fails when the code, the usage and help text,
+# tmux-pane(1), the README or AGENTS.md disagree with them.
+# `tmux-pane --interface` prints them for other repositories' doc tests.
+tp_subcommands='send read wait mark'
+tp_opts_top='-h --help --interface --check-refs'
+tp_opts_common='-t -L -S -h --help'
+tp_opts() { # tp_opts SUBCOMMAND: its own options, after tp_opts_common
+  case $1 in
+    send) printf '%s' '-k --keys - -- --enter --type --keep-mode --print-marker --wait --no-capture --lines --join --ansi --timeout --start-timeout --settle' ;;
+    read) printf '%s' '--lines --all --last-output --count --since --join --ansi' ;;
+    wait) printf '%s' '--wait --agent --prompt --since --capture --lines --join --ansi --timeout --start-timeout --settle' ;;
+    mark) ;;
+  esac
+}
+tp_exit_codes='0 1 3 4 64 65 66 67 68 69 70 124 130 143'
+tp_results='done waiting blocked no-start timeout gone error'
+# As the result line prints them (spaces become dashes there).
+tp_reasons='trimmed shrunk resized grid-top-changed cleared blank-gap echo-moved alternate-screen generation-changed weak-marker unstable'
+tp_default_timeout=110 tp_default_start_timeout=10 tp_default_settle=1
+# The only version gate: 3.3, the oldest tmux this tool supports. 3.2 lacks
+# the scroll-on-clear option, deletes the newest buffer on delete-buffer -b
+# of a missing name, and keeps trailing spaces in -J captures. (The commands
+# the tool relies on, list-panes -f, #{e|+:} and set-option -pF, are older.)
+# Everything newer is detected from tmux itself, never from its version (see
+# "capabilities").
+tp_tmux_floor='3 3'
+interface_text() {
+  local sub opts
+  printf 'subcommands %s\n' "$tp_subcommands"
+  for sub in $tp_subcommands; do
+    opts=$(tp_opts "$sub")
+    printf '%s %s%s\n' "$sub" "$tp_opts_common" "${opts:+ $opts}"
+  done
+  printf 'top %s\n' "$tp_opts_top"
+  printf 'exit %s\n' "$tp_exit_codes"
+  printf 'result %s\n' "$tp_results"
+  printf 'reason %s\n' "$tp_reasons"
+  printf 'default --timeout=%s --start-timeout=%s --settle=%s\n' \
+    "$tp_default_timeout" "$tp_default_start_timeout" "$tp_default_settle"
+  printf 'floor %s\n' "${tp_tmux_floor/ /.}"
+}
+interface() {
+  interface_text
+  exit 0
+}
+
+# --check-refs FILE...: the documentation check this repository's tests and
+# other repositories' (agent rules) run, kept here so there is one copy. It
+# reads Markdown, plain text or man pages and prints one line per bad
+# reference, then "#refs N", the number of references it read, so a caller
+# can tell a clean document from a scan that read nothing. Records are
+# paragraphs, list items and man paragraphs, joined so a wrapped reference
+# is read whole; code blocks are read a line at a time. In a record that
+# names tmux-pane:
+# - `tmux-pane SUB ...` names a subcommand and only that subcommand's
+#   options, inside [ ] too, up to a backtick, #, --, $..., the next
+#   tmux-pane, or a | outside brackets;
+# - every other --option word is one some subcommand (or the top level)
+#   takes, unless a record that does not name tmux-pane uses it too (another
+#   command's option, such as term-pane-mark --kind); so check all of a
+#   repository's documents in one call;
+# - a number after "exit" or "exits" (and the rest of a list such as
+#   "exits 64 or 65") is a listed exit status.
+# The exemption has limits: records that do not name tmux-pane are not
+# checked at all, and an option name another command shares passes bare.
+# The interface goes in through the environment: BSD awk refuses a -v value
+# with a newline in it.
+check_refs() { # check_refs FILE...
+  if [ $# -eq 0 ]; then
+    printf 'usage: tmux-pane --check-refs FILE...\n' >&2
+    exit 64
+  fi
+  local f
+  for f in "$@"; do
+    [ -r "$f" ] || die 1 "cannot read $f"
+  done
+  # shellcheck disable=SC2016 # Literal backticks in sed; an awk program.
+  sed 's/\\-/-/g; s/\\f[BIRP]//g; s/`/ ` /g' "$@" | TP_IFACE=$(interface_text) awk -v sq="'" '
+    BEGIN {
+      n = split(ENVIRON["TP_IFACE"], L, "\n")
+      for (i = 1; i <= n; i++) {
+        m = split(L[i], f, " ")
+        if (f[1] == "subcommands") for (j = 2; j <= m; j++) sub_ok[f[j]] = 1
+        if (f[1] == "exit") for (j = 2; j <= m; j++) code_ok[f[j]] = 1
+      }
+      for (i = 1; i <= n; i++) {
+        m = split(L[i], f, " ")
+        if (!(f[1] in sub_ok)) continue
+        for (j = 2; j <= m; j++) { opt[f[1], f[j]] = 1; any[f[j]] = 1 }
+      }
+      for (i = 1; i <= n; i++) {
+        m = split(L[i], f, " ")
+        if (f[1] == "top") for (j = 2; j <= m; j++) any[f[j]] = 1
+      }
+      refs = 0; rec = ""; code = 0; nr = 0
+    }
+    # Records that name tmux-pane are checked at the end, once every other
+    # record has shown which --options belong to other commands.
+    function add(r,   w, t, i, x) {
+      if (index(r, "tmux-pane")) { recs[++nr] = r; return }
+      w = split(r, t, " ")
+      for (i = 1; i <= w; i++) { x = bare(t[i]); if (x ~ /^--[a-z]/) foreign[x] = 1 }
+    }
+    function bare(x) { gsub(/[][(),.;:"]/, "", x); sub(/=.*/, "", x); return x }
+    function check(r,   w, t, i, j, s, ns, alt, known, bad, a, k, x, q, nq, depth, no, alt2, b, ok, seen, y, nb, part, c, np) {
+      w = split(r, t, " ")
+      split("", seen)
+      for (i = 1; i < w; i++) {
+        if (t[i] != "tmux-pane") continue
+        s = t[i + 1]; gsub(/[][(),.;:]/, "", s)
+        # Prose ("tmux-pane drives ...") is not a reference; a real one
+        # names a subcommand, and an unknown word only counts before -t.
+        if (s !~ /^[a-z]+(\|[a-z]+)*$/) continue
+        ns = split(s, alt, "|"); known = 1
+        for (a = 1; a <= ns; a++) if (!(alt[a] in sub_ok)) known = 0
+        if (!known) { if (t[i + 2] == "-t") print "subcommand " s; continue }
+        refs++
+        q = 0; depth = 0
+        for (k = i + 2; k <= w; k++) {
+          x = t[k]
+          if (x == "`" || x == "#" || x == "--" || x == "tmux-pane" || x ~ /^\$/) break
+          if (x == "|" && depth == 0) break
+          seen[k] = 1
+          y = x; depth += gsub(/\[/, "", y); depth -= gsub(/\]/, "", y)
+          if (depth < 0) depth = 0
+          nq = gsub(sq, "&", x)
+          if (q || (nq % 2 == 1 && substr(x, 1, 1) == sq)) { if (nq % 2 == 1) q = !q; continue }
+          x = bare(x)
+          if (x !~ /^-/) continue
+          no = split(x, alt2, "|")
+          for (b = 1; b <= no; b++) {
+            if (alt2[b] == "" || alt2[b] ~ /^-[0-9]/) continue
+            ok = 0
+            for (a = 1; a <= ns; a++) if ((alt[a], alt2[b]) in opt) ok = 1
+            if (!ok) print s " " alt2[b]
+          }
+        }
+      }
+      for (i = 1; i <= w; i++) {
+        y = tolower(t[i])
+        if (y == "exit" || y == "exits") {
+          for (j = i + 1; j <= w; j++) {
+            c = t[j]; gsub(/[(),.;:]/, "", c)
+            if (c == "or" || c == "and" || c == "") continue
+            if (c !~ /^[0-9]+([\/-][0-9]+)*$/) break
+            np = split(c, part, /[\/-]/)
+            for (b = 1; b <= np; b++) if (!(part[b] in code_ok)) print "exit " part[b]
+          }
+        }
+        if (i in seen) continue
+        nb = split(bare(t[i]), part, "|")
+        for (b = 1; b <= nb; b++)
+          if (part[b] ~ /^--[a-z]/ && !(part[b] in any) && !(part[b] in foreign)) print "option " part[b]
+      }
+    }
+    # A Markdown fence (its backticks spaced out above), or a man page
+    # no-fill block.
+    code && (/^ *` *` *`/ || /^\.(fi|EE)( |$)/) { add(cont); cont = ""; code = 0; next }
+    # A code line ending in \ continues on the next one.
+    code && /\\$/ { line = $0; sub(/\\$/, "", line); cont = cont line " "; next }
+    code { add(cont $0); cont = ""; next }
+    /^ *` *` *`/ || /^\.(nf|EX)( |$)/ { add(rec); rec = ""; code = 1; next }
+    /^[ \t]*$/ || /^\.(PP|LP|P|TP|IP|SH|SS|RS|RE)( |$)/ { add(rec); rec = ""; next }
+    /^[ \t]*([-*]|[0-9]+\.) / { add(rec); rec = "" }
+    { rec = rec " " $0 }
+    END { add(rec); for (i = 1; i <= nr; i++) check(recs[i]); print "#refs " refs }'
+}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: tmux-pane send -t %N [-L NAME | -S SOCKET] [ACTION...] [--enter] [--type]
+                 [--keep-mode] [--print-marker]
+                 [--wait agent|prompt [--timeout S] [--start-timeout S]
+                  [--settle S] [--no-capture] [--lines N] [--join] [--ansi]]
+                 [--] [TEXT...]
+       tmux-pane read -t %N [SERVER] [--lines N | --all | --last-output [--count N]]
+                 [--since MARKER] [--join] [--ansi]
+       tmux-pane wait -t %N [SERVER] --wait agent|prompt (or --agent, --prompt)
+                 [--since MARKER] [--timeout S] [--start-timeout S] [--settle S]
+                 [--capture [--lines N] [--join] [--ansi]]
+       tmux-pane mark -t %N [SERVER]
+       tmux-pane [SUBCOMMAND] --help | tmux-pane --interface
+ACTION is TEXT, - (stdin), or --keys 'KEY [KEY...]' (-k), in argv order.
+EOF
+  wait_result_error 64
+  exit 64
+}
+
+help() {
+  cat <<'EOF'
+tmux-pane: type into one exact tmux pane, read it, and wait on it.
+
+  tmux-pane send -t %N [ACTION...] [--enter] [--wait agent|prompt]
+  tmux-pane read -t %N [--lines N | --all | --last-output] [--since MARKER]
+  tmux-pane wait -t %N --wait agent|prompt [--since MARKER] [--capture]
+  tmux-pane mark -t %N
+
+The target must be an exact pane id. Find one with:
+  tmux list-panes -a -F '#{pane_id} #{session_name}:#{window_index}.#{pane_index} #{pane_current_command} #{pane_title}'
+Without -L or -S, tmux uses $TMUX's server; pass -L or -S for any other.
+
+Examples:
+  tmux-pane send -t %7 'make test' --enter --wait prompt
+  tmux-pane wait -t %7 --agent --since "$M" --capture   # resume after 124, or 68 once answered
+  tmux-pane send -t %7 -- '-n 5'                        # text that starts with -
+
+A wait ends with one stderr line:
+  result=done|waiting|blocked|no-start|timeout|gone|error exact=yes|no|- status=N|unknown [reason=R] [marker=M]
+tmux-pane --interface lists every subcommand, option and exit status.
+See tmux-pane(1).
+EOF
+  exit 0
+}
+
+die() { # die STATUS MESSAGE
+  printf 'tmux-pane: %s\n' "$2" >&2
+  wait_result_error "$1"
+  exit "$1"
+}
+
+# Every wait ends with one result= line, also when it fails before it can
+# start (a bad target, a failed send).
+wait_pending=0 w_marker=""
+wait_result_error() { # wait_result_error STATUS
+  [ "$wait_pending" = 1 ] || return 0
+  wait_pending=0
+  local kind=error
+  [ "$1" != 66 ] || kind=gone
+  printf 'result=%s exact=- status=unknown%s\n' "$kind" "${w_marker:+ marker=$w_marker}" >&2
+}
+
+# --- process state and cleanup ------------------------------------------------
+
+work=''
+pane=''
+server_args=()
+buffers=()
+sync_restore=()
+cleanup() {
+  local b left
+  # A send that stopped before putting a pane's synchronize-panes back.
+  if [ "${#sync_restore[@]}" -gt 0 ]; then
+    tmux -u ${server_args[@]+"${server_args[@]}"} "${sync_restore[@]}" >/dev/null 2>&1 || true
+  fi
+  # Only this run's buffers, by exact name: -d deletes a buffer only when
+  # its paste succeeds, and a glob could take someone else's. Delete only
+  # names that still exist: tmux 3.2 turns delete-buffer -b on a missing
+  # name into deleting the newest buffer, which is someone else's.
+  if [ "${#buffers[@]}" -gt 0 ]; then
+    left=$(tmux -u ${server_args[@]+"${server_args[@]}"} list-buffers -F '#{buffer_name}' 2>/dev/null) || left=''
+    for b in "${buffers[@]}"; do
+      printf '%s\n' "$left" | grep -qxF -- "$b" || continue
+      tmux -u ${server_args[@]+"${server_args[@]}"} delete-buffer -b "$b" >/dev/null 2>&1 || true
+    done
+  fi
+  [ -z "$work" ] || rm -rf "$work"
+}
+trap cleanup EXIT
+# An interrupted wait still ends with its result line and marker, so a caller
+# whose own timeout killed it can resume.
+trap 'wait_result_error 130; exit 130' INT
+trap 'wait_result_error 143; exit 143' TERM
+
+make_work() {
+  [ -n "$work" ] && return 0
+  work=$(
+    umask 077
+    mktemp -d "${TMPDIR:-/tmp}/tmux-pane.XXXXXXXX"
+  ) || die 1 'cannot create a private temp directory'
+}
+
+# Every tmux call goes through tmx: it adds the server arguments and refuses
+# to run with anything but a validated pane id, so no code path can ever
+# reach tmux with an empty or loose target.
+valid_pane() {
+  case $1 in
+    %0) return 0 ;;
+    %[1-9]*) case ${1#%} in *[!0-9]*) return 1 ;; esac ;;
+    *) return 1 ;;
+  esac
+}
+tmx() {
+  valid_pane "$pane" || die 1 'internal error: tmux call without a valid pane id'
+  # -u: without a UTF-8 locale, tmux prints control and non-ASCII bytes in
+  # its output as _, which would break the field separator and captures.
+  tmux -u ${server_args[@]+"${server_args[@]}"} "$@"
+}
+
+disabled() { # disabled FEATURE: TMUX_PANE_TEST_DISABLE forces a feature off.
+  case ",${TMUX_PANE_TEST_DISABLE:-}," in *",$1,"*) return 0 ;; esac
+  return 1
+}
+
+is_number() { case $1 in '' | *[!0-9]*) return 1 ;; esac }
+
+# --- awk library ----------------------------------------------------------------
+
+# Hashes run under LC_ALL=C so awk counts bytes. ord[] comes from sprintf
+# because macOS awk has no bitwise operators; two polynomial accumulators keep
+# collisions negligible without forking cksum for every row.
+# shellcheck disable=SC2016 # awk programs: their $ are awk syntax.
+awk_lib='
+function hinit(   i) { for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i; hready = 1 }
+function hash(s,   i, n, c, h, h2) {
+  if (!hready) hinit()
+  h = 7; h2 = 11; n = length(s)
+  for (i = 1; i <= n; i++) {
+    c = ord[substr(s, i, 1)] + 0
+    h = (h * 131 + c) % 2147483629
+    h2 = (h2 * 137 + c) % 2147483587
+  }
+  return h "-" h2
+}
+function rtrim(s) { sub(/ +$/, "", s); return s }
+# The first n codepoints of s (cells, for the narrow characters prompts use).
+function headcp(s, n,   i, b, k, len) {
+  if (!hready) hinit()
+  k = 0; len = length(s)
+  for (i = 1; i <= len; i++) {
+    b = ord[substr(s, i, 1)] + 0
+    if (b < 128 || b >= 192) { k++; if (k > n) return substr(s, 1, i - 1) }
+  }
+  return s
+}
+function blank(s) { gsub(/\033\[[0-9;]*m/, "", s); return s ~ /^ *$/ }
+'
+
+# Split a queue's output at nonce lines: section 0 is everything before the
+# first nonce (the geometry row), section K starts after nonce K.
+split_queue() { # split_queue FILE NONCE
+  LC_ALL=C awk -v nonce="$2" -v dir="$work" '
+    BEGIN { s = 0; f = dir "/sec0"; printf "" > f }
+    index($0, nonce "-") == 1 && length($0) > length(nonce) + 1 {
+      close(f); s = substr($0, length(nonce) + 2) + 0; f = dir "/sec" s
+      printf "" > f; next
+    }
+    { print > f }
+  ' "$1"
+}
+
+# --- tmux version and features ------------------------------------------------
+
+# Capabilities. The only version check is the floor (tp_tmux_floor); a version
+# that does not parse (next-3.9, master, a distro suffix) counts as the newest.
+# Everything newer is detected from tmux itself, so later releases need no
+# change here:
+# - paste-buffer -S (3.7+): its usage line in list-commands (has_paste_S);
+# - history counters (3.8+): #{history_collected} and #{history_generation}
+#   are empty without them (parse_geom, locate);
+# - key mode (3.5+): #{pane_key_mode} is empty without it, and then
+#   show -sv extended-keys decides (cmd_send);
+# - scroll-on-clear (3.3+): empty on 3.2, which behaves as on (parse_geom).
+# TMUX_PANE_TEST_DISABLE forces each one off, so tests cover both sides.
+version_at_least() { # version_at_least MAJOR MINOR
+  [ "$tmux_major" -gt "$1" ] || { [ "$tmux_major" -eq "$1" ] && [ "$tmux_minor" -ge "$2" ]; }
+}
+detect_version() {
+  local v
+  v=$(tmux -V 2>/dev/null) || die 1 'tmux not found'
+  v=${v#tmux }
+  tmux_major=999 tmux_minor=0
+  if [[ $v =~ ^([0-9]+)\.([0-9]+) ]]; then
+    tmux_major=${BASH_REMATCH[1]} tmux_minor=$((10#${BASH_REMATCH[2]}))
+  fi
+  # shellcheck disable=SC2086 # Two fields, split on purpose.
+  version_at_least $tp_tmux_floor || die 1 "tmux >= ${tp_tmux_floor/ /.} required (found $v)"
+}
+
+# paste-buffer -S (3.7+) sends control bytes raw; without it 3.7 escapes
+# them. Detected from the command's own usage line, never by version.
+has_paste_S() {
+  [ -n "${feat_paste_s:-}" ] || {
+    feat_paste_s=no
+    if ! disabled paste-S; then
+      # The flag letters are the first [-...] group of the usage line.
+      local usage_line flags
+      usage_line=$(tmx list-commands paste-buffer 2>/dev/null) || usage_line=''
+      case $usage_line in
+        *'[-'*) flags=${usage_line#*\[-} flags=${flags%%\]*} ;;
+        *) flags='' ;;
+      esac
+      case $flags in *S*) feat_paste_s=yes ;; esac
+    fi
+  }
+  [ "$feat_paste_s" = yes ]
+}
+
+# --- target validation ----------------------------------------------------------
+
+# Fields are separated by a printable, non-whitespace character: a whitespace
+# IFS such as tab would merge the empty fields unset marks produce, and tmux
+# 3.5 prints a control character such as \037 as the text \037. No field but
+# the title, which comes last and keeps any | it holds, contains a |.
+fs='|'
+# One table: each tmux format and the variable parse_geom reads it into, in
+# order. The title must stay last (it may hold a |).
+geom_fields='pane_id:g_id pane_dead:g_dead synchronize-panes:g_sync
+history_size:g_hsize history_limit:g_hlimit cursor_x:g_cx cursor_y:g_cy
+pane_width:g_w pane_height:g_h alternate_on:g_alt scroll-on-clear:g_soc
+pane_key_mode:g_keymode pane_input_off:g_inputoff @term_busy:g_busy
+@term_busy_seq:g_seq @term_notify_pending:g_pending
+window_activity:g_activity history_collected:g_collected
+history_generation:g_generation pid}.#{start_time:g_srv pane_title:g_title'
+geom_format='' geom_vars=''
+for _f in $geom_fields; do
+  geom_format="$geom_format${geom_format:+$fs}#{${_f%:*}}"
+  geom_vars="$geom_vars ${_f##*:}"
+done
+unset _f
+# The same names, spelled out once for ShellCheck, which cannot see the read
+# above assign them; test/tmux-pane-test checks they match geom_fields.
+g_id='' g_dead='' g_sync='' g_hsize='' g_hlimit='' g_cx='' g_cy='' g_w='' g_h=''
+g_alt='' g_soc='' g_keymode='' g_inputoff='' g_busy='' g_seq='' g_pending=''
+g_activity='' g_collected='' g_generation='' g_srv='' g_title=''
+
+# Parse one geometry row into g_* variables. Fails if it is not our pane.
+parse_geom() {
+  local rest
+  # shellcheck disable=SC2086,SC2229 # The variable names, split on purpose.
+  IFS="$fs" read -r $geom_vars <<<"$1" || true
+  [ "$g_id" = "$pane" ] || return 1
+  for rest in "$g_hsize" "$g_hlimit" "$g_cx" "$g_cy" "$g_w" "$g_h"; do
+    is_number "$rest" || return 1
+  done
+  is_number "$g_seq" || g_seq=0
+  [ -n "$g_busy" ] || g_busy=0
+  [ -n "$g_pending" ] || g_pending=-
+  # 3.2 has no scroll-on-clear option but always scrolls the screen into
+  # history on a clear, so a missing option behaves as on.
+  [ -n "$g_soc" ] || g_soc=1
+  if disabled soc; then g_soc=0; fi
+  if disabled counters; then g_collected='' g_generation=''; fi
+  if disabled key-mode; then g_keymode=''; fi
+  g_row=$((g_hsize + g_cy))
+  return 0
+}
+
+query_geom() { # query_geom: refresh g_* from one exact lookup.
+  local row
+  row=$(tmx list-panes -a -f "#{==:#{pane_id},$pane}" -F "$geom_format" 2>/dev/null) || return 2
+  row=$(printf '%s\n' "$row" | head -n 1)
+  [ -n "$row" ] || return 1
+  parse_geom "$row"
+}
+
+server_id() { tmx display-message -p '#{pid}.#{start_time}' 2>/dev/null; }
+
+# The guardrail, in order: the server named by a marker first (a restarted
+# server is gone, whatever pane ids it happens to have), then the exact pane.
+check_target() { # check_target [MARKER_SERVER]
+  local sid status
+  sid=$(server_id) || sid=''
+  if [ -n "${1:-}" ]; then
+    [ "$sid" = "$1" ] || {
+      gone_reason='the server restarted or is gone'
+      return 66
+    }
+  elif [ -z "$sid" ]; then
+    die 65 "no tmux server${server_desc}"
+  fi
+  query_geom
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    [ -z "${1:-}" ] || {
+      gone_reason="$pane is gone"
+      return 66
+    }
+    die 65 "no such pane $pane${server_desc}"
+  fi
+  [ "$g_dead" != 1 ] || {
+    gone_reason="$pane is dead"
+    return 66
+  }
+  return 0
+}
+
+# --- markers --------------------------------------------------------------------
+
+# tp1:srv:pane:alt:row:hsize:hlimit:WxH:soc:nb:n:fp_top:k:fp_above:fp_screen:
+#     cx:fp_pre:elen:fp_echo:ident:seq:busy:pending:sendsec[:collected.gen]
+# Numbers and hashes only, plus the prompt identity without its colon.
+parse_marker() { # parse_marker MARKER: sets m_*; fails on a malformed one.
+  local IFS=: mf
+  # shellcheck disable=SC2206 # Splitting on colons is the point.
+  mf=($1)
+  [ "${#mf[@]}" -eq 24 ] || [ "${#mf[@]}" -eq 25 ] || return 1
+  [ "${mf[0]}" = tp1 ] || return 1
+  m_srv=${mf[1]} m_pane=${mf[2]} m_alt=${mf[3]} m_row=${mf[4]} m_hsize=${mf[5]}
+  m_hlimit=${mf[6]} m_size=${mf[7]} m_soc=${mf[8]} m_nb=${mf[9]} m_n=${mf[10]}
+  m_fptop=${mf[11]} m_k=${mf[12]} m_fpabove=${mf[13]} m_fpscreen=${mf[14]}
+  m_cx=${mf[15]} m_fppre=${mf[16]} m_elen=${mf[17]} m_fpecho=${mf[18]}
+  m_ident=${mf[19]} m_seq=${mf[20]} m_busy=${mf[21]} m_pending=${mf[22]}
+  m_sendsec=${mf[23]} m_counters=${mf[24]:-}
+  valid_pane "$m_pane" || return 1
+  case $m_srv in [0-9]*.[0-9]*) ;; *) return 1 ;; esac
+  local v
+  for v in "$m_alt" "$m_row" "$m_hsize" "$m_hlimit" "$m_soc" "$m_nb" "$m_n" \
+    "$m_k" "$m_cx" "$m_elen" "$m_seq" "$m_busy" "$m_sendsec"; do
+    is_number "$v" || return 1
+  done
+  case $m_size in [0-9]*x[0-9]*) ;; *) return 1 ;; esac
+  case $m_counters in '' | [0-9]*.[0-9]*) ;; *) return 1 ;; esac
+  [ "$m_ident" = - ] && m_ident='' || m_ident="$m_ident:"
+  [ "$m_pending" != - ] || m_pending=''
+  return 0
+}
+
+# The stable echo prefix of the text a send types: the leading run of its
+# first line up to the first tab or control byte, at most 64 characters and
+# never more than fits on the cursor row, trailing spaces trimmed. It anchors
+# exactness: an exact marker's row still shows what was typed there.
+echo_prefix() { # echo_prefix FILE CAP: prints "ELEN FP_ECHO"
+  head -c 1024 "$1" 2>/dev/null | LC_ALL=C tr '\000' '\n' | head -n 1 |
+    LC_ALL=C awk -v cap="$2" "$awk_lib"'
+      {
+        if (!hready) hinit()
+        s = $0; out = ""; k = 0; len = length(s)
+        for (i = 1; i <= len; i++) {
+          c = substr(s, i, 1); b = ord[c] + 0
+          if (b < 32 || b == 127) break
+          if (b < 128 || b >= 192) { if (k >= cap) break; k++ }
+          out = out c
+        }
+        out = rtrim(out)
+        k = 0; len = length(out)
+        for (i = 1; i <= len; i++) { b = ord[substr(out, i, 1)] + 0; if (b < 128 || b >= 192) k++ }
+        if (k == 0) print "0 -"; else print k " " hash(out)
+        exit
+      }
+      END { if (NR == 0) print "0 -" }'
+}
+
+# Hashes for a marker from the snapshot sections: sec1 is the screen plus up
+# to 8 history rows, sec2 the first grid rows.
+marker_hashes() { # prints: n fp_top k fp_above fp_screen fp_pre nb
+  LC_ALL=C awk -v H="$g_hsize" -v cy="$g_cy" -v cx="$g_cx" -v h="$g_h" \
+    -v row="$g_row" -v s1="$work/sec1" -v s2="$work/sec2" "$awk_lib"'
+    BEGIN {
+      n1 = 0; while ((getline l < s1) > 0) a[++n1] = l
+      n2 = 0; while ((getline l < s2) > 0) b[++n2] = l
+      a0 = (H >= 8) ? 8 : H; ci = a0 + cy + 1
+      want = (row < 6) ? row : 6; n = (n2 < want) ? n2 : want
+      t = ""; for (i = 1; i <= n; i++) t = t b[i] "\n"
+      k = (row < 6) ? row : 6; if (ci - k < 1) k = ci - 1
+      u = ""; for (i = ci - k; i < ci; i++) u = u a[i] "\n"
+      last = a0 + h; while (last > a0 && blank(a[last])) last--
+      v = ""; for (i = a0 + 1; i <= last; i++) v = v a[i] "\n"
+      pre = rtrim(headcp(a[ci], cx))
+      nb = (!blank(a[ci]) || (ci > 1 && !blank(a[ci - 1]))) ? 1 : 0
+      print n, hash(t), k, hash(u), hash(v), hash(pre), nb
+    }'
+}
+
+# The identity line 1 of the prompt carries (`user@host:`), from a source
+# output can never be glued to: the pane title the dotfiles prompt sets
+# (`user@host: path`), when the capture confirms it; else the consensus of
+# the prompts in recent history; else none.
+title_ident() { # the identity the title starts with, followed by a space
+  local t
+  t=$(printf '%s\n' "$g_title" | awk -v mode=anchor "$prompt_parser")
+  case $g_title in "$t "*) [ -z "$t" ] || printf '%s\n' "$t" ;; esac
+}
+history_ident() {
+  tmx capture-pane -p -J -t "$pane" -S -2000 -E - 2>/dev/null |
+    awk -v mode=ident "$prompt_parser"
+}
+
+# Take a marker in one queue, optionally followed by input commands. Sets
+# marker and leaves the queue's raw output in $work/queue.
+marker_queue() { # marker_queue ELEN FP_ECHO [TMUX-ARGS...]: returns tmux status
+  local elen=$1 fpecho=$2 h0 h1 tries=0 nonce status
+  shift 2
+  query_geom || return 66
+  h0=$g_hsize
+  while [ "$tries" -lt 3 ]; do
+    query_geom || return 66
+    h1=$g_hsize
+    [ "$h1" = "$h0" ] && break
+    h0=$h1 tries=$((tries + 1))
+  done
+  nonce="tmux-pane-$$-$RANDOM$RANDOM"
+  local q=(list-panes -a -f "#{==:#{pane_id},$pane}" -F "$geom_format"
+    \; display-message -p -t "$pane" "$nonce-1"
+    \; capture-pane -p -t "$pane" -S -8 -E -
+    \; display-message -p -t "$pane" "$nonce-2"
+    \; capture-pane -p -t "$pane" -S - -E "$((5 - h0 + 64))"
+    "$@")
+  local a bytes=0
+  # tmux refuses a command line over 16 KB, and 3.7+ one of 1000 or more
+  # arguments ("command too long"), and runs none of it.
+  for a in "${q[@]}"; do bytes=$((bytes + ${#a} + 1)); done
+  [ "$bytes" -le 15000 ] && [ "${#q[@]}" -le 990 ] || return 2
+  # The second the send starts: all its output is at or after it, even when
+  # the queue returns in a later second.
+  m_sendsec=$(date +%s)
+  tmx "${q[@]}" >"$work/queue" 2>"$work/queue.err"
+  status=$?
+  split_queue "$work/queue" "$nonce"
+  if [ "$status" -ne 0 ] && [ ! -s "$work/sec0" ]; then return "$status"; fi
+  parse_geom "$(head -n 1 "$work/sec0")" || return 66
+  local tid hashes
+  tid=$(title_ident)
+  hashes=$(marker_hashes)
+  # shellcheck disable=SC2086 # Splitting the fields is the point.
+  set -- $hashes
+  local n=$1 fptop=$2 k=$3 fpabove=$4 fpscreen=$5 fppre=$6 nb=$7 tok=0
+  # The title's identity counts only when a prompt in the capture has it.
+  [ -z "$tid" ] || tok=$(awk -v mode=confirm -v ident="$tid" "$prompt_parser" "$work/sec1")
+  marker_ident=''
+  [ "$tok" != 1 ] || marker_ident=$tid
+  local srv counters=''
+  srv=$(server_id)
+  if [ -n "$g_generation" ] && [ -n "$g_collected" ]; then
+    counters=":$g_collected.$g_generation"
+  fi
+  marker_rest="$g_alt:$g_row:$g_hsize:$g_hlimit:${g_w}x$g_h:$g_soc:$nb:$n:$fptop:$k:$fpabove:$fpscreen:$g_cx:$fppre:$elen:$fpecho"
+  marker_tail="$g_seq:$g_busy:${g_pending:--}:$m_sendsec$counters"
+  marker_srv=$srv
+  return "$status"
+}
+# Assemble the marker once the identity is final.
+marker_string() {
+  local id=${marker_ident%:}
+  printf 'tp1:%s:%s:%s:%s:%s\n' "$marker_srv" "$pane" "$marker_rest" "${id:--}" "$marker_tail"
+}
+finish_ident() { # Fall back to the history consensus when the title failed.
+  [ -n "$marker_ident" ] || marker_ident=$(history_ident)
+  # Only a well-formed identity goes into a marker.
+  [ -z "$marker_ident" ] ||
+    [ "$(printf '%s\n' "$marker_ident" | awk -v mode=anchor "$prompt_parser")" = "$marker_ident" ] ||
+    marker_ident=
+}
+
+# Locate a marker against the pane now. Sets loc_exact (yes/no), loc_reason,
+# loc_row (the marker row in current coordinates) and, on request, leaves
+# captures in $work: since.txt (rows from loc_row) and screen.txt.
+# The queue captures with ranges from a pre-query; if the queue's own
+# geometry differs, the ranges may be off, so it retries.
+locate() { # locate WANT_OUTPUT CAPTURE-FLAGS...
+  local want=$1 tries=0 nonce r k hn
+  shift
+  loc_exact=no loc_reason='' loc_row=$m_row
+  while :; do
+    query_geom || {
+      gone_reason="$pane is gone"
+      return 66
+    }
+    hn=$g_hsize
+    r=$m_row
+    if [ -n "$m_counters" ] && [ -n "$g_collected" ] && [ -n "$g_generation" ]; then
+      r=$((m_row - (g_collected - ${m_counters%.*})))
+    fi
+    k=$m_k
+    [ "$r" -ge "$k" ] || k=0
+    nonce="tmux-pane-$$-$RANDOM$RANDOM"
+    local args=(list-panes -a -f "#{==:#{pane_id},$pane}" -F "$geom_format"
+      \; display-message -p -t "$pane" "$nonce-1"
+      \; capture-pane -p -t "$pane" -S - -E "$((5 - hn + 64))"
+      \; display-message -p -t "$pane" "$nonce-2")
+    if [ "$r" -ge 0 ]; then
+      args+=(\; capture-pane -p -t "$pane" -S "$((r - k - hn))" -E -)
+    else
+      args+=(\; display-message -p -t "$pane" '')
+    fi
+    if [ "$want" = 1 ]; then
+      args+=(\; display-message -p -t "$pane" "$nonce-3"
+        \; capture-pane -p -t "$pane" "$@" -S 0 -E -
+        \; display-message -p -t "$pane" "$nonce-4"
+        \; capture-pane -p -t "$pane" "$@" -S "$((r < 0 ? 0 : r - hn))" -E -)
+    fi
+    tmx "${args[@]}" >"$work/locq" 2>/dev/null || {
+      gone_reason="$pane is gone"
+      return 66
+    }
+    split_queue "$work/locq" "$nonce"
+    parse_geom "$(head -n 1 "$work/sec0")" || {
+      gone_reason="$pane is gone"
+      return 66
+    }
+    [ "$g_hsize" = "$hn" ] && break
+    tries=$((tries + 1))
+    [ "$tries" -lt 3 ] || {
+      loc_reason=unstable
+      break
+    }
+  done
+  loc_row=$r
+  [ "$want" != 1 ] || {
+    cp "$work/sec3" "$work/screen.txt"
+    cp "$work/sec4" "$work/since.txt"
+  }
+  [ -z "$loc_reason" ] || return 0
+  if [ "$m_alt" = 1 ] || [ "$g_alt" = 1 ]; then
+    loc_reason='alternate screen'
+    return 0
+  fi
+  local verdict
+  verdict=$(LC_ALL=C awk -v r="$r" -v k="$k" -v hn="$g_hsize" -v cyn="$g_cy" \
+    -v mrow="$m_row" -v mn="$m_n" -v fptop="$m_fptop" -v fpabove="$m_fpabove" \
+    -v cx="$m_cx" -v fppre="$m_fppre" -v elen="$m_elen" -v fpecho="$m_fpecho" \
+    -v s1="$work/sec1" -v s2="$work/sec2" "$awk_lib"'
+    BEGIN {
+      n1 = 0; while ((getline l < s1) > 0) top[++n1] = l
+      n2 = 0; while ((getline l < s2) > 0) rows[++n2] = l
+      want = (mrow < 6) ? mrow : 6
+      if (mn < want) { print "weak"; exit }
+      if (r < 0) { print "trimmed"; exit }
+      t = ""; for (i = 1; i <= mn && i <= n1; i++) t = t top[i] "\n"
+      topok = (n1 >= mn && hash(t) == fptop) ? 1 : 0
+      u = ""; for (i = 1; i <= k; i++) u = u rows[i] "\n"
+      aboveok = (k == 0 || hash(u) == fpabove) ? 1 : 0
+      line = rows[k + 1]
+      pre = rtrim(headcp(line, cx))
+      rest = substr(line, length(headcp(line, cx)) + 1)
+      preok = (hash(pre) == fppre) ? 1 : 0
+      echook = 1
+      if (elen > 0) {
+        # The echo follows the prefix, or one space after it; text that
+        # itself starts with a space matches the first way.
+        echook = (hash(headcp(rest, elen)) == fpecho) ? 1 : 0
+        if (!echook && substr(rest, 1, 1) == " ")
+          echook = (hash(headcp(substr(rest, 2), elen)) == fpecho) ? 1 : 0
+      }
+      print topok, aboveok, preok, echook
+    }')
+  case $verdict in
+    weak)
+      loc_reason='weak marker'
+      return 0
+      ;;
+    trimmed)
+      loc_reason=trimmed
+      return 0
+      ;;
+  esac
+  local topok aboveok preok echook
+  # shellcheck disable=SC2086 # Splitting the fields is the point.
+  set -- $verdict
+  topok=$1 aboveok=$2 preok=$3 echook=$4
+  local size="${g_w}x$g_h"
+  if [ -n "$m_counters" ] && [ -n "$g_generation" ] && [ -n "$g_collected" ]; then
+    # 3.8+: tmux counts trimmed rows; a changed generation means
+    # clear-history, ESC[3J or reflow. The counters do not see an in-place
+    # clear of the screen, so the silent-clear checks of the trusted path
+    # still apply. The echo stays a sanity check.
+    if [ "$size" != "$m_size" ]; then
+      loc_reason=resized
+    elif [ "$g_generation" != "${m_counters#*.}" ] || [ "$g_collected" -lt "${m_counters%.*}" ]; then
+      loc_reason='generation changed'
+    elif [ "$((g_hsize + g_cy))" -lt "$r" ]; then
+      loc_reason=shrunk
+    elif [ "$aboveok" != 1 ] && { [ "$m_soc" != 1 ] || [ "$g_soc" != 1 ]; }; then
+      loc_reason=cleared
+    elif [ "$aboveok" != 1 ] && [ "$m_nb" != 1 ]; then
+      loc_reason='blank gap'
+    elif [ "$preok" != 1 ] || [ "$echook" != 1 ]; then
+      loc_reason='echo moved'
+    else
+      loc_exact=yes
+    fi
+    return 0
+  fi
+  local floor=$((g_hlimit / 10))
+  [ "$floor" -ge 1 ] || floor=1
+  if [ "$g_hlimit" != "$m_hlimit" ] || [ "$g_hsize" -ge $((g_hlimit - floor)) ]; then
+    loc_reason=trimmed
+  elif [ "$g_hsize" -lt "$m_hsize" ] || [ "$((g_hsize + g_cy))" -lt "$m_row" ]; then
+    loc_reason=shrunk
+  elif [ "$size" != "$m_size" ]; then
+    loc_reason=resized
+  elif [ "$topok" != 1 ]; then
+    loc_reason='grid-top changed'
+  elif [ "$aboveok" != 1 ] && { [ "$m_soc" != 1 ] || [ "$g_soc" != 1 ]; }; then
+    loc_reason=cleared
+  elif [ "$aboveok" != 1 ] && [ "$m_nb" != 1 ]; then
+    loc_reason='blank gap'
+  elif [ "$preok" != 1 ] || [ "$echook" != 1 ]; then
+    loc_reason='echo moved'
+  else
+    loc_exact=yes
+  fi
+  return 0
+}
+
+# Print FILE without its trailing blank rows, optionally only the last N.
+# Trailing spaces go too: tmux 3.2a keeps them in -J captures.
+emit_rows() { # emit_rows FILE [N]
+  LC_ALL=C awk -v want="${2:-0}" "$awk_lib"'
+    { sub(/ +$/, ""); r[NR] = $0 }
+    END {
+      last = NR; while (last > 0 && blank(r[last])) last--
+      first = 1; if (want > 0 && last - want + 1 > first) first = last - want + 1
+      for (i = first; i <= last; i++) print r[i]
+    }' "$1"
+}
+
+# --- keys -----------------------------------------------------------------------
+
+# tmux encodes key names differently across versions, and some names (C-BSpace,
+# C-Escape) it types as literal text in the VT10x key mode. tmux-pane accepts
+# every name tmux knows, but in a VT10x pane only the names every supported
+# tmux encodes the same way (checked against 3.2a, 3.6b, 3.7 and 3.8). tmux
+# itself always encodes the keys: with synchronize-panes on, the send turns it
+# off for the target pane alone around its keys (see cmd_send).
+key_split() { # key_split NAME: sets k_c k_m k_s k_base; fails for unknown names
+  local n=$1
+  k_c=0 k_m=0 k_s=0
+  while :; do
+    case $n in
+      C-?*) k_c=1 n=${n#C-} ;;
+      M-?*) k_m=1 n=${n#M-} ;;
+      S-?*) k_s=1 n=${n#S-} ;;
+      *) break ;;
+    esac
+  done
+  k_base=$n
+  case $k_base in
+    Up | Down | Left | Right | Home | End | IC | DC | PPage | PageUp | PgUp | NPage | PageDown | PgDn | \
+      F1 | F2 | F3 | F4 | F5 | F6 | F7 | F8 | F9 | F10 | F11 | F12 | \
+      BSpace | Enter | Tab | BTab | Escape | Space | \
+      KP0 | KP1 | KP2 | KP3 | KP4 | KP5 | KP6 | KP7 | KP8 | KP9 | KP/ | KP\* | KP- | KP+ | KP. | KPEnter)
+      return 0
+      ;;
+  esac
+  # One character: printable ASCII or one UTF-8 character. The UTF-8 check
+  # reads the bytes, since neither the locale nor awk can be relied on to
+  # count characters.
+  local hex
+  hex=$(printf '%s' "$k_base" | od -An -tx1 | tr -d ' \n')
+  case $hex in
+    2[0-9a-f] | [3-6][0-9a-f] | 7[0-9a-e]) return 0 ;;
+    c[2-9a-f][89ab][0-9a-f] | d[0-9a-f][89ab][0-9a-f]) return 0 ;;
+    e[0-9a-f][89ab][0-9a-f][89ab][0-9a-f]) return 0 ;;
+    f[0-4][89ab][0-9a-f][89ab][0-9a-f][89ab][0-9a-f]) return 0 ;;
+  esac
+  return 1
+}
+key_class() { # after key_split: cursor | tilde | fn | plain | kp | char
+  case $k_base in
+    Up | Down | Left | Right | Home | End) printf cursor ;;
+    F1 | F2 | F3 | F4) printf fn ;;
+    IC | DC | PPage | PageUp | PgUp | NPage | PageDown | PgDn | F5 | F6 | F7 | F8 | F9 | F10 | F11 | F12) printf tilde ;;
+    BSpace | Enter | Tab | BTab | Escape | Space) printf plain ;;
+    KP*) printf kp ;;
+    *) printf char ;;
+  esac
+}
+# Whether every supported tmux encodes the key the same way in VT10x mode.
+key_portable() {
+  local mods=$((k_c + k_m + k_s)) cls
+  cls=$(key_class)
+  case $cls in
+    cursor | fn | tilde) return 0 ;;
+    kp) [ "$k_c" = 0 ] && [ "$k_s" = 0 ] ;;
+    plain)
+      case $k_base in
+        BTab) [ "$mods" = 0 ] ;;
+        Space) [ "$k_s" = 0 ] ;;
+        *) [ "$k_c" = 0 ] && [ "$k_s" = 0 ] ;;
+      esac
+      ;;
+    char)
+      [ "$k_s" = 0 ] || return 1
+      [ "$k_c" = 0 ] && return 0
+      case $k_base in [a-z] | @ | '[' | "\\" | ']' | '^' | _ | / | '?') return 0 ;; esac
+      return 1
+      ;;
+  esac
+}
+
+# --- send -----------------------------------------------------------------------
+
+# Prepare one text segment file for loading: drop exactly one trailing LF,
+# turn CRLF into LF (a lone CR is the caller's text), and with bracketed
+# paste strip bracket markers that would end the paste early. Input that
+# contains NUL is left byte-for-byte alone: the line tools cannot carry it.
+prepare_segment() { # prepare_segment FILE BRACKETED DROP_LF
+  local f=$1 size last nul_free cr esc ended_lf=0 drop=0
+  size=$(LC_ALL=C wc -c <"$f")
+  size=$((size + 0))
+  [ "$size" -gt 0 ] || return 0
+  last=$(tail -c 1 "$f" | od -An -tx1 | tr -d ' \n')
+  [ "$last" != 0a ] || ended_lf=1
+  # Standard input loses exactly one trailing LF; TEXT arguments keep theirs.
+  [ "$ended_lf" = 0 ] || [ "$3" = 0 ] || drop=1
+  nul_free=$(LC_ALL=C tr -d '\000' <"$f" | LC_ALL=C wc -c)
+  if [ "$((nul_free + 0))" -eq "$size" ]; then
+    # sed's $ also matches an unterminated last line, where a trailing CR is
+    # a lone CR and must stay, and BSD sed may add the missing LF back. So an
+    # unterminated text gets a sentinel LF, dropped again below, and its last
+    # line is skipped. A CR before the final LF goes too, so a final CRLF
+    # counts as one line end.
+    cr=$(printf '\r')
+    esc=$(printf '\033')
+    if [ "$ended_lf" = 1 ]; then
+      LC_ALL=C sed "s/$cr\$//" "$f" >"$f.t"
+    else
+      printf '\n' >>"$f"
+      LC_ALL=C sed "\$!s/$cr\$//" "$f" >"$f.t"
+      drop=1
+    fi
+    if [ "$2" = 1 ]; then
+      LC_ALL=C sed "s/$esc\\[20[01]~//g" "$f.t" >"$f"
+    else
+      mv "$f.t" "$f"
+    fi
+    rm -f "$f.t"
+  fi
+  [ "$drop" = 0 ] || drop_last_byte "$f"
+}
+
+# An emptied file is written directly, not with head -c 0.
+drop_last_byte() { # drop_last_byte FILE
+  local size
+  size=$(LC_ALL=C wc -c <"$1")
+  size=$((size + 0))
+  if [ "$size" -le 1 ]; then
+    : >"$1"
+  else
+    head -c "$((size - 1))" "$1" >"$1.t" && mv "$1.t" "$1"
+  fi
+}
+
+# Sets loaded to the new buffer's name. Never call it in a subshell: the
+# EXIT trap deletes the buffers recorded here.
+load_buffer() { # load_buffer FILE
+  loaded="tmux-pane.$$.$RANDOM.${#buffers[@]}"
+  buffers+=("$loaded")
+  tmx load-buffer -b "$loaded" "$1" 2>/dev/null || die 1 'cannot load a paste buffer'
+}
+
+cmd_send() {
+  local enter=0 type=0 keep_mode=0 print_marker=0 wait_mode='' capture=1
+  local lines='' join=0 ansi=0 timeout=$tp_default_timeout
+  local start_timeout=$tp_default_start_timeout settle=$tp_default_settle
+  local -a acts=() vals=()
+  local textbuf='' have_text=0 i
+  flush_text() {
+    if [ "$have_text" = 1 ]; then acts+=(text) vals+=("$textbuf"); fi
+    textbuf='' have_text=0
+  }
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -t)
+        [ $# -ge 2 ] && [ -z "$target_seen" ] || usage
+        target_seen=1 pane=$2
+        shift 2
+        ;;
+      -L | -S)
+        set_server "$1" "${2-}"
+        shift 2
+        ;;
+      -k | --keys)
+        [ $# -ge 2 ] || usage
+        flush_text
+        acts+=(keys) vals+=("$2")
+        shift 2
+        ;;
+      --enter)
+        enter=1
+        shift
+        ;;
+      --type)
+        type=1
+        shift
+        ;;
+      --keep-mode)
+        keep_mode=1
+        shift
+        ;;
+      --print-marker)
+        print_marker=1
+        shift
+        ;;
+      --wait)
+        wait_pending=1
+        [ $# -ge 2 ] || usage
+        wait_mode=$2
+        shift 2
+        ;;
+      --no-capture)
+        capture=0
+        shift
+        ;;
+      --lines)
+        [ $# -ge 2 ] && is_number "$2" && [ "$2" -gt 0 ] || usage
+        lines=$2
+        shift 2
+        ;;
+      --join)
+        join=1
+        shift
+        ;;
+      --ansi)
+        ansi=1
+        shift
+        ;;
+      --timeout)
+        { [ $# -ge 2 ] && is_number "$2"; } || usage
+        timeout=$2
+        shift 2
+        ;;
+      --start-timeout)
+        { [ $# -ge 2 ] && is_number "$2"; } || usage
+        start_timeout=$2
+        shift 2
+        ;;
+      --settle)
+        { [ $# -ge 2 ] && is_number "$2"; } || usage
+        settle=$2
+        shift 2
+        ;;
+      --)
+        shift
+        while [ $# -gt 0 ]; do
+          if [ "$have_text" = 1 ]; then textbuf="$textbuf $1"; else textbuf=$1 have_text=1; fi
+          shift
+        done
+        ;;
+      -)
+        flush_text
+        acts+=(stdin) vals+=(-)
+        shift
+        ;;
+      -h | --help) help ;;
+      -?*) usage ;;
+      *)
+        if [ "$have_text" = 1 ]; then textbuf="$textbuf $1"; else textbuf=$1 have_text=1; fi
+        shift
+        ;;
+    esac
+  done
+  flush_text
+  { [ -n "$target_seen" ] && valid_pane "$pane"; } || usage
+  case $wait_mode in '' | agent | prompt) ;; *) usage ;; esac
+  # Validate every key name before touching the pane.
+  local key kn=0
+  for ((i = 0; i < ${#acts[@]}; i++)); do
+    [ "${acts[$i]}" = keys ] || continue
+    for key in ${vals[$i]}; do
+      key_split "$key" || die 64 "unknown key name: $key"
+      kn=$((kn + 1))
+    done
+  done
+  [ "$enter" = 0 ] || kn=$((kn + 1))
+  detect_version
+  make_work
+  check_target || die 66 "$gone_reason"
+  if [ -n "$wait_mode" ] && [ "$kn" = 0 ]; then
+    printf 'tmux-pane: --wait without --enter or keys waits on whatever is already running\n' >&2
+  fi
+  local keymode=$g_keymode extended=0
+  if [ -n "$keymode" ]; then
+    [ "$keymode" = VT10x ] || extended=1
+  else
+    case $(tmx show-options -sv extended-keys 2>/dev/null) in on | always) extended=2 ;; esac
+  fi
+  # Turn the actions into queue commands. All input is read into files
+  # first, so a slow stdin holds neither the queue nor a loaded buffer (before
+  # 3.5, a plain paste-buffer would take a named buffer as the newest).
+  local -a qcmds=()
+  local paste_flags=() n_text=0 elen=0 fpecho=- first=1 seg
+  if has_paste_S; then paste_flags+=(-S); fi
+  [ "$type" = 1 ] || paste_flags+=(-p)
+  for ((i = 0; i < ${#acts[@]}; i++)); do
+    seg="$work/seg$i"
+    case ${acts[$i]} in
+      stdin)
+        cat >"$seg"
+        prepare_segment "$seg" "$([ "$type" = 1 ] && echo 0 || echo 1)" 1
+        ;;
+      text)
+        printf '%s' "${vals[$i]}" >"$seg"
+        prepare_segment "$seg" "$([ "$type" = 1 ] && echo 0 || echo 1)" 0
+        ;;
+    esac
+  done
+  for ((i = 0; i < ${#acts[@]}; i++)); do
+    seg="$work/seg$i"
+    case ${acts[$i]} in
+      text | stdin)
+        # tmux makes no buffer from an empty file, and there is nothing to
+        # paste anyway.
+        if [ ! -s "$seg" ]; then
+          first=0
+          continue
+        fi
+        if [ "$first" = 1 ]; then
+          # shellcheck disable=SC2046 # Two fields, split on purpose.
+          set -- $(echo_prefix "$seg" "$(((g_w - g_cx - 1) < 64 ? (g_w - g_cx - 1) : 64))")
+          elen=$1 fpecho=$2
+        fi
+        load_buffer "$seg"
+        qcmds+=(\; paste-buffer ${paste_flags[@]+"${paste_flags[@]}"} -d -b "$loaded" -t "$pane")
+        n_text=$((n_text + 1))
+        ;;
+      keys)
+        for key in ${vals[$i]}; do add_key "$key"; done
+        ;;
+    esac
+    first=0
+  done
+  [ "$enter" = 0 ] || add_key Enter
+  # synchronize-panes would broadcast send-keys to every pane in the window.
+  # A pane-level off for the target, set and put back in the same queue,
+  # confines the keys to it; the pane's own setting, if it had one, is
+  # restored, and cleanup restores it if the queue stops early.
+  if [ "$g_sync" = 1 ] && [ "$kn" -gt 0 ]; then
+    local sync_pane
+    sync_pane=$(tmx show-options -pqv -t "$pane" synchronize-panes 2>/dev/null) || sync_pane=''
+    if [ -n "$sync_pane" ]; then
+      sync_restore=(set-option -p -t "$pane" synchronize-panes "$sync_pane")
+    else
+      sync_restore=(set-option -pu -t "$pane" synchronize-panes)
+    fi
+    qcmds=(\; set-option -p -t "$pane" synchronize-panes off ${qcmds[@]+"${qcmds[@]}"} \; "${sync_restore[@]}")
+  fi
+  # Named keys go to the program, not to a mode the pane is in, unless asked.
+  if [ "$kn" -gt 0 ] && [ "$keep_mode" = 0 ]; then
+    qcmds=(\; copy-mode -q -t "$pane" ${qcmds[@]+"${qcmds[@]}"})
+  fi
+  local qstatus
+  marker_queue "$elen" "$fpecho" ${qcmds[@]+"${qcmds[@]}"}
+  qstatus=$?
+  if [ "$qstatus" = 0 ]; then sync_restore=(); fi
+  if [ "$qstatus" = 66 ]; then die 66 "$pane is gone"; fi
+  if [ "$qstatus" = 2 ] && [ ! -s "$work/queue.err" ]; then
+    die 64 'too many actions for one tmux command; split the send'
+  fi
+  if [ "$qstatus" -ne 0 ]; then
+    if grep -q "can't find" "$work/queue.err" 2>/dev/null; then die 66 "$pane is gone"; fi
+    die 1 "tmux failed: $(head -n 1 "$work/queue.err")"
+  fi
+  [ "$g_inputoff" != 1 ] || printf 'tmux-pane: %s has input disabled (select-pane -d); nothing arrives\n' "$pane" >&2
+  finish_ident
+  local marker
+  marker=$(marker_string)
+  if [ -z "$wait_mode" ]; then
+    [ "$print_marker" = 0 ] || printf '%s\n' "$marker"
+    exit 0
+  fi
+  [ "$print_marker" = 0 ] || printf '%s\n' "$marker"
+  parse_marker "$marker" || die 1 'internal error: bad marker'
+  run_wait "$wait_mode" 1 "$capture" "$timeout" "$start_timeout" "$settle" "$lines" "$join" "$ansi" "$marker"
+}
+
+# Queue one named key for the target. Exits 67 for a key tmux would type as
+# its name in the target's VT10x key mode.
+add_key() {
+  local key=$1
+  key_split "$key" || die 64 "unknown key name: $key"
+  if [ "$extended" = 0 ] && ! key_portable; then
+    die 67 "$key has no portable encoding in $pane's VT10x key mode (tmux would type its name)"
+  fi
+  # tmux reads a trailing ; in an argument as a command separator.
+  case $key in *\;) key="${key%;}\\;" ;; esac
+  qcmds+=(\; send-keys -t "$pane" "$key")
+}
+
+# --- read -----------------------------------------------------------------------
+
+# Read the pane. Prints rows; returns 0 exact, 3 no block, 4 inexact.
+do_read() { # do_read MODE(screen|lines|all|last) LINES COUNT HAVE_MARKER JOIN ANSI
+  local mode=$1 lines=$2 count=$3 have=$4 flags=()
+  [ "$5" = 0 ] || flags+=(-J)
+  [ "$6" = 0 ] || flags+=(-e)
+  read_reason=''
+  read_exact=-
+  if [ "$have" = 1 ]; then
+    if [ "$mode" = last ]; then
+      locate 1 -J
+    else
+      locate 1 ${flags[@]+"${flags[@]}"}
+    fi
+    local st=$?
+    [ "$st" = 0 ] || return "$st"
+    read_exact=$loc_exact
+    if [ "$loc_exact" = yes ]; then
+      if [ "$mode" = last ]; then
+        last_blocks "$work/since.txt" 1 ''
+        return $?
+      fi
+      emit_rows "$work/since.txt" "$lines"
+      return 0
+    fi
+    read_reason=$loc_reason
+    printf 'tmux-pane: inexact: %s; showing the screen\n' "$loc_reason" >&2
+    if [ "$mode" = last ]; then
+      # Every finished block on the screen; with none (output longer than
+      # the screen, a command still running), the screen itself.
+      last_blocks "$work/screen.txt" 0 100000 || emit_rows "$work/screen.txt"
+      return 4
+    fi
+    if [ -n "$lines" ]; then
+      tmx capture-pane -p -t "$pane" ${flags[@]+"${flags[@]}"} -S "-$lines" -E - >"$work/r.txt" 2>/dev/null
+      emit_rows "$work/r.txt" "$lines"
+    else
+      emit_rows "$work/screen.txt"
+    fi
+    return 4
+  fi
+  case $mode in
+    screen)
+      tmx capture-pane -p -t "$pane" ${flags[@]+"${flags[@]}"} >"$work/r.txt" 2>/dev/null
+      emit_rows "$work/r.txt"
+      ;;
+    lines)
+      tmx capture-pane -p -t "$pane" ${flags[@]+"${flags[@]}"} -S "-$lines" -E - >"$work/r.txt" 2>/dev/null
+      emit_rows "$work/r.txt" "$lines"
+      ;;
+    all)
+      tmx capture-pane -p -t "$pane" ${flags[@]+"${flags[@]}"} -S - -E - >"$work/r.txt" 2>/dev/null
+      emit_rows "$work/r.txt"
+      ;;
+    last)
+      tmx capture-pane -p -J -t "$pane" -S -10000 -E - >"$work/r.txt" 2>/dev/null
+      last_blocks "$work/r.txt" 0 "$count"
+      return $?
+      ;;
+  esac
+  return 0
+}
+
+# Print finished command blocks and report the last one's status on stderr.
+last_blocks() { # last_blocks FILE FIRST2 COUNT
+  local out st=unknown ident
+  LC_ALL=C sed 's/  *$//' "$1" >"$1.rt" && mv "$1.rt" "$1"
+  ident=${m_ident:-${wait_ident:-}}
+  [ -n "$ident" ] || ident=$(title_ident)
+  if [ "$2" = 1 ]; then
+    out=$(awk -v mode=blocks -v first2=1 -v from=1 -v status=1 -v ident="$ident" "$prompt_parser" "$1") || {
+      printf 'status=unknown\n' >&2
+      return 3
+    }
+  else
+    out=$(awk -v mode=blocks -v count="${3:-1}" -v status=1 -v ident="$ident" "$prompt_parser" "$1") || {
+      printf 'status=unknown\n' >&2
+      return 3
+    }
+  fi
+  case $out in
+    *$'\034'*) st=${out##*$'\034'} out=${out%$'\034'*} ;;
+  esac
+  out=${out%$'\n'}
+  [ -z "$out" ] || printf '%s\n' "$out"
+  is_number "$st" || st=unknown
+  printf 'status=%s\n' "$st" >&2
+  return 0
+}
+
+cmd_read() {
+  local mode=screen lines='' count=1 since='' join=0 ansi=0 nmodes=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -t)
+        [ $# -ge 2 ] && [ -z "$target_seen" ] || usage
+        target_seen=1 pane=$2
+        shift 2
+        ;;
+      -L | -S)
+        set_server "$1" "${2-}"
+        shift 2
+        ;;
+      --lines)
+        [ $# -ge 2 ] && is_number "$2" && [ "$2" -gt 0 ] || usage
+        lines=$2
+        shift 2
+        ;;
+      --all)
+        mode=all nmodes=$((nmodes + 1))
+        shift
+        ;;
+      --last-output)
+        mode=last nmodes=$((nmodes + 1))
+        shift
+        ;;
+      --count)
+        [ $# -ge 2 ] && is_number "$2" && [ "$2" -gt 0 ] || usage
+        count=$2
+        shift 2
+        ;;
+      --since)
+        [ $# -ge 2 ] || usage
+        since=$2
+        shift 2
+        ;;
+      --join)
+        join=1
+        shift
+        ;;
+      --ansi)
+        ansi=1
+        shift
+        ;;
+      -h | --help) help ;;
+      *) usage ;;
+    esac
+  done
+  { [ -n "$target_seen" ] && valid_pane "$pane"; } || usage
+  [ "$nmodes" -le 1 ] || usage
+  if [ -n "$lines" ] && [ "$mode" = screen ]; then mode=lines; fi
+  [ -z "$lines" ] || [ "$mode" = lines ] || [ "$mode" = screen ] || usage
+  local have=0
+  if [ -n "$since" ]; then
+    parse_marker "$since" || die 64 'malformed marker'
+    [ "$m_pane" = "$pane" ] || die 64 "the marker is for $m_pane, not $pane"
+    have=1
+  fi
+  detect_version
+  make_work
+  if [ "$have" = 1 ]; then
+    check_target "$m_srv" || die 66 "$gone_reason"
+  else
+    check_target || die 66 "$gone_reason"
+  fi
+  do_read "$mode" "$lines" "$count" "$have" "$join" "$ansi"
+  exit $?
+}
+
+# --- wait -----------------------------------------------------------------------
+
+poll_sleep() { sleep 0.2; }
+
+# One cheap poll: geometry and marks, plus in prompt mode a small joined
+# capture ending at the cursor and the visible screen. Sets p_state ("prompt
+# N" or "none") and p_screen (the screen hash).
+poll_once() { # poll_once PROMPT_MODE
+  local nonce cy w row
+  nonce="tmux-pane-$$-$RANDOM$RANDOM"
+  if [ "$1" = 1 ]; then
+    cy=${g_cy:-0}
+    w=$((2 + (256 + ${g_w:-80} - 1) / ${g_w:-80}))
+    tmx list-panes -a -f "#{==:#{pane_id},$pane}" -F "$geom_format" \; \
+      display-message -p -t "$pane" "$nonce-1" \; \
+      capture-pane -p -J -t "$pane" -S "$((cy - w))" -E "$cy" \; \
+      display-message -p -t "$pane" "$nonce-2" \; \
+      capture-pane -p -t "$pane" -S 0 -E - >"$work/poll" 2>/dev/null || return 66
+  else
+    tmx list-panes -a -f "#{==:#{pane_id},$pane}" -F "$geom_format" >"$work/poll" 2>/dev/null || return 66
+  fi
+  split_queue "$work/poll" "$nonce"
+  row=$(head -n 1 "$work/sec0")
+  [ -n "$row" ] || return 66
+  local oldcy=${g_cy:-}
+  parse_geom "$row" || return 66
+  [ "$g_dead" != 1 ] || return 66
+  # A restarted server can reuse the pane id; that is another pane.
+  if [ -n "${wait_srv:-}" ] && [ "$g_srv" != "$wait_srv" ]; then
+    gone_reason='the server restarted'
+    return 66
+  fi
+  p_state=none p_screen=''
+  if [ "$1" = 1 ]; then
+    # A capture taken with an older cursor row may end above the cursor.
+    if [ "$oldcy" = "$g_cy" ]; then
+      p_state=$(awk -v mode=state -v ident="$wait_ident" "$prompt_parser" "$work/sec1")
+      if [ "${p_state%% *}" = prompt ]; then
+        if [ "$g_cx" != 2 ]; then
+          local cur
+          cur=$(tail -n 1 "$work/sec1")
+          { [ "$g_cx" -le 2 ] && [ "${#cur}" -le 1 ]; } || p_state=none
+        fi
+        [ "$g_alt" = 0 ] || p_state=none
+      fi
+      p_screen=$(LC_ALL=C awk "$awk_lib"'{ r[NR] = $0 } END { last = NR; while (last > 0 && blank(r[last])) last--; v = ""; for (i = 1; i <= last; i++) v = v r[i] "\n"; print hash(v) }' "$work/sec2")
+    fi
+  fi
+  return 0
+}
+
+gone_or() { # The pane vanished or the server changed: report 66.
+  wait_end 66 gone unknown "${gone_reason:-$pane is gone}"
+}
+
+# End a wait: optionally print the capture, then the result line.
+wait_end() { # wait_end EXIT KIND STATUS [REASON]
+  local code=$1 kind=$2 status=$3 reason=${4:-} exact=- rs=0
+  if [ "$w_capture" = 1 ] && [ "$kind" != error ]; then
+    if [ "$kind" = gone ] && ! query_geom; then
+      :
+    else
+      if [ "$w_mode" = prompt ] && [ -z "$w_lines" ]; then
+        do_read last "" 1 "$w_have" "$w_join" "$w_ansi" 2>"$work/read.err"
+        rs=$?
+        # No finished block (a timeout, output longer than the range): the
+        # range since the marker, or the screen.
+        if [ "$rs" = 3 ]; then
+          if [ "$w_have" = 1 ]; then
+            do_read lines "" 1 1 "$w_join" "$w_ansi" 2>>"$work/read.err"
+          else
+            do_read screen "" 1 0 "$w_join" "$w_ansi" 2>>"$work/read.err"
+          fi
+          rs=$?
+        fi
+      elif [ "$w_have" = 1 ]; then
+        do_read lines "$w_lines" 1 1 "$w_join" "$w_ansi" 2>"$work/read.err"
+        rs=$?
+      elif [ -n "$w_lines" ]; then
+        do_read lines "$w_lines" 1 0 "$w_join" "$w_ansi" 2>"$work/read.err"
+        rs=$?
+      else
+        do_read screen "" 1 0 "$w_join" "$w_ansi" 2>"$work/read.err"
+        rs=$?
+      fi
+      # exact= describes what was printed: yes or no for a marker read, yes
+      # for a plain read that worked, and - when nothing could be printed.
+      exact=$read_exact
+      if [ "$exact" = - ] && [ "$rs" = 0 ]; then exact=yes; fi
+      [ "$rs" != 4 ] || exact=no
+      case $rs in 0 | 4) ;; *) exact=- ;; esac
+      [ "$exact" = yes ] || reason=${read_reason:-$reason}
+    fi
+  fi
+  local line="result=$kind exact=$exact status=$status"
+  [ -z "$reason" ] || [ "$exact" != no ] || line="$line reason=${reason// /-}"
+  [ -z "$w_marker" ] || line="$line marker=$w_marker"
+  printf '%s\n' "$line" >&2
+  exit "$code"
+}
+
+run_wait() { # run_wait MODE HAVE CAPTURE TIMEOUT START SETTLE LINES JOIN ANSI MARKER
+  w_mode=$1 w_have=$2 w_capture=$3 w_lines=$7 w_join=$8 w_ansi=$9 w_marker=${10:-}
+  if [ "$w_have" = 1 ]; then wait_srv=$m_srv; else wait_srv=$(server_id) || wait_srv=''; fi
+  local timeout=$4 start_timeout=$5 settle=$6
+  local t0=$SECONDS deadline=0 sdeadline
+  [ "$timeout" = 0 ] || deadline=$((t0 + timeout + 1))
+  sdeadline=$((t0 + start_timeout + 1))
+  if [ "${TMUX_PANE_DEBUG_DEADLINE:-}" = 1 ]; then
+    printf 'tmux-pane: deadline=%s start-deadline=%s\n' \
+      "$([ "$deadline" = 0 ] && echo none || echo $((deadline - t0)))" "$((sdeadline - t0))" >&2
+  fi
+  if [ "$w_mode" = agent ]; then
+    wait_agent "$deadline" "$sdeadline" "$settle"
+  else
+    wait_prompt "$deadline" "$settle"
+  fi
+}
+
+timed_out() { [ "$1" != 0 ] && [ "$SECONDS" -ge "$1" ]; }
+
+wait_agent() { # wait_agent DEADLINE START_DEADLINE SETTLE
+  local deadline=$1 sdeadline=$2 settle_polls=$(($3 * 5)) phase
+  local b_seq=0 b_busy=0 b_pending=''
+  if [ "$w_have" = 1 ]; then
+    b_seq=$m_seq b_busy=$m_busy b_pending=$m_pending
+    phase=start
+    [ "$b_busy" != 1 ] || phase=run
+  else
+    poll_once 0 || gone_or
+    b_seq=$g_seq b_busy=$g_busy b_pending=${g_pending#-}
+    phase=run
+    [ "$b_busy" = 1 ] || phase=settle
+  fi
+  # A sticky kind already present at the baseline belongs to an earlier
+  # question; it counts only after it has cleared once.
+  # term-pane-mark's older pending value 1 means done.
+  [ "$b_pending" != 1 ] || b_pending="done"
+  local sticky_old=$b_pending stable=0 pend
+  case $sticky_old in waiting | blocked) ;; *) sticky_old='' ;; esac
+  while :; do
+    poll_once 0 || gone_or
+    pend=${g_pending#-}
+    [ "$pend" != 1 ] || pend="done"
+    if [ -n "$sticky_old" ] && [ "$pend" != "$sticky_old" ]; then sticky_old=''; fi
+    case $pend in
+      waiting) [ "$pend" = "$sticky_old" ] || wait_end 68 waiting unknown ;;
+      blocked) [ "$pend" = "$sticky_old" ] || wait_end 69 blocked unknown ;;
+    esac
+    case $phase in
+      start)
+        if [ "$g_busy" = 1 ]; then
+          phase=run
+        elif [ "$g_seq" -gt "$b_seq" ]; then
+          phase=settle stable=0
+        elif [ "$pend" = "done" ] && [ "$b_pending" != "done" ]; then
+          wait_end 0 "done" unknown
+        elif [ "$SECONDS" -ge "$sdeadline" ]; then
+          wait_end 70 no-start unknown 'no busy mark appeared'
+        fi
+        ;;
+      run)
+        if [ "$g_busy" != 1 ]; then phase=settle stable=0 b_seq=$g_seq; fi
+        ;;
+      settle)
+        if [ "$g_busy" = 1 ] || [ "$g_seq" -gt "$b_seq" ]; then
+          phase=run b_seq=$g_seq
+        else
+          stable=$((stable + 1))
+          if [ "$stable" -ge "$settle_polls" ]; then
+            wait_end 0 "done" unknown
+          fi
+        fi
+        ;;
+    esac
+    timed_out "$deadline" && wait_end 124 timeout unknown 'timed out'
+    poll_sleep
+  done
+}
+
+wait_prompt() { # wait_prompt DEADLINE SETTLE
+  local deadline=$1 settle_polls=$(($2 * 5)) last_screen='' steady=0 st exact_checked=0 exact=no
+  wait_ident=${m_ident:-}
+  if [ -z "$wait_ident" ]; then
+    query_geom || gone_or
+    wait_ident=$(title_ident)
+    [ -n "$wait_ident" ] || wait_ident=$(history_ident)
+  fi
+  query_geom || gone_or
+  while :; do
+    poll_once 1 || gone_or
+    if [ "${p_state%% *}" = prompt ]; then
+      st=${p_state#prompt }
+      if [ "$p_screen" = "$last_screen" ]; then steady=$((steady + 1)); else steady=0; fi
+      last_screen=$p_screen
+      if [ "$w_have" = 0 ]; then
+        wait_end "$st" "done" "$st"
+      fi
+      if [ "$exact_checked" = 0 ]; then
+        locate 0 >/dev/null 2>&1
+        case $? in 66) gone_or ;; esac
+        exact=$loc_exact exact_checked=1
+      fi
+      # (a) an exact marker: the prompt is below the row the text was typed on.
+      if [ "$exact" = yes ] && [ "$g_row" -gt "$loc_row" ]; then wait_end "$st" "done" "$st"; fi
+      # (b) the window wrote output after the send's second.
+      if [ "${g_activity:-0}" -gt "$m_sendsec" ]; then wait_end "$st" "done" "$st"; fi
+      # (c) a steady prompt on a screen that changed since the send.
+      if [ "$steady" -ge 5 ] && [ "$p_screen" != "$m_fpscreen" ]; then wait_end "$st" "done" "$st"; fi
+      # (d) a steady prompt on a screen that clear rebuilt exactly; the paste
+      # echo is output, so activity proves the input arrived.
+      if [ "$steady" -ge "$settle_polls" ] && [ "$p_screen" = "$m_fpscreen" ] &&
+        [ "${g_activity:-0}" -ge "$m_sendsec" ]; then
+        wait_end "$st" "done" "$st"
+      fi
+    else
+      steady=0 last_screen='' exact_checked=0
+    fi
+    timed_out "$deadline" && wait_end 124 timeout unknown 'timed out'
+    poll_sleep
+  done
+}
+
+cmd_wait() {
+  local mode='' since='' capture=0 lines='' join=0 ansi=0 timeout=$tp_default_timeout
+  local start_timeout=$tp_default_start_timeout settle=$tp_default_settle
+  wait_pending=1
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -t)
+        [ $# -ge 2 ] && [ -z "$target_seen" ] || usage
+        target_seen=1 pane=$2
+        shift 2
+        ;;
+      -L | -S)
+        set_server "$1" "${2-}"
+        shift 2
+        ;;
+      --wait)
+        [ $# -ge 2 ] && [ -z "$mode" ] || usage
+        mode=$2
+        shift 2
+        ;;
+      --agent)
+        [ -z "$mode" ] || usage
+        mode=agent
+        shift
+        ;;
+      --prompt)
+        [ -z "$mode" ] || usage
+        mode=prompt
+        shift
+        ;;
+      --since)
+        [ $# -ge 2 ] || usage
+        since=$2
+        shift 2
+        ;;
+      --capture)
+        capture=1
+        shift
+        ;;
+      --lines)
+        [ $# -ge 2 ] && is_number "$2" && [ "$2" -gt 0 ] || usage
+        lines=$2
+        shift 2
+        ;;
+      --join)
+        join=1
+        shift
+        ;;
+      --ansi)
+        ansi=1
+        shift
+        ;;
+      --timeout)
+        { [ $# -ge 2 ] && is_number "$2"; } || usage
+        timeout=$2
+        shift 2
+        ;;
+      --start-timeout)
+        { [ $# -ge 2 ] && is_number "$2"; } || usage
+        start_timeout=$2
+        shift 2
+        ;;
+      --settle)
+        { [ $# -ge 2 ] && is_number "$2"; } || usage
+        settle=$2
+        shift 2
+        ;;
+      -h | --help) help ;;
+      *) usage ;;
+    esac
+  done
+  { [ -n "$target_seen" ] && valid_pane "$pane"; } || usage
+  case $mode in agent | prompt) ;; *) usage ;; esac
+  local have=0
+  w_marker=''
+  if [ -n "$since" ]; then
+    parse_marker "$since" || die 64 'malformed marker'
+    [ "$m_pane" = "$pane" ] || die 64 "the marker is for $m_pane, not $pane"
+    have=1 w_marker=$since
+  fi
+  w_capture=0 w_mode=$mode
+  detect_version
+  make_work
+  if [ "$have" = 1 ]; then
+    check_target "$m_srv" || wait_end 66 gone unknown "$gone_reason"
+  else
+    check_target || wait_end 66 gone unknown "$gone_reason"
+  fi
+  run_wait "$mode" "$have" "$capture" "$timeout" "$start_timeout" "$settle" "$lines" "$join" "$ansi" "$since"
+}
+
+# --- mark -----------------------------------------------------------------------
+
+cmd_mark() {
+  while [ $# -gt 0 ]; do
+    case $1 in
+      -t)
+        [ $# -ge 2 ] && [ -z "$target_seen" ] || usage
+        target_seen=1 pane=$2
+        shift 2
+        ;;
+      -L | -S)
+        set_server "$1" "${2-}"
+        shift 2
+        ;;
+      -h | --help) help ;;
+      *) usage ;;
+    esac
+  done
+  { [ -n "$target_seen" ] && valid_pane "$pane"; } || usage
+  detect_version
+  make_work
+  check_target || die 66 "$gone_reason"
+  marker_queue 0 - || die 66 "$pane is gone"
+  finish_ident
+  marker_string
+}
+
+# --- main -----------------------------------------------------------------------
+
+target_seen=''
+server_desc=''
+set_server() { # set_server -L|-S VALUE
+  [ -n "${2:-}" ] && [ "${#server_args[@]}" -eq 0 ] || usage
+  server_args=("$1" "$2")
+  server_desc=" (server $1 $2)"
+}
+
+# BEGIN prompt-parser
+# Command-block parser for the two-line prompt (see README "Prompt format").
+# tmux-copy-last-output and tmux-pane carry this region byte for byte; a test
+# compares the two copies, so change both together.
+#
+# Input is a pane capture, one row or joined line per record. A prompt is a
+# line 1 followed by a line 2 (`$`, `%` or `#`, then a space or nothing).
+# Line 1 holds the identity `user@host:` and, after a failure, a leading
+# `[N] ` status. Bash prints a prompt right after output that lacks a final
+# newline, so line 1 can arrive glued to that output (`ok[1] me@host:~`). The
+# identity tells the two apart: it is the -v ident preset, else the identity
+# most confirmed prompts agree on. Glued output changes the prefix but never
+# the identity, so the most frequent one is the real one. A preset identity
+# is the only one accepted; without one, any anchored line 1 also counts.
+# A `#` line 2 also starts comments and headings in output, so its line 1
+# must start with the identity (after an optional `[N] `), never glued.
+# Glue that ends in a space (`printf '%s ' a b`) is also a line that merely
+# mentions the identity (`copied to me@host:/srv`), so it counts only when
+# the rest of the line, from the identity on, repeats an unglued line 1 in
+# the capture, or it is the last prompt (the one at the cursor), whose line
+# 2 is the last non-blank record.
+#
+# Variables (-v):
+#   mode     blocks (default), state, ident, confirm or anchor
+#   count    blocks: how many of the last finished blocks to print
+#   ident    the identity to look for; empty means use the consensus
+#   from     blocks: print every block whose line 2 is at or after this record
+#   first2   blocks: record 1 is a line 2 whose line 1 is not in the capture
+#   status   blocks: end with a line holding \034 and the last block status
+# Output:
+#   blocks   each block as its `$ command` line, then its output; blocks are
+#            separated by an empty line. Exits 1 when no block is complete.
+#   state    `prompt N` when the last record is a line 2 under a line 1
+#            whose status is N, else `none`
+#   ident    the consensus identity, or nothing
+#   confirm  1 when some record is a line 1 with the -v ident preset, else 0
+#   anchor   the identity record 1 starts with (no status prefix), or nothing
+# shellcheck disable=SC2016 # An awk program: its $ are awk syntax.
+prompt_parser='
+function line2(s) { return s ~ /^[$%#]($| )/ }
+# The identity an anchored line 1 starts with, or "".
+function anchored(s,   t) {
+  if (!match(s, /^(\[?[0-9]*\]? ?)?[a-zA-Z0-9_]+@[a-zA-Z0-9._-]+:/)) return ""
+  t = substr(s, 1, RLENGTH)
+  sub(/^(\[?[0-9]*\]? ?)?/, "", t)
+  return t
+}
+# The identity most confirmed prompts agree on. Glue can only prepend word
+# characters (`ok` + `me@host:` still matches the anchored pattern), so each
+# candidate scores the prompts whose identity ends with it, and the shortest
+# best scorer wins. It must score twice, or be the only candidate.
+function consensus(   i, t, u, best, bs, sc, distinct) {
+  distinct = 0
+  for (i = 1; i < NR; i++) {
+    if (!line2(rec[i + 1])) continue
+    t = anchored(rec[i])
+    if (t == "") continue
+    if (!(t in cnt)) distinct++
+    cnt[t]++
+  }
+  best = ""; bs = 0
+  for (t in cnt) {
+    sc = 0
+    for (u in cnt)
+      if (length(u) >= length(t) && substr(u, length(u) - length(t) + 1) == t) sc += cnt[u]
+    if (sc > bs || (sc == bs && length(t) < length(best))) { bs = sc; best = t }
+  }
+  if (best == "" || (bs < 2 && distinct > 1)) return ""
+  return best
+}
+# Record i is a line 1 when line 2 follows it. Sets glue (output text glued
+# before the identity) and st (its status) for it.
+function prompt1(i,   s, p, t, u, root) {
+  if (i < 1 || i >= NR || !line2(rec[i + 1])) return 0
+  s = rec[i]
+  root = (substr(rec[i + 1], 1, 1) == "#")
+  p = (id != "") ? index(s, id) : 0
+  if (p > 0) {
+    t = substr(s, 1, p - 1)
+    if (root && t !~ /^(\[[0-9]+\] )?$/) return 0
+    # Glue ending in a space counts only as a known prompt line, or the
+    # prompt at the cursor (see the header).
+    u = t; sub(/\[[0-9]+\] $/, "", u)
+    if (u ~ /[ \t]$/ && i != cur && !(substr(s, p) in known)) return 0
+  } else if (ident == "" && anchored(s) != "" && !(root && id != "")) {
+    t = ""
+    if (match(s, /^\[[0-9]+\] /)) t = substr(s, 1, RLENGTH)
+  } else {
+    return 0
+  }
+  st = 0
+  if (match(t, /\[[0-9]+\] $/)) {
+    st = substr(t, RSTART + 1)
+    sub(/\].*/, "", st)
+    t = substr(t, 1, RSTART - 1)
+  }
+  glue = t
+  return 1
+}
+{ rec[NR] = $0 }
+END {
+  if (mode == "ident") {
+    t = consensus()
+    if (t != "") print t
+    exit 0
+  }
+  if (mode == "anchor") {
+    t = anchored(rec[1])
+    if (t != "" && index(rec[1], t) == 1) print t
+    exit 0
+  }
+  id = (ident != "") ? ident : consensus()
+  # Unglued line 1s, from the identity on, and the last prompt (the cursor).
+  if (id != "")
+    for (i = 1; i < NR; i++)
+      if (line2(rec[i + 1]) && (p = index(rec[i], id)) > 0 && substr(rec[i], 1, p - 1) ~ /^(\[[0-9]+\] )?$/)
+        known[substr(rec[i], p)] = 1
+  for (cur = NR; cur > 1 && rec[cur] ~ /^ *$/; cur--) ;
+  cur = (cur >= 2 && line2(rec[cur])) ? cur - 1 : 0
+  if (mode == "confirm") {
+    t = 0
+    for (i = 1; i < NR; i++) if (prompt1(i)) { t = 1; break }
+    print t
+    exit 0
+  }
+  if (mode == "state") {
+    if (NR >= 2 && line2(rec[NR]) && prompt1(NR - 1)) print "prompt " st
+    else print "none"
+    exit 0
+  }
+  n = 0
+  if (first2 == 1 && NR >= 1 && line2(rec[1])) {
+    n = 1; l2[1] = 1; pglue[1] = ""; pst[1] = 0
+  }
+  for (i = 1; i < NR; i++) {
+    if (n > 0 && i <= l2[n]) continue
+    if (prompt1(i)) {
+      n++; l2[n] = i + 1; pglue[n] = glue; pst[n] = st; l1[n] = i
+    }
+  }
+  if (n < 2) exit 1
+  if (from != "") {
+    start = 0
+    for (c = 1; c < n; c++) if (l2[c] >= from + 0) { start = c; break }
+    if (start == 0) exit 1
+  } else {
+    start = n - count
+    if (start < 1) start = 1
+  }
+  first = 1
+  for (c = start; c < n; c++) {
+    if (!first) print ""
+    first = 0
+    if (length(rec[l2[c]]) > 2) print rec[l2[c]]
+    for (i = l2[c] + 1; i < l1[c + 1]; i++) print rec[i]
+    if (pglue[c + 1] != "") print pglue[c + 1]
+  }
+  if (status == 1) print "\034" pst[n]
+}
+'
+# END prompt-parser
+
+[ $# -ge 1 ] || usage
+sub=$1
+shift
+case $sub in
+  send) cmd_send "$@" ;;
+  read) cmd_read "$@" ;;
+  wait) cmd_wait "$@" ;;
+  mark) cmd_mark "$@" ;;
+  -h | --help | help) help ;;
+  --interface) interface ;;
+  --check-refs) check_refs "$@" ;;
+  *)
+    printf 'tmux-pane: unknown subcommand: %s\n' "$sub" >&2
+    usage
+    ;;
+esac

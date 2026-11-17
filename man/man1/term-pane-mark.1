@@ -57,6 +57,14 @@ prompt and its finished response. The program that set it clears it,
 normally with
 .B \-\-owner
 so that a nested program cannot clear it early.
+Each set also adds one to
+.BR @term_busy_seq ,
+in the same tmux command queue and after
+.BR "@term_busy 1" ,
+so a turn that starts and ends between two looks still shows as a new
+count; clearing busy leaves the count alone.
+.BR tmux-pane (1)
+waits on it.
 .PP
 The caller's pane is
 .B $TMUX_PANE
@@ -235,4 +243,5 @@ tmux command is invoked.
 .SH SEE ALSO
 .BR tmux (1),
 .BR term-notify-sound (1),
-.BR term-pane-state (1)
+.BR term-pane-state (1),
+.BR tmux-pane (1)
