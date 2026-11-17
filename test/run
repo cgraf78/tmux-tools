@@ -24,12 +24,54 @@ if [[ "${TMUX_TOOLS_SKIP_SHELLCHECK:-0}" != 1 ]] &&
   )
 fi
 
+# Settle tmux once for every suite, by the tools' own rule: without a
+# supported tmux the real-tmux cases skip, and under
+# TMUX_TOOLS_REQUIRE_TMUX=1 that fails instead. The suites read the verdict
+# from TMUX_TOOLS_TMUX; the Python clients repeat the check for direct runs.
+eval "$(sed -n '/^# BEGIN tmux_supported$/,/^# END tmux_supported$/p' "$ROOT/bin/tmux-agent-picker")"
+# shellcheck disable=SC2154 # The eval sets tmux_minimum.
+tmux_floor=$tmux_minimum
+tmux_reason=''
+if ! tmux_reported=$(tmux -V 2>/dev/null); then
+  TMUX_TOOLS_TMUX=missing
+  tmux_reason='tmux is not installed'
+elif tmux_supported "$tmux_reported"; then
+  TMUX_TOOLS_TMUX=ok
+else
+  TMUX_TOOLS_TMUX=unsupported
+  tmux_reason="$tmux_reported is older than tmux $tmux_floor"
+fi
+export TMUX_TOOLS_TMUX
+if [[ -n $tmux_reason ]]; then
+  if [[ ${TMUX_TOOLS_REQUIRE_TMUX:-0} == 1 ]]; then
+    printf 'FAIL: a supported tmux is required (%s)\n' "$tmux_reason" >&2
+    exit 1
+  fi
+  printf 'SKIP: real-tmux cases (%s)\n' "$tmux_reason"
+fi
+# Shared CI names the floor its tmux was chosen for; under
+# CI_TMUX_FLOOR_EXACT=1 tmux must be exactly that release.
+if [[ -n ${CI_TMUX_FLOOR:-} ]]; then
+  if [[ ${CI_TMUX_FLOOR%%[!0-9.]*} != "$tmux_floor" ]]; then
+    printf 'FAIL: CI_TMUX_FLOOR=%s does not match tmux_minimum=%s\n' \
+      "$CI_TMUX_FLOOR" "$tmux_floor" >&2
+    exit 1
+  fi
+  if [[ ${CI_TMUX_FLOOR_EXACT:-0} == 1 && ${tmux_reported:-} != "tmux $CI_TMUX_FLOOR" ]]; then
+    printf 'FAIL: CI_TMUX_FLOOR_EXACT=1 wants tmux %s, found %s\n' \
+      "$CI_TMUX_FLOOR" "${tmux_reported:-no tmux}" >&2
+    exit 1
+  fi
+fi
+
 "$ROOT/test/tmux-tools-harness-test"
 "$ROOT/test/tmux-continuum-test"
 "$ROOT/test/tmux-tools-test"
 "$ROOT/test/copy-mark-test"
 "$ROOT/test/term-pane-state-test"
 if command -v python3 >/dev/null 2>&1; then
+  python3 "$ROOT/test/tmux_version.py"
+  python3 "$ROOT/test/tmux-floor-lint.py"
   python3 "$ROOT/test/term-pane-state-client.py"
 else
   if [[ ${TMUX_TOOLS_REQUIRE_TMUX:-0} == 1 ]]; then

@@ -42,7 +42,10 @@ Small helpers for tmux setups that outgrow the defaults:
 ## Requirements
 
 - Bash 3.2 or newer
-- tmux
+- tmux 3.3 or newer. `tmux-agent-picker`, `tmux-command-palette`,
+  `tmux-copy-last-output`, `tmux-clip-paste` and `term-pane-state` ask their
+  server for its version and refuse an older one, saying so; the others
+  assume it.
 - tmux-continuum and tmux-resurrect for `tmux-continuum-default-server`
   (found under `$TMUX_PLUGIN_MANAGER_PATH`, which TPM sets, else
   `$HOME/.local/share/tmux-plugins`)
@@ -51,8 +54,8 @@ Small helpers for tmux setups that outgrow the defaults:
   explicitly selected tmux client whose terminal supports OSC 52.
 - For `tmux-command-palette`: `fzf`, and tmux 3.4 or newer to run the chosen
   key itself (older tmux asks you to press it)
-- For `tmux-agent-picker`: `fzf` 0.27.0 or newer, tmux 3.2 or newer, and a
-  tmux config that sets its options (see below)
+- For `tmux-agent-picker`: `fzf` 0.27.0 or newer, and a tmux config that
+  sets its options (see below)
 
 ## Install
 
@@ -177,12 +180,11 @@ standard output instead, so a binding can route them elsewhere.
 Clipboard targeting validates the exact client name/TTY instead of choosing
 the most recently active attachment: without `clip`, it looks the name up in
 `tmux list-clients`, since `display-message -p -c` answers for the most
-recently active client and tmux 3.2 takes no argument to `-c`. It does not
-pin a process generation across detach/reconnect and reuse of the same
-terminal name. With `--client`, with or without `clip`, the command's messages
-go to that client, except on tmux 3.2, which cannot aim a message at one
-client. When `clip` copies but reports something, such as history it could
-not record, the copied message includes that report.
+recently active client. It does not pin a process generation across
+detach/reconnect and reuse of the same terminal name. With `--client`, with
+or without `clip`, the command's messages go to that client, and tmux drops
+them if it has gone. When `clip` copies but reports something, such as
+history it could not record, the copied message includes that report.
 
 #### Prompt format
 

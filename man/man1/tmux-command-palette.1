@@ -61,13 +61,16 @@ from the binding.
 Print the entries the popup would offer and exit. Each line holds the visible
 text (note, padding and key), the key table and the key, separated by tabs.
 .SH COMPATIBILITY
+tmux 3.3 or newer. The command asks its server for
+.B #{version}
+and refuses an older one: it shows the reason on the client, as well as on
+standard error, and exits 1. A version it cannot read counts as newer.
+.PP
 Replaying a key needs
 .B send-keys \-K
 from tmux 3.4. On older tmux the command cannot type for the client: after a
 pick it turns the prefix on for a prefix binding and shows a message naming
-the key to press, so one key press runs the binding. tmux 3.2 cannot target a
-message at a client, so there the message goes to the session's most recently
-active client.
+the key to press, so one key press runs the binding.
 .PP
 Without
 .BR fzf (1)
@@ -82,8 +85,8 @@ A binding was replayed or named, the popup was cancelled, or a missing
 or an empty list was reported through tmux.
 .TP
 .B 1
-tmux could not open the popup, for example for an unknown client, or another
-tmux command failed.
+The tmux server is older than 3.3, tmux could not open the popup, for example
+for an unknown client, or another tmux command failed.
 .TP
 .B 64
 The arguments were invalid.

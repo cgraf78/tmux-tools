@@ -17,15 +17,12 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import tmux_version
+
 ROOT = Path(__file__).resolve().parent.parent
 PICKER = ROOT / "bin/tmux-agent-picker"
-TMUX = shutil.which("tmux")
+TMUX, _ = tmux_version.require_tmux()
 FZF = shutil.which("fzf")
-if TMUX is None:
-    if os.environ.get("TMUX_TOOLS_REQUIRE_TMUX") == "1":
-        raise SystemExit("FAIL: real tmux is required")
-    print("SKIP: real tmux unavailable")
-    raise SystemExit(0)
 if FZF is None:
     if os.environ.get("TMUX_TOOLS_REQUIRE_FZF") == "1":
         raise SystemExit("FAIL: real fzf is required")

@@ -12,6 +12,33 @@
 
 set -euo pipefail
 
+# BEGIN tmux_supported
+# Whether the tmux server reporting VERSION (#{version}) is supported; on
+# refusal, tmux_refusal holds the message. master and openbsd-* are newer
+# than any release; otherwise one leading next- is ignored and the leading
+# MAJOR.MINOR compares, so 3.3a, 3.3-rc and next-3.3 read as 3.3. A version
+# this cannot read counts as newest. Every copy is identical (see
+# test/tmux-tools-test).
+tmux_minimum=3.3
+tmux_supported() {
+  local version=${1#tmux } major minor
+  local floor_major=${tmux_minimum%%.*} floor_minor=${tmux_minimum#*.}
+  tmux_refusal=
+  case $version in master | openbsd-*) return 0 ;; esac
+  version=${version#next-}
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  case $version:$major in *.*:[0-9]*) ;; *) return 0 ;; esac
+  case $major$minor in '' | *[!0-9]*) return 0 ;; esac
+  if ((10#$major > floor_major || (10#$major == floor_major && 10#$minor >= floor_minor))); then
+    return 0
+  fi
+  tmux_refusal="needs tmux $tmux_minimum or newer (server is ${1#tmux })"
+  return 1
+}
+# END tmux_supported
+
 usage() {
   printf 'usage: tmux-copy-last-output [--print] [--pane PANE] [--client CLIENT] [positive-count]\n' >&2
   exit 64
@@ -52,6 +79,25 @@ fi
 # Normalize leading zeroes so later string and arithmetic consumers always see
 # an unambiguous base-10 value.
 count="${count#"${count%%[!0]*}"}"
+
+# Tell the pressing client. tmux drops a message for a client that has gone,
+# silently; it never goes to another client in its place.
+notify() {
+  if [[ -n "$client" ]]; then
+    tmux display-message -c "$client" -t "$pane" "$1"
+  else
+    tmux display-message "$1"
+  fi
+}
+
+# An older server is refused before anything else is asked of it. A server
+# that does not answer is not refused here; the calls below report it.
+if version=$(tmux display-message -p '#{version}' 2>/dev/null) &&
+  ! tmux_supported "$version"; then
+  printf 'tmux-copy-last-output: %s\n' "$tmux_refusal" >&2
+  notify "tmux-copy-last-output: $tmux_refusal" 2>/dev/null || true
+  exit 1
+fi
 
 # Search the last 10,000 lines. The old 500-line window lost a command whose
 # own output scrolled its prompt out of range, which is exactly when copying
@@ -123,18 +169,6 @@ END {
 }
 ') || true
 
-# Tell the pressing client. tmux 3.2 cannot aim a message at one client
-# (display-message takes no argument to -c there), so there it goes to the
-# client tmux picks, which may be another session's.
-notify() {
-  if [[ -n "$client" ]]; then
-    tmux display-message -c "$client" -t "$pane" "$1" 2>/dev/null ||
-      tmux display-message -t "$pane" "$1"
-  else
-    tmux display-message "$1"
-  fi
-}
-
 if [[ -z "$output" ]]; then
   notify "No command output found"
   # Both modes report it, but only a printing caller gets a status, so a
@@ -179,7 +213,7 @@ elif [[ -n "$client" ]]; then
   # Let tmux deliver OSC 52 to the initiating client. An implicit client lookup
   # can select a different machine attached to this same server, so match the
   # exact name among the attached clients: display-message -p -c answers for
-  # the most recently active client, and tmux 3.2 takes no argument to -c.
+  # the most recently active client.
   clients=$(tmux list-clients -F '#{client_name}') ||
     fail_copy tmux 'could not list tmux clients'
   [[ $'\n'"$clients"$'\n' == *$'\n'"$client"$'\n'* ]] ||

@@ -14,6 +14,33 @@
 
 set -euo pipefail
 
+# BEGIN tmux_supported
+# Whether the tmux server reporting VERSION (#{version}) is supported; on
+# refusal, tmux_refusal holds the message. master and openbsd-* are newer
+# than any release; otherwise one leading next- is ignored and the leading
+# MAJOR.MINOR compares, so 3.3a, 3.3-rc and next-3.3 read as 3.3. A version
+# this cannot read counts as newest. Every copy is identical (see
+# test/tmux-tools-test).
+tmux_minimum=3.3
+tmux_supported() {
+  local version=${1#tmux } major minor
+  local floor_major=${tmux_minimum%%.*} floor_minor=${tmux_minimum#*.}
+  tmux_refusal=
+  case $version in master | openbsd-*) return 0 ;; esac
+  version=${version#next-}
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  case $version:$major in *.*:[0-9]*) ;; *) return 0 ;; esac
+  case $major$minor in '' | *[!0-9]*) return 0 ;; esac
+  if ((10#$major > floor_major || (10#$major == floor_major && 10#$minor >= floor_minor))); then
+    return 0
+  fi
+  tmux_refusal="needs tmux $tmux_minimum or newer (server is ${1#tmux })"
+  return 1
+}
+# END tmux_supported
+
 usage() {
   printf '%s\n' 'usage: tmux-agent-picker --socket SOCKET --client CLIENT' \
     '       tmux-agent-picker --socket SOCKET --list [--client CLIENT]' \
@@ -100,12 +127,12 @@ client_gone() {
   ((status == 1))
 }
 
-# The one guard on a failing exit. tmux 3.2a crashes its server when a
-# blocking run-shell from a key binding exits non-zero after the client that
-# pressed the key has detached, so a failure for a client that has gone
-# exits 0, quietly: there is nobody left to tell. fail() asks first, before
-# any message could reach another client; this trap covers every other way
-# out, and removes the popup's temporary directory.
+# The one guard on a failing exit: a failure for a client that has gone
+# exits 0, quietly, since nobody is left to tell. (tmux 3.2a, older than any
+# supported tmux, also crashed its server when a key binding's blocking
+# run-shell exited non-zero after its client detached.) fail() asks first,
+# before any message could reach another client; this trap covers every
+# other way out, and removes the popup's temporary directory.
 work=''
 # shellcheck disable=SC2329 # The EXIT trap runs it.
 on_exit() {
@@ -180,10 +207,11 @@ agentish='#{?#{||:#{E:@pane_agent},#{E:@pane_interactive}},1,0}'
 text="L #{pane_id} #{session_id} $location${nl}B #{pane_id} #{session_id} $agentish $basename${nl}X #{pane_id} #{session_id} $label"
 clients='C #{client_control_mode} #{pane_id} #{client_name}'
 # The options without which the rows would be wrong or missing with no word
-# said, so their absence is an error: R lists those the config leaves unset
-# (a config can still set one to 0). The others are optional.
+# said, so their absence is an error: R carries the server's version, then
+# lists those the config leaves unset (a config can still set one to 0). The
+# others are optional.
 required_options='@window_counted @pane_agent @pane_jump_failed @pane_jump_waiting @pane_jump_done @pane_jump_working'
-required='R'
+required='R #{version}'
 for option in $required_options; do
   required+="#{?#{==:#{$option},}, $option,}"
 done
@@ -298,17 +326,11 @@ render() {
 }
 
 # Show a message on the client, with # doubled so tmux shows it as written.
-# tmux 3.2 takes display-message's -c as a flag without a value and rejects
-# the value with its usage line: only then does the message go without -c,
-# to the session's most recently active client. tmux 3.3 and later drop a
-# message for a client that has gone, silently. Any other failure, such as a
-# server that cannot be reached, returns 1; the message never goes to
-# another client in its place.
+# tmux drops a message for a client that has gone, silently. Any failure,
+# such as a server that cannot be reached, returns 1; the message never goes
+# to another client in its place.
 message() {
-  local text=${1//\#/##} error
-  error=$(tm display-message -c "$client" "$text" 2>&1) && return 0
-  [[ $error == 'usage: display-message '* ]] || return 1
-  tm display-message "$text" 2>/dev/null
+  tm display-message -c "$client" "${1//\#/##}" 2>/dev/null
 }
 
 # A notice for the client, on stderr when tmux cannot be reached.
@@ -317,7 +339,7 @@ notice() {
 }
 
 # Fail loudly. run-shell discards a command's stderr unless given -E, which
-# tmux 3.2 lacks, so the client gets the reason as a message too.
+# arrived in tmux 3.6, so the client gets the reason as a message too.
 fail() {
   client_gone && exit 0
   printf 'tmux-agent-picker: %s\n' "$1" >&2
@@ -344,8 +366,12 @@ fi
 ask snapshot
 state=$reply
 missing=${state%%$'\n'*}
-[[ $missing == R* ]] || fail 'tmux answered the snapshot with something unexpected'
-missing=${missing#R}
+[[ $missing == 'R '* ]] || fail 'tmux answered the snapshot with something unexpected'
+missing=${missing#R }
+version=${missing%% *}
+missing=${missing#"$version"}
+# An older server's config refuses to load, so this comes first.
+tmux_supported "$version" || fail "$tmux_refusal"
 [[ -z $missing ]] ||
   fail "the tmux config does not set$missing (see tmux-agent-picker(1))"
 
@@ -447,8 +473,8 @@ if ! valid_id % "$pane" || ! valid_id @ "$window" || ! valid_id '$' "$session"; 
 fi
 
 # Find the exact client as it is now, and keep its current session:
-# display-message -c answers for another client, and tmux 3.2 takes no
-# argument to it. A client that has gone or turned control mode gets nothing.
+# display-message -c answers for another client. A client that has gone or
+# turned control mode gets nothing.
 client_status=0
 find_client || client_status=$?
 case $client_status in

@@ -7,7 +7,6 @@ import json
 import os
 import pty
 import select
-import shutil
 import signal
 import subprocess
 import tempfile
@@ -15,13 +14,10 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import tmux_version
+
 ROOT = Path(__file__).resolve().parent.parent
-TMUX = shutil.which("tmux")
-if TMUX is None:
-    if os.environ.get("TMUX_TOOLS_REQUIRE_TMUX") == "1":
-        raise SystemExit("FAIL: real tmux is required")
-    print("SKIP: real tmux unavailable")
-    raise SystemExit(0)
+TMUX, _ = tmux_version.require_tmux()
 
 
 def poll(label: str, read: Callable[[], str], match: Callable[[str], bool]) -> str:

@@ -9,6 +9,33 @@
 # once to every client of their session with --session ID and no --print.
 set -uo pipefail
 
+# BEGIN tmux_supported
+# Whether the tmux server reporting VERSION (#{version}) is supported; on
+# refusal, tmux_refusal holds the message. master and openbsd-* are newer
+# than any release; otherwise one leading next- is ignored and the leading
+# MAJOR.MINOR compares, so 3.3a, 3.3-rc and next-3.3 read as 3.3. A version
+# this cannot read counts as newest. Every copy is identical (see
+# test/tmux-tools-test).
+tmux_minimum=3.3
+tmux_supported() {
+  local version=${1#tmux } major minor
+  local floor_major=${tmux_minimum%%.*} floor_minor=${tmux_minimum#*.}
+  tmux_refusal=
+  case $version in master | openbsd-*) return 0 ;; esac
+  version=${version#next-}
+  major=${version%%.*}
+  minor=${version#*.}
+  minor=${minor%%[!0-9]*}
+  case $version:$major in *.*:[0-9]*) ;; *) return 0 ;; esac
+  case $major$minor in '' | *[!0-9]*) return 0 ;; esac
+  if ((10#$major > floor_major || (10#$major == floor_major && 10#$minor >= floor_minor))); then
+    return 0
+  fi
+  tmux_refusal="needs tmux $tmux_minimum or newer (server is ${1#tmux })"
+  return 1
+}
+# END tmux_supported
+
 usage() {
   printf '%s\n' 'usage: term-pane-state --socket SOCKET (--session ID [--print] | --client NAME --client-pid PID --client-created EPOCH)' >&2
   exit 64
@@ -38,10 +65,11 @@ query() {
 # Some non-UTF8 tmux job locales rewrite literal tabs as underscores. Keep
 # fixed machine fields first and the terminal client name last, like tmux's
 # other exact-client adapters; no display strings determine behavior.
-# list-clients expands the selected pane and predicates for each client,
-# including tmux 3.2a where display-message -c rejects a client argument.
-# A config older than @pane_waiting expands it empty, which reads as 0.
-client_format='#{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_waiting},1,0} #{?#{E:@pane_failed},1,0} #{client_name}'
+# list-clients expands the selected pane and predicates for each client
+# itself; display-message -c would answer for the most recently active one.
+# A config older than @pane_waiting expands it empty, which reads as 0. The
+# server's version leads each row, after a v so an empty one keeps its field.
+client_format='v#{version} #{client_pid} #{client_created} #{session_id} #{client_control_mode} #{client_termname} #{client_tty} #{pane_id} #{?#{E:@pane_pending},1,0} #{?#{E:@pane_waiting},1,0} #{?#{E:@pane_failed},1,0} #{client_name}'
 
 # Check one client row's server-owned fields, then keep its selected pane and
 # that pane's predicates. The tty comes only from the server, never from an
@@ -56,11 +84,20 @@ accept_client() {
   client_failed=$failed
 }
 
+# Refuse an older server, whose config refuses to load: exit 1 and say why.
+supported_server() {
+  tmux_supported "${1#v}" && return 0
+  printf 'term-pane-state: %s\n' "$tmux_refusal" >&2
+  exit 1
+}
+
 # Resolve one live client, rejecting control mode and identity reuse.
 resolve_client() {
-  local rows name pid created tty scope _term control pane pending waiting failed extra
+  local rows version name pid created tty scope _term control pane pending waiting failed extra
   rows=$(query list-clients -F "$client_format") || return 1
-  while read -r pid created scope control _term tty pane pending waiting failed name extra; do
+  while read -r version pid created scope control _term tty pane pending waiting failed name extra; do
+    [ -n "$version$pid$name" ] || continue
+    supported_server "$version"
     [ "$name" = "$client" ] && [ "$pid" = "$client_pid" ] &&
       [ "$created" = "$client_created" ] && [ "$control" = 0 ] &&
       [ -z "$extra" ] || continue
@@ -75,13 +112,14 @@ resolve_client() {
 # own selected pane's predicates. A session without one has nothing to do; a
 # client that cannot publish fails the run without stopping the others.
 publish_session() {
-  local rows name pid created tty scope _term control pane pending waiting failed extra
+  local rows version name pid created tty scope _term control pane pending waiting failed extra
   local status=0
   command -v termnav >/dev/null 2>&1 || return 1
   rows=$(query list-clients -t "$session" -F "$client_format") || return 1
   # The loop reads fd 3 so nothing it runs can consume the remaining rows.
-  while read -r pid created scope control _term tty pane pending waiting failed name extra <&3; do
-    [ -n "$pid$name" ] || continue
+  while read -r version pid created scope control _term tty pane pending waiting failed name extra <&3; do
+    [ -n "$version$pid$name" ] || continue
+    supported_server "$version"
     [ "$control" = 0 ] || continue
     if [ "$scope" != "$session" ] || [ -z "$name" ] || [ -n "$extra" ] ||
       ! valid_number "$pid" || [ "$pid" = 0 ] || ! valid_number "$created" ||

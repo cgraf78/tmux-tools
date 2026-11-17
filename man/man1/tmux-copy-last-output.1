@@ -68,9 +68,7 @@ Without clip, an explicit client still uses tmux's OSC 52 transport, after
 finding that exact name among
 .BR "tmux list-clients" .
 .B display-message \-p \-c
-cannot check it: it answers for the most recently active client, and tmux
-3.2 takes no argument to
-.BR \-c .
+cannot check it: it answers for the most recently active client.
 Without
 an explicit client the standalone command tries
 .BR pbcopy (1)
@@ -86,9 +84,13 @@ is set. It never guesses an OSC 52 destination client. A missing initiating
 client does not fall back to copying on the remote host.
 .PP
 With an explicit client, with or without clip, the command's messages go to
-that client. tmux 3.2 cannot aim a message at one client, so there they go
-to the client tmux picks. When clip copies but reports something, such as
+that client, and tmux drops them if it has gone. When clip copies but reports something, such as
 history it could not record, the copied message includes that report.
+.SH COMPATIBILITY
+tmux 3.3 or newer. The command asks its server for
+.B #{version}
+and refuses an older one: it shows the reason on the client, as well as on
+standard error, and exits 1. A version it cannot read counts as newer.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -97,8 +99,8 @@ The command copied or printed output, reported that no block was found without
 or displayed a clipboard failure message through tmux.
 .TP
 .B 1
-An unexpected shell, tmux, or parsing failure occurred before tmux messaging
-could report the result.
+The tmux server is older than 3.3, or an unexpected shell, tmux, or parsing
+failure occurred before tmux messaging could report the result.
 .TP
 .B 3
 With

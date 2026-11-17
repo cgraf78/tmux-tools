@@ -33,9 +33,11 @@ case "$1" in
     cat "$TMUX_CAPTURE_FILE"
     ;;
   display-message)
-    # tmux 3.2 takes no argument to -c.
-    if [[ -n "${TMUX_TEST_NO_C:-}" && " $* " == *' -c '* ]]; then
-      exit 1
+    # tmux drops a message for a client that has gone, silently.
+    if [[ "${2:-}" == "-p" && "${3:-}" == "#{version}" ]]; then
+      printf '%s\n' "${TMUX_TEST_VERSION-3.4}"
+    elif [[ -n "${TMUX_TEST_CLIENT_GONE:-}" && " $* " == *' -c '* ]]; then
+      exit 0
     elif [[ "${2:-}" == "-p" && "${3:-}" == "#{client_tty}" ]]; then
       printf '%s\n' "${TMUX_CLIENT_TTY:-}"
     else
@@ -252,6 +254,29 @@ _assert_contains "copy noted: the Copied message carries clip's notices, one per
   'Copied last command + output to clipboard (clip: history must be a private directory; clip: history unavailable; copied without recording it)' \
   "$(cat "$tmp/noted-message.log")"
 
+# An older server is refused before the pane is read, and the client is
+# told why.
+TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/old-message.log" \
+  TMUX_CALL_LOG="$tmp/old-tmux.log" TMUX_TEST_VERSION=3.2a \
+  PBCOPY_OUT="$tmp/old-copied" PATH="$mock_bin:$PATH" \
+  "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007 2>"$tmp/old.err"
+_assert_exit "copy on an older tmux: fails" 1 "$?"
+_assert_file_content "copy on an older tmux: tells the pressing client" \
+  'display-message -c /dev/ttys007 -t %7 tmux-copy-last-output: needs tmux 3.3 or newer (server is 3.2a)' \
+  "$tmp/old-message.log"
+_assert_file_content "copy on an older tmux: says so on stderr" \
+  'tmux-copy-last-output: needs tmux 3.3 or newer (server is 3.2a)' "$tmp/old.err"
+_assert_not_contains "copy on an older tmux: reads no pane" \
+  'capture-pane' "$(cat "$tmp/old-tmux.log")"
+_assert_file_missing "copy on an older tmux: copies nothing" "$tmp/old-copied"
+for version in master ''; do
+  rm -f "$tmp/new-copied"
+  TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/new-message.log" \
+    TMUX_TEST_VERSION=$version PBCOPY_OUT="$tmp/new-copied" PATH="$mock_bin:$PATH" \
+    "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007
+  _assert_exit "copy on tmux '$version': succeeds" 0 "$?"
+done
+
 # Restrict PATH so the installed host clip/native clipboard cannot win this
 # standalone test. The tmux stub records transport, never a real user server.
 standalone_bin="$tmp/standalone-bin"
@@ -275,19 +300,19 @@ _assert_not_contains "copy standalone: never asks display-message -c for the cli
   'display-message -p -c' "$(cat "$tmp/standalone-tmux.log")"
 _assert_contains "copy standalone: tells the pressing client" \
   '-c /dev/ttys007 -t %7 Copied last command' "$(cat "$tmp/standalone-message.log")"
-# tmux 3.2 takes no argument to -c: the copy still works and the message
-# still shows, on the client tmux picks.
-rm -f "$tmp/standalone-copied" "$tmp/standalone-tmux.log"
-TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/standalone-old-message.log" \
-  TMUX_CALL_LOG="$tmp/standalone-tmux.log" TMUX_TEST_NO_C=1 \
+# The client leaves before its message: tmux drops it, and no other client
+# gets it in its place.
+rm -f "$tmp/standalone-copied" "$tmp/standalone-tmux.log" "$tmp/standalone-gone-message.log"
+TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/standalone-gone-message.log" \
+  TMUX_CALL_LOG="$tmp/standalone-tmux.log" TMUX_TEST_CLIENT_GONE=1 \
   PBCOPY_OUT="$tmp/standalone-copied" PATH="$standalone_bin" \
   "$ROOT/bin/tmux-copy-last-output" --pane %7 --client /dev/ttys007
-_assert_exit "copy standalone on tmux 3.2: succeeds" 0 "$?"
-_assert_file_content "copy standalone on tmux 3.2: copies the content" \
+_assert_exit "copy standalone, client gone before its message: succeeds" 0 "$?"
+_assert_file_content "copy standalone, client gone before its message: copies the content" \
   '$ echo two
 two output' "$tmp/standalone-copied"
-_assert_contains "copy standalone on tmux 3.2: the message falls back to the pane" \
-  '-t %7 Copied last command' "$(cat "$tmp/standalone-old-message.log")"
+_assert_eq "copy standalone, client gone before its message: no other client is told" \
+  '' "$(cat "$tmp/standalone-gone-message.log" 2>/dev/null)"
 rm -f "$tmp/standalone-copied" "$tmp/standalone-tmux.log"
 TMUX_CAPTURE_FILE="$tmp/pane.txt" TMUX_MESSAGE_LOG="$tmp/standalone-missing-message.log" \
   TMUX_CALL_LOG="$tmp/standalone-tmux.log" TMUX_TEST_CLIENT_NAME=/dev/ttys008 \
