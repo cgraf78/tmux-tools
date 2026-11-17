@@ -113,7 +113,8 @@ geom_tab=$(awk '/^geom_fields=/ { on = 1 } on { print } on && /'"'"'$/ { exit }'
 check 'drift: the spelled-out g_* names match geom_fields' \
   "$(printf '%s\n' "$geom_tab" | tr -d "'" | tr ' ' '\n' | sed -n 's/.*:\(g_[a-z]*\)$/\1/p' | sort)" \
   "$(awk '/^g_id=/ { on = 1 } on && /^g_/ { print; next } on { exit }' "$TOOL" | tr ' ' '\n' | sed -n "s/^\(g_[a-z]*\)=''$/\1/p" | sort)"
-check 'drift: geom_fields has no control bytes' 0 "$(printf '%s' "$geom_tab" | tr -d '\n' | LC_ALL=C tr -d '[:print:]' | wc -c | tr -d ' ')"
+# A byte range, not [:print:]: busybox tr has no [:print:] class.
+check 'drift: geom_fields has no control bytes' 0 "$(printf '%s' "$geom_tab" | tr -d '\n' | LC_ALL=C tr -d ' -~' | wc -c | tr -d ' ')"
 
 # The top-level dispatch and each parser's case labels are exactly their
 # options.
