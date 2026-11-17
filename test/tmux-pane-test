@@ -117,8 +117,11 @@ check 'rg_i7 the tool never waits with read -t' '' "$(grep -nE 'read +(-[a-zA-Z]
 iface=$("$BASH" "$TOOL" --interface)
 check 'drift: --interface exits 0' 0 "$?"
 iline() { printf '%s\n' "$iface" | awk -v k="$1" '$1 == k { for (i = 2; i <= NF; i++) print $i }'; }
+# Option words are compared as bytes, A-Z, a-z and - only, on both sides, so
+# a stray byte (a CR, a locale's wider [A-Za-z]) cannot make one word differ.
+optnorm() { LC_ALL=C sed 's/[^A-Za-z-]//g'; }
 subs=$(iline subcommands | tr '\n' ' ')
-sub_opts() { iline "$1" | sort -u; }
+sub_opts() { iline "$1" | optnorm | LC_ALL=C sort -u; }
 all_opts=$(for s in $subs top; do iline "$s"; done | sort -u)
 exit_codes=$(iline exit)
 
@@ -135,7 +138,7 @@ check 'drift: geom_fields has no control bytes' 0 "$(printf '%s' "$geom_tab" | t
 # options.
 top_labels=$(awk '/^case \$sub in$/ { on = 1; next } on && /^esac/ { exit }
   on && /^  [^ ].*\)/ { l = $0; sub(/^ +/, "", l); sub(/\).*/, "", l)
-    n = split(l, a, / \| /); for (i = 1; i <= n; i++) if (a[i] ~ /^-/) print a[i] }' "$TOOL" | sort -u)
+    n = split(l, a, / \| /); for (i = 1; i <= n; i++) if (a[i] ~ /^-/) print a[i] }' "$TOOL" | LC_ALL=C sort -u)
 check 'drift: the dispatch accepts exactly the top-level options' "$(sub_opts top)" "$top_labels"
 for sub in $subs; do
   labels=$(awk -v f="cmd_$sub()" '
@@ -145,26 +148,36 @@ for sub in $subs; do
       l = $0; sub(/^ +/, "", l); sub(/\).*/, "", l)
       n = split(l, a, / \| /)
       for (i = 1; i <= n; i++) if (a[i] ~ /^-/ && a[i] !~ /[*?]/) print a[i]
-    }' "$TOOL" | sort -u)
+    }' "$TOOL" | LC_ALL=C sort -u)
   check "drift: cmd_$sub parses exactly its listed options" "$(sub_opts "$sub")" "$labels"
 done
 
 # Option words a text uses: -x or --word, outside quotes, at a word start.
 opt_words() {
-  sed "s/'[^']*'//g; s/\\\\-/-/g; s/\\\\f[BIRP]//g" "$@" |
-    grep -oE '(^|[][ (|,`])--?[A-Za-z][A-Za-z-]*' | sed 's/^[^-]*//' | sort -u
+  LC_ALL=C sed "s/'[^']*'//g; s/\\\\-/-/g; s/\\\\f[BIRP]//g" "$@" |
+    LC_ALL=C grep -oE '(^|[][ (|,`])--?[A-Za-z][A-Za-z-]*' |
+    LC_ALL=C sed 's/^[^-]*//' | optnorm | LC_ALL=C sort -u
 }
-not_listed() { # words in $1 that $2 does not list
-  printf '%s\n' "$1" | while IFS= read -r w; do
-    [ -z "$w" ] || printf '%s\n' "$2" | grep -qxF -- "$w" || printf '%s ' "$w"
-  done
+# words_minus A B [SKIP...]: the words of A (one per line) that B lacks,
+# space-separated. A word that differs is also dumped with od -c on stderr,
+# so a byte-level mismatch on some platform can be read from the log.
+words_minus() {
+  local a=$1 b=$2 out
+  shift 2
+  out=$(
+    printf '%s\n' "$b" | optnorm >"$tmp/wm.b"
+    printf '%s\n' "$a" | optnorm | LC_ALL=C awk -v skip=" $* " -v bf="$tmp/wm.b" '
+      BEGIN { while ((getline l < bf) > 0) have[l] = 1 }
+      $0 != "" && index(skip, " " $0 " ") == 0 && !($0 in have) { printf "%s ", $0 }'
+  )
+  if [ -n "$out" ]; then
+    printf 'differing words: ' >&2
+    printf '%s' "$out" | od -c >&2
+  fi
+  printf '%s' "$out"
 }
-missing_from() { # options in $1 that the option words $2 lack (whole words)
-  printf '%s\n' "$1" | while IFS= read -r w; do
-    case $w in '' | - | -- | -h | --help) continue ;; esac
-    printf '%s\n' "$2" | grep -qxF -- "$w" || printf '%s ' "$w"
-  done
-}
+not_listed() { words_minus "$1" "$2"; }                  # words in $1 that $2 does not list
+missing_from() { words_minus "$1" "$2" - -- -h --help; } # options in $1 that the words $2 lack
 
 # Usage and help: every option word is listed for the subcommand whose lines
 # use it, and every listed option is shown. Lines naming tmux's own commands
@@ -1482,9 +1495,10 @@ check_contains 'parser: and read --last-output 2 keeps it apart' "x y" \
 # last lines, is not at a prompt: the cursor is not on a bare line 2.
 start=$SECONDS
 waitp 'parser: a fake glued prompt from a running command (exit)' 0 \
-  "printf 'x me@host:/repo (main)\\n\$ x'; sleep 3; echo; echo FINISHED" --timeout 15
+  "printf 'x me@host:/repo (main)\\n\$ x'; sleep 3; echo; echo FIN''ISHED" --timeout 15
 check 'parser: the wait lasted until the command finished' 1 "$([ $((SECONDS - start)) -ge 3 ] && echo 1 || echo 0)"
-check_contains 'parser: and captured its end' FINISHED "$(cat "$tmp/w.out")"
+# The echoed command line spells it FIN''ISHED; only the output is FINISHED.
+check 'parser: and captured its end' 1 "$(grep -cx FINISHED "$tmp/w.out")"
 # Text that starts with a space is still exact.
 waitp 'rg_m18 text with a leading space (exit)' 0 ' echo spaced' --timeout 10
 check_contains 'rg_m18 text with a leading space is exact' 'exact=yes' "$(cat "$tmp/w.err")"

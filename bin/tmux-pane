@@ -39,12 +39,12 @@ tp_results='done waiting blocked no-start timeout gone error'
 # As the result line prints them (spaces become dashes there).
 tp_reasons='trimmed shrunk resized grid-top-changed cleared blank-gap echo-moved alternate-screen generation-changed weak-marker unstable'
 tp_default_timeout=110 tp_default_start_timeout=10 tp_default_settle=1
-# The only version gate: 3.3 is the oldest supported tmux, the floor the
-# cgraf78 tmux repositories share. 3.2 was dropped for its quirks: no
-# scroll-on-clear option, delete-buffer -b on a missing name deletes the
-# newest buffer, and -J captures keep trailing spaces. (The tool's commands,
-# list-panes -f, #{e|+:} and set-option -pF, are all older.) Everything newer
-# is detected from tmux itself, never from its version (see "capabilities").
+# The only version gate: 3.3, the oldest tmux this tool supports. 3.2 lacks
+# the scroll-on-clear option, deletes the newest buffer on delete-buffer -b
+# of a missing name, and keeps trailing spaces in -J captures. (The commands
+# the tool relies on, list-panes -f, #{e|+:} and set-option -pF, are older.)
+# Everything newer is detected from tmux itself, never from its version (see
+# "capabilities").
 tp_tmux_floor='3 3'
 interface_text() {
   local sub opts
