@@ -1,4 +1,4 @@
-.TH TERM-NOTIFY-SOUND 1 "2026-11-11" "tmux-tools" "User Commands"
+.TH TERM-NOTIFY-SOUND 1 "2026-11-18" "tmux-tools" "User Commands"
 .SH NAME
 term-notify-sound \- emit a terminal-aware completion notification
 .SH SYNOPSIS
@@ -9,6 +9,11 @@ term-notify-sound \- emit a terminal-aware completion notification
 .IR kind ]
 .RB [ \-\-exit-status
 .IR code ]
+.br
+.B term-notify-sound \-\-audit
+.RB [ \-\-since
+.IR minutes ]
+.RB [ \-\-raw ]
 .SH DESCRIPTION
 .B term-notify-sound
 plays a lightweight terminal notification by emitting one standard terminal
@@ -45,6 +50,58 @@ pane's own pty, that pane is marked directly. The helper runs the
 beside it, falling back to the one on
 .BR PATH ;
 a missing helper or a failed mark is ignored.
+.SS Call log
+Every call that gets past argument checking appends one tab-separated line to
+the call log, after the bell, so a stray bell can be traced to whatever rang
+it. The fields are epoch seconds, UTC time, the route
+.RB ( tty
+for the terminal,
+.B pane
+for the pane fallback,
+.B none
+when nothing rang), the kind, the exit status, the owner, the
+.B TMUX_PANE
+of the caller, its tmux server as the socket and server pid from
+.BR TMUX ,
+the caller's ancestor processes by program name, nearest first and joined by
+.BR < ,
+and the direct caller's command line, cut to 200 characters with control
+characters turned into spaces. A field with no value is
+.BR \- .
+Common shells and interpreters are named by the script they run, so a hook
+run as
+.B bash \-e /path/agent-hook-stop
+reads as
+.BR agent-hook-stop ;
+an inline
+.B sh \-c
+script keeps the shell's name, and its text is in the command line field.
+Up to six ancestors are recorded.
+.PP
+The log is created private (mode 0600, in a directory created 0700) and is
+rotated to
+.I \&.1
+once it passes 1 MiB, so it normally keeps about 2 MiB at most. A lock keeps
+two calls from rotating at once; a lock left by a call that died is cleared
+once the log reaches 2 MiB. The log can hold the start
+of a caller's command line, arguments included. Logging is best effort: when
+the log cannot be written the call still succeeds silently.
+.PP
+Only bells rung through this command are logged; a bell another program
+writes to the terminal leaves no line. A caller that starts the command in
+the background and exits first is logged with the process that adopted it,
+such as
+.BR systemd ,
+as its parent. A call over ssh logs on the remote host.
+.PP
+.B \-\-audit
+reads the log, and the rotated copy, and prints the well-formed calls of the
+last 60 minutes grouped by pane, server, route, kind and ancestor chain,
+busiest first, with each group's count, latest time and latest command line.
+A pane is also shown as
+.IR session : window . pane
+when its server, by socket and pid, still runs, since pane ids restart with
+every server. With logging off it says so.
 .SH OPTIONS
 .TP
 .BI \-\-owner " pid"
@@ -80,17 +137,46 @@ renders the status and clears it along with the pending mark when visited.
 Status is accepted only through this option, not through the environment.
 It is valid only with kind
 .BR done .
+.TP
+.B \-\-audit
+Summarize the call log instead of ringing; see
+.BR "Call log" .
+It must come first.
+.TP
+.BI \-\-since " minutes"
+With
+.BR \-\-audit ,
+cover the last
+.I minutes
+instead of 60: a decimal number of at most nine digits.
+.TP
+.B \-\-raw
+With
+.BR \-\-audit ,
+print the window's well-formed log lines unchanged instead of the summary.
 .SH ENVIRONMENT
 .TP
 .B TERM_NOTIFY_TTY
 Override the primary terminal device, which defaults to
 .IR /dev/tty .
 The tmux pane TTY remains the fallback when this device cannot be opened.
+.TP
+.B TERM_NOTIFY_LOG
+Absolute path of the call log. Set it empty, or to a relative path, to turn
+logging off. Without it the log is
+.IR $XDG_STATE_HOME/tmux-tools/term-notify-sound.log ,
+or
+.I ~/.local/state/tmux-tools/term-notify-sound.log
+when
+.B XDG_STATE_HOME
+is unset; with neither variable nor
+.B HOME
+set, nothing is logged.
 .SH EXIT STATUS
 .TP
 .B 0
 The notification was emitted or intentionally ignored after best-effort
-fallbacks.
+fallbacks, or the audit ran.
 .TP
 .B 64
 The arguments were invalid; nothing rang.
