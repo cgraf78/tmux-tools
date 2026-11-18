@@ -497,6 +497,10 @@ after' "$(parse_print "$tmp/status-prompt.txt" 2)"
 echo
 echo "=== term-notify-sound ==="
 
+# Keep every call's log line out of the real state directory; the log tests
+# below set their own path.
+export TERM_NOTIFY_LOG="$tmp/notify-calls.log"
+
 notify_home="$tmp/notify-home"
 direct_vscode_tty="$tmp/direct-vscode.tty"
 env -u TMUX -u XDG_STATE_HOME HOME="$notify_home" TERM_PROGRAM=xterm.js \
@@ -808,7 +812,8 @@ for bad_args in '--owner' '--owner ""' '--owner 1 --owner 2' '--pane %1' '--owne
     "$ROOT/bin/term-notify-sound" "$@" 2>&1)
   _assert_exit "notify: arguments $bad_args are a usage error" 64 "$?"
   _assert_eq "notify: arguments $bad_args print usage" \
-    'usage: term-notify-sound [--owner PID] [--kind done|waiting|blocked] [--exit-status CODE]' "$output"
+    'usage: term-notify-sound [--owner PID] [--kind done|waiting|blocked] [--exit-status CODE]
+       term-notify-sound --audit [--since MINUTES] [--raw]' "$output"
 done
 _assert_file_missing "notify: a usage error rings nothing" "$tmp/notifier-bad.tty"
 _assert_file_missing "notify: a usage error changes no pane state" "$tmp/notifier-bad.log"
@@ -826,6 +831,205 @@ _assert_file_content "notify: without term-pane-mark it still emits one BEL" \
   $'\a' "$tmp/lone-notifier.tty"
 _assert_file_missing "notify: without term-pane-mark no pane is marked" \
   "$tmp/lone-notifier.log"
+
+echo
+echo "=== term-notify-sound log ==="
+
+# The log tests walk real ancestors, so their PATH has no ps mock (macOS
+# reads ancestors with ps). Their tmux forwards to the notifier mock above
+# and also answers the audit's per-server pane lookup.
+log_bin="$tmp/log-bin"
+mkdir -p "$log_bin"
+cat >"$log_bin/tmux" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == -S ]]; then
+  [[ "\$2" == "\${TMUX_AUDIT_SOCKET:-}" && "\$3 \$4 \$5 \$6" == "display-message -p -t \${TMUX_AUDIT_PANE:-}" ]] || exit 1
+  printf '%s\n' "\$TMUX_AUDIT_REPLY"
+  exit 0
+fi
+exec "$mock_bin/tmux" "\$@"
+EOF
+chmod +x "$log_bin/tmux"
+# env takes its -u options before any assignment, so pass leading ones on.
+notify_env() {
+  local unset_args=()
+  while [[ ${1:-} == -u ]]; do
+    unset_args+=(-u "$2")
+    shift 2
+  done
+  env -u TMUX -u TMUX_PANE "${unset_args[@]}" PATH="$log_bin:$PATH" "$@"
+}
+
+call_log="$tmp/notify-log/calls.log"
+notify_env TERM_NOTIFY_LOG="$call_log" TMUX=/tmp/tmux-test,123,0 TMUX_PANE=%31 \
+  TMUX_SET_LOG="$tmp/notify-log-mark.log" TERM_NOTIFY_TTY="$tmp/notify-log.tty" \
+  "$ROOT/bin/term-notify-sound" --owner 4242 --exit-status 3
+_assert_exit "notify log: a logged ring succeeds" 0 "$?"
+IFS=$'\t' read -r log_epoch log_time log_route log_kind log_status log_owner log_pane \
+  log_server log_chain log_caller <"$call_log"
+_assert_eq "notify log: one line per call" 1 "$(wc -l <"$call_log" | tr -d ' ')"
+case $log_epoch in '' | *[!0-9]*) log_epoch_ok=no ;; *) log_epoch_ok=yes ;; esac
+_assert_eq "notify log: epoch seconds come first" yes "$log_epoch_ok"
+case $log_time in
+  [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z) log_time_ok=yes ;;
+  *) log_time_ok=no ;;
+esac
+_assert_eq "notify log: the UTC time is ISO 8601" yes "$log_time_ok"
+_assert_eq "notify log: the route names the terminal that rang" tty "$log_route"
+_assert_eq "notify log: kind defaults to done" 'done' "$log_kind"
+_assert_eq "notify log: the exit status is kept" 3 "$log_status"
+_assert_eq "notify log: the owner is kept" 4242 "$log_owner"
+_assert_eq "notify log: the pane is kept" %31 "$log_pane"
+_assert_eq "notify log: the server is TMUX's socket and pid" /tmp/tmux-test,123 "$log_server"
+_assert_eq "notify log: the chain starts at the caller, named by its script" \
+  copy-mark-test "${log_chain%%<*}"
+_assert_contains "notify log: the caller's command line is kept" \
+  test/copy-mark-test "$log_caller"
+_assert_eq "notify log: the log is private" \
+  "$call_log" "$(find "$call_log" -perm 0600)"
+_assert_eq "notify log: a created log directory is private" \
+  "${call_log%/*}" "$(find "${call_log%/*}" -prune -perm 0700)"
+
+notify_env TERM_NOTIFY_LOG="$call_log" TMUX=/tmp/tmux-test,123,0 TMUX_PANE=%32 \
+  TMUX_PANE_TTY="$tmp/notify-log-pane.tty" TERM_NOTIFY_TTY="$tmp/no-such-dir/tty" \
+  "$ROOT/bin/term-notify-sound"
+_assert_eq "notify log: a pane fallback logs route pane" \
+  'pane	%32' "$(tail -n 1 "$call_log" | cut -f3,7)"
+
+notify_env TERM_NOTIFY_LOG="$call_log" TERM_NOTIFY_TTY="$tmp/no-such-dir/tty" \
+  "$ROOT/bin/term-notify-sound" --kind waiting
+_assert_eq "notify log: a call that rang nothing logs route none" \
+  'none	waiting	-	-' "$(tail -n 1 "$call_log" | cut -f3,4,7,8)"
+
+notify_env TERM_NOTIFY_LOG="$call_log" TERM_NOTIFY_TTY="$tmp/notify-log.tty" \
+  "$ROOT/bin/term-notify-sound" --kind idle 2>/dev/null
+_assert_eq "notify log: a usage error logs nothing" \
+  3 "$(wc -l <"$call_log" | tr -d ' ')"
+
+hook_script="$tmp/notify-log/my-hook"
+# A later command keeps bash from exec'ing the notifier in the script's place.
+printf '#!/usr/bin/env bash\n"%s" --kind blocked\nexit $?\n' "$ROOT/bin/term-notify-sound" >"$hook_script"
+notify_env TERM_NOTIFY_LOG="$call_log" TERM_NOTIFY_TTY="$tmp/notify-log.tty" \
+  bash -e "$hook_script" $'odd\targ'
+_assert_eq "notify log: an interpreter is named by the script it runs" \
+  my-hook "$(tail -n 1 "$call_log" | cut -f9 | cut -d'<' -f1)"
+_assert_eq "notify log: control characters in a command line keep the fields" \
+  10 "$(tail -n 1 "$call_log" | awk -F '\t' '{ print NF }')"
+
+notify_env TERM_NOTIFY_LOG= TERM_NOTIFY_TTY="$tmp/notify-log-off.tty" \
+  XDG_STATE_HOME="$tmp/notify-log-off-state" "$ROOT/bin/term-notify-sound"
+_assert_file_content "notify log: an empty TERM_NOTIFY_LOG still rings" \
+  $'\a' "$tmp/notify-log-off.tty"
+_assert_file_missing "notify log: an empty TERM_NOTIFY_LOG writes no log" \
+  "$tmp/notify-log-off-state/tmux-tools/term-notify-sound.log"
+
+mkdir -p "$tmp/notify-log-relative"
+(cd "$tmp/notify-log-relative" &&
+  notify_env TERM_NOTIFY_LOG=calls.log TERM_NOTIFY_TTY="$tmp/notify-log.tty" \
+    "$ROOT/bin/term-notify-sound")
+_assert_file_missing "notify log: a relative TERM_NOTIFY_LOG writes no log" \
+  "$tmp/notify-log-relative/calls.log"
+
+notify_env -u TERM_NOTIFY_LOG XDG_STATE_HOME="$tmp/notify-log-state" \
+  TERM_NOTIFY_TTY="$tmp/notify-log-xdg.tty" "$ROOT/bin/term-notify-sound"
+_assert_eq "notify log: the default log lives under XDG_STATE_HOME" \
+  1 "$(wc -l <"$tmp/notify-log-state/tmux-tools/term-notify-sound.log" | tr -d ' ')"
+
+notify_env -u TERM_NOTIFY_LOG -u XDG_STATE_HOME HOME="$tmp/notify-log-home" \
+  TERM_NOTIFY_TTY="$tmp/notify-log-home.tty" "$ROOT/bin/term-notify-sound"
+_assert_eq "notify log: without XDG_STATE_HOME the log lives under HOME" \
+  1 "$(wc -l <"$tmp/notify-log-home/.local/state/tmux-tools/term-notify-sound.log" | tr -d ' ')"
+
+homeless_err="$tmp/notify-log-homeless.err"
+notify_env -u TERM_NOTIFY_LOG -u HOME -u XDG_STATE_HOME \
+  TERM_NOTIFY_TTY="$tmp/notify-log-homeless.tty" "$ROOT/bin/term-notify-sound" \
+  2>"$homeless_err"
+_assert_exit "notify log: with no state root the ring still succeeds" 0 "$?"
+_assert_eq "notify log: with no state root nothing is reported" "" "$(cat "$homeless_err")"
+
+full_log="$tmp/notify-log-full/calls.log"
+mkdir -p "${full_log%/*}"
+head -c 1048577 /dev/zero | tr '\0' x >"$full_log"
+notify_env TERM_NOTIFY_LOG="$full_log" TERM_NOTIFY_TTY="$tmp/notify-log-full.tty" \
+  "$ROOT/bin/term-notify-sound"
+_assert_eq "notify log: a full log rotates to .1" \
+  1048577 "$(wc -c <"$full_log.1" | tr -d ' ')"
+_assert_eq "notify log: the new log starts with this call" \
+  1 "$(wc -l <"$full_log" | tr -d ' ')"
+_assert_file_missing "notify log: rotation releases its lock" "$full_log.lock"
+
+busy_log="$tmp/notify-log-busy/calls.log"
+mkdir -p "$busy_log.lock"
+head -c 1048577 /dev/zero | tr '\0' x >"$busy_log"
+notify_env TERM_NOTIFY_LOG="$busy_log" TERM_NOTIFY_TTY="$tmp/notify-log-busy.tty" \
+  "$ROOT/bin/term-notify-sound"
+_assert_file_missing "notify log: a held rotation lock skips rotation" "$busy_log.1"
+_assert_eq "notify log: a held rotation lock still appends the call" \
+  1 "$(wc -l <"$busy_log" | tr -d ' ')"
+head -c 2097153 /dev/zero | tr '\0' x >"$busy_log"
+notify_env TERM_NOTIFY_LOG="$busy_log" TERM_NOTIFY_TTY="$tmp/notify-log-busy.tty" \
+  "$ROOT/bin/term-notify-sound"
+_assert_file_missing "notify log: a lock left past twice the limit is cleared" \
+  "$busy_log.lock"
+
+audit_log="$tmp/notify-audit/calls.log"
+mkdir -p "${audit_log%/*}"
+now=$(date +%s)
+audit_line() {
+  printf '%s\t%s\t%s\t%s\t-\t-\t%s\t%s\t%s\t%s\n' "$@"
+}
+{
+  audit_line "$((now - 7200))" 2026-01-01T00:00:00Z tty 'done' %9 /tmp/srv,4242 hook-old\<agent old-caller
+  audit_line "$((now - 90))" 2026-01-01T01:58:30Z tty 'done' %9 /tmp/srv,4242 hook-stop\<agent stop-caller-1
+} >"$audit_log.1"
+{
+  audit_line "$((now - 60))" 2026-01-01T01:59:00Z tty 'done' %9 /tmp/srv,4242 hook-stop\<agent stop-caller-2
+  audit_line "$((now - 30))" 2026-01-01T01:59:30Z tty 'done' %9 /tmp/srv,4242 hook-stop\<agent stop-caller-3
+  audit_line "$((now - 20))" 2026-01-01T01:59:40Z pane waiting %8 /tmp/srv,999 notify\<agent notify-caller
+  # The same pane id on the same socket, from an earlier server.
+  audit_line "$((now - 10))" 2026-01-01T01:59:50Z tty 'done' %9 /tmp/srv,999 old-server\<agent old-caller
+  printf 'garbage line\n'
+  printf '%s\ttorn\n' "$now"
+} >"$audit_log"
+audit_run() {
+  notify_env TERM_NOTIFY_LOG="$audit_log" TMUX_AUDIT_SOCKET=/tmp/srv \
+    TMUX_AUDIT_PANE=%9 TMUX_AUDIT_REPLY='4242 work:1.0' \
+    "$ROOT/bin/term-notify-sound" --audit "$@"
+}
+audit_out=$(audit_run)
+_assert_exit "notify audit: succeeds" 0 "$?"
+_assert_contains "notify audit: counts well-formed calls in the window, .1 included" \
+  "5 calls in the last 60 minutes" "$audit_out"
+audit_first=$(printf '%s\n' "$audit_out" | sed -n 3p)
+_assert_eq "notify audit: the busiest source comes first" \
+  hook-stop\<agent "$(printf '%s\n' "$audit_first" | awk '{ print $NF }')"
+_assert_contains "notify audit: a group shows its count and latest time" \
+  "3  2026-01-01T01:59:30Z" "$audit_first"
+_assert_contains "notify audit: a pane on its live server is named" \
+  "%9 work:1.0" "$audit_first"
+_assert_eq "notify audit: a group shows its latest caller" \
+  stop-caller-3 "$(printf '%s\n' "$audit_out" | sed -n 4p | tr -d ' ')"
+_assert_not_contains "notify audit: a pane id from an earlier server is not named" \
+  work "$(printf '%s\n' "$audit_out" | grep 'old-server<agent')"
+_assert_not_contains "notify audit: calls before the window are left out" \
+  hook-old "$audit_out"
+_assert_not_contains "notify audit: malformed lines are left out" torn "$audit_out"
+_assert_contains "notify audit: --since widens the window" \
+  hook-old "$(audit_run --since 180)"
+_assert_contains "notify audit: --since is decimal even with a leading zero" \
+  "in the last 10 minutes" "$(audit_run --since 010)"
+_assert_eq "notify audit: --raw prints the window's well-formed lines" 5 \
+  "$(audit_run --raw | wc -l | tr -d ' ')"
+_assert_contains "notify audit: an empty log says so" \
+  "no calls logged" \
+  "$(notify_env TERM_NOTIFY_LOG="$tmp/notify-audit/none.log" "$ROOT/bin/term-notify-sound" --audit)"
+_assert_contains "notify audit: disabled logging says so" \
+  "logging is disabled" \
+  "$(notify_env TERM_NOTIFY_LOG= "$ROOT/bin/term-notify-sound" --audit)"
+for bad_since in soon 08x 1234567890; do
+  audit_run --since "$bad_since" >/dev/null 2>&1
+  _assert_exit "notify audit: --since $bad_since is a usage error" 64 "$?"
+done
 
 echo
 echo "=== term-pane-mark ==="

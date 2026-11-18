@@ -9,8 +9,212 @@ set -u
 
 usage() {
   printf 'usage: term-notify-sound [--owner PID] [--kind done|waiting|blocked] [--exit-status CODE]\n' >&2
+  printf '       term-notify-sound --audit [--since MINUTES] [--raw]\n' >&2
   exit 64
 }
+
+# Every call appends one tab-separated line to this log so a bell can be
+# traced to whatever rang it. An empty TERM_NOTIFY_LOG disables it, and with
+# no state root there is nowhere to write, which must not cost the bell.
+if [ -n "${TERM_NOTIFY_LOG+set}" ]; then
+  notify_log=$TERM_NOTIFY_LOG
+elif [ -n "${XDG_STATE_HOME:-}" ]; then
+  notify_log=$XDG_STATE_HOME/tmux-tools/term-notify-sound.log
+elif [ -n "${HOME:-}" ]; then
+  notify_log=$HOME/.local/state/tmux-tools/term-notify-sound.log
+else
+  notify_log=''
+fi
+# A relative path would scatter logs across callers' working directories.
+case $notify_log in /*) ;; *) notify_log='' ;; esac
+notify_log_max_bytes=1048576
+tab=$'\t'
+
+# Set name to the program a process runs, not its interpreter, so a hook run
+# as `bash -e /path/agent-hook-stop` reads as agent-hook-stop and
+# `env VAR=1 cmd` as cmd. An inline script (`sh -c ...`) keeps the shell's
+# name; the caller field holds its text.
+proc_name() {
+  local word
+  name=''
+  while [ $# -gt 0 ]; do
+    word=${1##*/}
+    shift
+    case $word in
+      bash | sh | zsh | dash | ksh | fish | env | perl | ruby | node | python | python[0-9]*)
+        while [ $# -gt 0 ]; do
+          case $1 in
+            -c) set -- ;;
+            -* | *=*) shift ;;
+            *) break ;;
+          esac
+        done
+        [ $# -gt 0 ] || name=$word
+        ;;
+      *) name=$word ;;
+    esac
+    [ -z "$name" ] || return 0
+  done
+}
+
+# Log fields: epoch seconds, UTC time, route (tty, pane or none), kind,
+# exit status, owner, TMUX_PANE, the tmux server ("socket,pid" from TMUX),
+# the ancestor chain by name (nearest first) and the direct caller's command
+# line. A field with no value is "-". The caller discards its output: a
+# process that exits mid-walk or a racing rotation fails a redirect, and
+# bash reports a failed redirect before any 2>/dev/null on the same command.
+log_call() {
+  [ -n "$notify_log" ] || return 0
+  local pid=$PPID depth=0 line ppid args arg comm name chain='' caller='' stamp server
+  local -a argv
+  while [ "$depth" -lt 6 ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+    argv=()
+    # Linux ps scans every process, about 0.1 s a call on a busy host, so
+    # read /proc directly where it exists. The stat comm field can hold
+    # spaces and parentheses; the fields after its last ") " cannot.
+    if [ -r "/proc/$pid/stat" ]; then
+      IFS= read -r line <"/proc/$pid/stat" || break
+      # Escaped: an unquoted `*(` reads as the start of an extended glob.
+      comm=${line#*\(}
+      comm=${comm%) *}
+      line=${line##*) }
+      ppid=${line#* }
+      ppid=${ppid%% *}
+      # Read only what the name and the 200-character caller need, so a
+      # parent holding a huge argument (an agent's heredoc) costs no more.
+      while [ ${#argv[@]} -lt 8 ] && { IFS= read -r -d '' -n 256 arg || [ -n "$arg" ]; }; do
+        argv+=("$arg")
+        [ ${#arg} -lt 256 ] || break
+      done <"/proc/$pid/cmdline"
+      # A zombie or kernel thread has no command line, only its comm.
+      [ ${#argv[@]} -gt 0 ] || argv=("$comm")
+      args="${argv[*]}"
+    else
+      line=$(ps -o ppid= -o args= -p "$pid") || break
+      line=${line#"${line%%[![:space:]]*}"}
+      [ -n "$line" ] || break
+      ppid=${line%%[[:space:]]*}
+      args=${line#"$ppid"}
+      args=${args#"${args%%[![:space:]]*}"}
+      read -r -a argv <<<"$args"
+    fi
+    args=${args//[[:cntrl:]]/ }
+    [ -n "$caller" ] || caller=${args:0:200}
+    proc_name ${argv[@]+"${argv[@]}"}
+    name=${name//[[:cntrl:]<]/ }
+    chain=$chain${chain:+<}${name:-?}
+    pid=$ppid
+    depth=$((depth + 1))
+  done
+  stamp=$(date -u "+%s$tab%Y-%m-%dT%H:%M:%SZ")
+  server=${TMUX:+${TMUX%,*}}
+  (
+    umask 077
+    dir=${notify_log%/*}
+    [ -d "${dir:-/}" ] || mkdir -p "$dir" || exit 0
+    if [ -f "$notify_log" ]; then
+      size=$(wc -c <"$notify_log")
+      [ "$size" -le "$notify_log_max_bytes" ] || rotate_log "$size"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$stamp" "$1" "${kind:-done}" \
+      "${exit_status:--}" "${owner:--}" "${TMUX_PANE:--}" "${server:--}" \
+      "${chain:--}" "${caller:--}" >>"$notify_log"
+  )
+}
+
+# Move a full log to .1. The lock keeps two calls that both see a full log
+# from rotating twice, which would put the second's near-empty log over the
+# first's history. A busy lock skips rotation for this call; one left by a
+# call that died is cleared once the log reaches twice the limit.
+rotate_log() {
+  if mkdir "$notify_log.lock"; then
+    [ "$(wc -c <"$notify_log")" -le "$notify_log_max_bytes" ] ||
+      mv -f "$notify_log" "$notify_log.1"
+    rmdir "$notify_log.lock"
+  elif [ "$1" -gt $((notify_log_max_bytes * 2)) ]; then
+    rmdir "$notify_log.lock"
+  fi
+}
+
+# Summarize the log by source: calls grouped by pane, server, route, kind and
+# ancestor chain, busiest first, each with its latest caller. A pane is named
+# session:window.pane only when its server, by socket and pid, still runs:
+# pane ids restart with every server.
+audit() {
+  local since=60 raw='' cutoff files=()
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --since)
+        [ $# -ge 2 ] || usage
+        case $2 in '' | *[!0-9]*) usage ;; esac
+        [ "${#2}" -le 9 ] || usage
+        since=$((10#$2))
+        shift 2
+        ;;
+      --raw)
+        raw=1
+        shift
+        ;;
+      *) usage ;;
+    esac
+  done
+  if [ -z "$notify_log" ]; then
+    printf 'term-notify-sound: logging is disabled\n'
+    return 0
+  fi
+  cutoff=$(($(date +%s) - since * 60))
+  [ -f "$notify_log.1" ] && files+=("$notify_log.1")
+  [ -f "$notify_log" ] && files+=("$notify_log")
+  if [ ${#files[@]} -eq 0 ]; then
+    printf 'term-notify-sound: no calls logged in %s\n' "$notify_log"
+    return 0
+  fi
+  # Only well-formed lines count, so a torn or foreign line cannot land in
+  # the window.
+  # shellcheck disable=SC2016 # awk program text, not shell expansions
+  local filter='$1 ~ /^[0-9]+$/ && NF == 10 && $1 + 0 >= cutoff'
+  if [ -n "$raw" ]; then
+    awk -F '\t' -v cutoff="$cutoff" "$filter" "${files[@]}"
+    return 0
+  fi
+  local groups total=0 count last pane server route kind chain caller name
+  groups=$(awk -F '\t' -v cutoff="$cutoff" "$filter"' {
+      key = $7 "\t" $8 "\t" $3 "\t" $4 "\t" $9
+      n[key]++; last[key] = $2; caller[key] = $10
+    }
+    END { for (key in n) print n[key] "\t" last[key] "\t" key "\t" caller[key] }' \
+    "${files[@]}" | sort -t "$tab" -k1,1nr -k2,2r)
+  while IFS=$tab read -r count _; do
+    total=$((total + count))
+  done <<<"$groups"
+  printf 'term-notify-sound: %s calls in the last %s minutes (%s)\n' \
+    "$total" "$since" "$notify_log"
+  [ "$total" != 0 ] || return 0
+  printf '%6s  %-20s  %-14s  %-5s  %-7s  %s\n' \
+    COUNT LAST PANE ROUTE KIND SOURCE
+  while IFS=$tab read -r count last pane server route kind chain caller; do
+    name=''
+    case $pane$server in
+      %*,*)
+        name=$(tmux -S "${server%,*}" display-message -p -t "$pane" \
+          '#{pid} #{session_name}:#{window_index}.#{pane_index}' 2>/dev/null)
+        case $name in
+          "${server##*,} "*) name=${name#* } ;;
+          *) name='' ;;
+        esac
+        ;;
+    esac
+    printf '%6s  %-20s  %-14s  %-5s  %-7s  %s\n' \
+      "$count" "$last" "$pane${name:+ $name}" "$route" "$kind" "$chain"
+    printf '%6s  %s\n' '' "${caller:0:120}"
+  done <<<"$groups"
+}
+
+if [ "${1:-}" = --audit ]; then
+  shift
+  audit "$@"
+  exit 0
+fi
 
 # --owner names the program the notification is for, such as the agent whose
 # hook rings. Programs an agent launches inherit its pane, and without a
@@ -76,15 +280,21 @@ mark_pending() {
 }
 
 notify_tty="${TERM_NOTIFY_TTY:-/dev/tty}"
+route=none
 if (send_tty_notify >>"$notify_tty") 2>/dev/null; then
   # Rang the controlling terminal, so the pane is marked only if this process
   # still owns it; term-pane-mark decides.
   mark_pending
+  route='tty'
 elif [ -n "${TMUX:-}" ] && [ -n "${TMUX_PANE:-}" ]; then
   pane_tty=$(tmux display-message -t "${TMUX_PANE}" -p '#{pane_tty}' 2>/dev/null)
-  if [ -n "$pane_tty" ]; then
-    # Delivered to the pane itself, so the pane is the one that rang.
-    send_tty_notify >>"$pane_tty" 2>/dev/null && mark_pending --pane "$TMUX_PANE"
+  # Delivered to the pane itself, so the pane is the one that rang.
+  if [ -n "$pane_tty" ] && send_tty_notify >>"$pane_tty" 2>/dev/null; then
+    mark_pending --pane "$TMUX_PANE"
+    route=pane
   fi
 fi
+# Logged after the bell, so tracing never delays or blocks it. Logging is
+# best effort: it never prints or changes the exit status.
+log_call "$route" >/dev/null 2>&1
 exit 0

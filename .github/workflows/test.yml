@@ -143,9 +143,24 @@ jobs:
           /bin/bash test/term-pane-mark-token-test
 
           bell="$RUNNER_TEMP/bell"
+          bell_log="$RUNNER_TEMP/bell-log/calls.log"
           PATH="$stub_dir:$PATH" TMUX= TMUX_PANE= TERM_NOTIFY_TTY="$bell" \
-            /bin/bash "$install_prefix/bin/term-notify-sound"
+            TERM_NOTIFY_LOG="$bell_log" \
+            /bin/bash "$install_prefix/bin/term-notify-sound" 2>"$RUNNER_TEMP/bell.err"
           [[ $(cat "$bell") == $'\a' ]] || exit 1
+          [[ ! -s "$RUNNER_TEMP/bell.err" ]] || exit 1
+
+          # The call log walks ancestors with BSD ps here, and the audit
+          # reads it with BSD awk, sort and date under Bash 3.2.
+          IFS=$'\t' read -r _ _ route _ _ _ _ _ chain _ <"$bell_log"
+          [[ $route == tty && -n $chain && $chain != - ]] || exit 1
+          TERM_NOTIFY_LOG="$bell_log" /bin/bash \
+            "$install_prefix/bin/term-notify-sound" --audit >"$RUNNER_TEMP/audit"
+          grep -q '^term-notify-sound: 1 calls in the last 60 minutes' \
+            "$RUNNER_TEMP/audit" || exit 1
+          [[ $(TERM_NOTIFY_LOG="$bell_log" /bin/bash \
+            "$install_prefix/bin/term-notify-sound" --audit --raw | wc -l) -eq 1 ]] ||
+            exit 1
 
       - name: Smoke-test the agent picker with the real fzf
         env:

@@ -339,7 +339,10 @@ STATUS in `man tmux-agent-picker` list them.
   write one BEL to `/dev/tty` (`TERM_NOTIFY_TTY` overrides it), falling back
   to the tmux pane's tty. Inside tmux it then runs `term-pane-mark set
   pending` with the same options. Typical use is `make; term-notify-sound`,
-  or an agent's "finished" hook.
+  or an agent's "finished" hook. Each call is logged with its caller's
+  process chain (`TERM_NOTIFY_LOG` moves or disables the log), and
+  `term-notify-sound --audit [--since MINUTES] [--raw]` groups recent calls
+  by source to find what keeps ringing.
 - `term-pane-mark set|clear|reset pending|busy [--pane PANE] [--owner PID]
   [--kind KIND] [--exit-status CODE] [--if waiting|blocked|sticky]`: set or
   clear `@term_notify_pending` or `@term_busy` on the caller's own pane.
