@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+if [[ ${1:-} == --tmux-floor-smoke &&
+  (${CI_TMUX_FLOOR_EXACT:-} != 1 || -z ${CI_TMUX_FLOOR:-}) ]]; then
+  printf 'FAIL: the tmux floor smoke needs an exact CI_TMUX_FLOOR\n' >&2
+  exit 1
+fi
+
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 # Shared CI owns one required inventory lint; local runs still lint by default.
@@ -62,6 +68,13 @@ if [[ -n ${CI_TMUX_FLOOR:-} ]]; then
       "$CI_TMUX_FLOOR" "${tmux_reported:-no tmux}" >&2
     exit 1
   fi
+fi
+
+if [[ ${1:-} == --tmux-floor-smoke ]]; then
+  "$ROOT/test/tmux-pane-test"
+  python3 "$ROOT/test/term-pane-state-client.py"
+  python3 "$ROOT/test/tmux-agent-picker-client.py"
+  exit 0
 fi
 
 "$ROOT/test/tmux-tools-harness-test"

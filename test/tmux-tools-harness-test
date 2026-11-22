@@ -57,6 +57,16 @@ run_probe failure 17
 run_probe int 130
 run_probe term 143
 
+# The floor smoke must never quietly run the runner's default tmux when the
+# provisioning action did not bind an exact release. A mismatched floor also
+# stops an older runner before it enters the full suite again.
+floor_status=0
+floor_output=$(CI_TMUX_FLOOR=0.0 CI_TMUX_FLOOR_EXACT='' \
+  "$ROOT/test/run" --tmux-floor-smoke 2>&1) || floor_status=$?
+if [[ $floor_status != 1 || $floor_output != *'needs an exact CI_TMUX_FLOOR'* ]]; then
+  fail 'tmux floor smoke rejects a missing exact floor binding'
+fi
+
 if ((failures > 0)); then
   printf '%s failure(s)\n' "$failures" >&2
   exit 1

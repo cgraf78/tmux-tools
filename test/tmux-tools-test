@@ -305,42 +305,58 @@ _wait_for_content() {
   return 1
 }
 
-required_job=$(
-  awk '
-    /^  required:$/ { active = 1; next }
+ci_job() {
+  awk -v job="$1" '
+    $0 == "  " job ":" { active = 1; next }
     active && /^  [[:alnum:]_-]+:$/ { exit }
     active { print }
   ' "$ROOT/.github/workflows/test.yml"
-)
+}
+
+required_job=$(ci_job required)
 _assert_contains "CI publishes a stable Required check" \
   "name: Required" "$required_job"
 _assert_contains "CI Required still reports prerequisite failures" \
   "if: \${{ always() }}" "$required_job"
-_assert_contains "CI Required gates shared platforms, Bash 3.2 and real fzf" \
-  "needs: [shell, macos-bash32, fzf]" "$required_job"
+_assert_contains "CI Required gates shared platforms, the tmux floor, Bash 3.2 and real fzf" \
+  "needs: [shell, tmux-floor, macos-bash32, fzf]" "$required_job"
 _assert_contains "CI Required reads the shared-platform result" \
   "SHELL_RESULT: \${{ needs.shell.result }}" "$required_job"
+_assert_contains "CI Required reads the tmux floor result" \
+  "TMUX_FLOOR_RESULT: \${{ needs.tmux-floor.result }}" "$required_job"
 _assert_contains "CI Required reads the Bash 3.2 result" \
   "BASH32_RESULT: \${{ needs.macos-bash32.result }}" "$required_job"
 _assert_contains "CI Required enforces shared-platform success" \
   "test \"\$SHELL_RESULT\" = success" "$required_job"
+_assert_contains "CI Required enforces tmux floor success" \
+  "test \"\$TMUX_FLOOR_RESULT\" = success" "$required_job"
 _assert_contains "CI Required enforces Bash 3.2 success" \
   "test \"\$BASH32_RESULT\" = success" "$required_job"
 _assert_contains "CI Required reads the real-fzf result" \
   "FZF_RESULT: \${{ needs.fzf.result }}" "$required_job"
 _assert_contains "CI Required enforces real-fzf success" \
   "test \"\$FZF_RESULT\" = success" "$required_job"
+shell_job=$(ci_job shell)
+_assert_contains "CI uses the pinned tmux across the desktop matrix" \
+  "profiles: base,tmux-pinned,python" "$shell_job"
+_assert_contains "CI installs native tmux on Termux" \
+  "termux-profiles: base,tmux,python" "$shell_job"
+tmux_floor_job=$(ci_job tmux-floor)
+_assert_contains "CI runs the focused floor smoke on Linux" \
+  "runs-on: ubuntu-24.04" "$tmux_floor_job"
+_assert_contains "CI provisions the exact tmux floor release" \
+  "profiles: python,tmux-floor-exact" "$tmux_floor_job"
+_assert_contains "CI runs the real tmux floor smoke" \
+  "run: test/run --tmux-floor-smoke" "$tmux_floor_job"
 # The shared matrix has no fzf, so these jobs install it and require it.
 for job in fzf macos-bash32; do
-  job_text=$(
-    awk -v job="$job" '
-      $0 == "  " job ":" { active = 1; next }
-      active && /^  [[:alnum:]_-]+:$/ { exit }
-      active { print }
-    ' "$ROOT/.github/workflows/test.yml"
-  )
+  job_text=$(ci_job "$job")
   _assert_contains "CI $job requires the real-fzf picker test" \
     "TMUX_TOOLS_REQUIRE_FZF=1" "$job_text"
+  _assert_contains "CI $job calls the shared tmux installer" \
+    "cgraf78/actions/.github/actions/shell-ci-prereqs@" "$job_text"
+  _assert_contains "CI $job uses the pinned tmux" \
+    "profiles: tmux-pinned" "$job_text"
 done
 
 if [[ -f "$INSTALLER_WRAPPER" ]]; then

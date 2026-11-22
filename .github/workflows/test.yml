@@ -17,12 +17,32 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@cd44eb081dd9c3093e8d8026488423243b191240
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@9010f3bb0aeb33740332bc230160a42d02dbc810
     with:
       matrix-set: full
-      profiles: base,tmux-floor,python
+      profiles: base,tmux-pinned,python
       shellcheck-inventory-path: .github/shellcheck-files.txt
       test-command: TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_SKIP_SHELLCHECK=1 test/run
+      termux-profiles: base,tmux,python
+
+  tmux-floor:
+    name: tmux compatibility floor / Ubuntu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the exact tmux floor
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@9010f3bb0aeb33740332bc230160a42d02dbc810
+        with:
+          matrix-name: Ubuntu
+          profiles: python,tmux-floor-exact
+      - name: Exercise real panes and clients at the supported floor
+        env:
+          TMUX_TOOLS_REQUIRE_TMUX: "1"
+          TMUX_TOOLS_SKIP_SHELLCHECK: "1"
+        run: test/run --tmux-floor-smoke
 
   macos-bash32:
     name: Stock macOS Bash 3.2
@@ -162,18 +182,23 @@ jobs:
             "$install_prefix/bin/term-notify-sound" --audit --raw | wc -l) -eq 1 ]] ||
             exit 1
 
+      - name: Install pinned tmux
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@9010f3bb0aeb33740332bc230160a42d02dbc810
+        with:
+          matrix-name: macOS
+          profiles: tmux-pinned
+
       - name: Smoke-test the agent picker with the real fzf
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: |-
-          brew install tmux fzf
+          brew install fzf
           TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_REQUIRE_FZF=1 \
             python3 test/tmux-agent-picker-fzf.py
 
       # tmux-pane drives a real private tmux server, with the tool itself run
-      # under stock Bash 3.2 (the suite starts it with "$BASH"). The step
-      # above installed tmux.
+      # under stock Bash 3.2 (the suite starts it with "$BASH").
       - name: Drive tmux-pane with stock macOS Bash
         shell: /bin/bash {0}
         env:
@@ -199,11 +224,17 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install tmux and fzf
+      - name: Install pinned tmux
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@9010f3bb0aeb33740332bc230160a42d02dbc810
+        with:
+          matrix-name: Ubuntu
+          profiles: tmux-pinned
+
+      - name: Install fzf
         timeout-minutes: 10
         run: |-
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends tmux fzf python3
+          sudo apt-get install -y --no-install-recommends fzf python3
 
       - name: Smoke-test the agent picker with the real fzf
         run: |-
@@ -213,10 +244,11 @@ jobs:
   required:
     name: Required
     if: ${{ always() }}
-    needs: [shell, macos-bash32, fzf]
+    needs: [shell, tmux-floor, macos-bash32, fzf]
     runs-on: ubuntu-24.04
     env:
       SHELL_RESULT: ${{ needs.shell.result }}
+      TMUX_FLOOR_RESULT: ${{ needs.tmux-floor.result }}
       BASH32_RESULT: ${{ needs.macos-bash32.result }}
       FZF_RESULT: ${{ needs.fzf.result }}
     steps:
@@ -224,10 +256,12 @@ jobs:
         shell: bash
         run: |-
           printf 'Shared shell CI: %s\n' "$SHELL_RESULT"
+          printf 'tmux compatibility floor: %s\n' "$TMUX_FLOOR_RESULT"
           printf 'Stock macOS Bash 3.2: %s\n' "$BASH32_RESULT"
           printf 'Real fzf: %s\n' "$FZF_RESULT"
 
           test "$SHELL_RESULT" = success
+          test "$TMUX_FLOOR_RESULT" = success
           test "$BASH32_RESULT" = success
           test "$FZF_RESULT" = success
 
@@ -250,4 +284,4 @@ jobs:
       # files, so `.github/cgraf78-actions.lock` cannot be interpolated. This gate
       # verifies every unavoidable cgraf78/actions literal still matches that
       # single reviewed dependency decision.
-      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@cd44eb081dd9c3093e8d8026488423243b191240
+      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@9010f3bb0aeb33740332bc230160a42d02dbc810
