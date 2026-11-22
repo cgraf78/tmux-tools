@@ -160,7 +160,6 @@ jobs:
 
           /bin/bash test/term-pane-state-test
           /bin/bash test/tmux-agent-picker-test
-          /bin/bash test/term-pane-mark-token-test
 
           bell="$RUNNER_TEMP/bell"
           bell_log="$RUNNER_TEMP/bell-log/calls.log"
@@ -197,16 +196,18 @@ jobs:
           TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_REQUIRE_FZF=1 \
             python3 test/tmux-agent-picker-fzf.py
 
-      # tmux-pane drives a real private tmux server, with the tool itself run
-      # under stock Bash 3.2 (the suite starts it with "$BASH").
-      - name: Drive tmux-pane with stock macOS Bash
+      # Both suites start private servers, so they run after the shared tmux
+      # install. The tmux-pane suite starts the tool itself with "$BASH".
+      - name: Exercise real tmux with stock macOS Bash
         shell: /bin/bash {0}
         env:
           TMUX_TOOLS_REQUIRE_TMUX: "1"
         run: |-
           set -euo pipefail
+          test "$(command -v tmux)" = "$CI_TMUX_PINNED_BIN"
           tmux -V
           /bin/bash test/tmux-pane-test
+          /bin/bash test/term-pane-mark-token-test
 
   fzf:
     name: Real fzf (Ubuntu)

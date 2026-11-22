@@ -359,6 +359,15 @@ for job in fzf macos-bash32; do
     "profiles: tmux-pinned" "$job_text"
 done
 
+macos_job=$(ci_job macos-bash32)
+for suite in tmux-pane-test term-pane-mark-token-test; do
+  invocation="/bin/bash test/$suite"
+  _assert_contains "CI macOS runs $suite under stock Bash" "$invocation" "$macos_job"
+  # shellcheck disable=SC2016 # Match literal shell code in the workflow.
+  _assert_contains "CI macOS verifies pinned tmux before $suite" \
+    'test "$(command -v tmux)" = "$CI_TMUX_PINNED_BIN"' "${macos_job%%"$invocation"*}"
+done
+
 if [[ -f "$INSTALLER_WRAPPER" ]]; then
   _pass "install has a generated checkout wrapper"
 else
