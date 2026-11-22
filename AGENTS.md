@@ -195,9 +195,10 @@ earlier history.
   stub that reports version 3.2a (the stub otherwise reports no version, which
   counts as newest), plus `test/tmux-agent-picker-test`
   (which runs every awk it finds, `/usr/bin/awk` among them), all run with
-  `/bin/bash`, as the `macos-bash32` job does. That job also installs tmux
-  and runs `/bin/bash test/tmux-pane-test`, which starts the tool with
-  `"$BASH"` so it runs under Bash 3.2.
+  `/bin/bash`, as the `macos-bash32` job does. After installing pinned tmux,
+  that job runs `test/tmux-pane-test` and `test/term-pane-mark-token-test`
+  with `/bin/bash`. The pane suite starts the tool itself with `"$BASH"` so
+  it also runs under Bash 3.2.
 
 ## Test isolation
 
