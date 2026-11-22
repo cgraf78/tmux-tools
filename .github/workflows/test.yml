@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   shell:
-    uses: cgraf78/actions/.github/workflows/shell-ci.yml@9010f3bb0aeb33740332bc230160a42d02dbc810
+    uses: cgraf78/actions/.github/workflows/shell-ci.yml@36d1bb6a8070d9dc7dfc85e1d21b2fe9b3721450
     with:
       matrix-set: full
       profiles: base,tmux-pinned,python
@@ -34,7 +34,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the exact tmux floor
-        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@9010f3bb0aeb33740332bc230160a42d02dbc810
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@36d1bb6a8070d9dc7dfc85e1d21b2fe9b3721450
         with:
           matrix-name: Ubuntu
           profiles: python,tmux-floor-exact
@@ -182,7 +182,7 @@ jobs:
             exit 1
 
       - name: Install pinned tmux
-        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@9010f3bb0aeb33740332bc230160a42d02dbc810
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@36d1bb6a8070d9dc7dfc85e1d21b2fe9b3721450
         with:
           matrix-name: macOS
           profiles: tmux-pinned
@@ -226,7 +226,7 @@ jobs:
           persist-credentials: false
 
       - name: Install pinned tmux
-        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@9010f3bb0aeb33740332bc230160a42d02dbc810
+        uses: cgraf78/actions/.github/actions/shell-ci-prereqs@36d1bb6a8070d9dc7dfc85e1d21b2fe9b3721450
         with:
           matrix-name: Ubuntu
           profiles: tmux-pinned
@@ -285,4 +285,4 @@ jobs:
       # files, so `.github/cgraf78-actions.lock` cannot be interpolated. This gate
       # verifies every unavoidable cgraf78/actions literal still matches that
       # single reviewed dependency decision.
-      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@9010f3bb0aeb33740332bc230160a42d02dbc810
+      - uses: cgraf78/actions/.github/actions/verify-consumer-sync@36d1bb6a8070d9dc7dfc85e1d21b2fe9b3721450
