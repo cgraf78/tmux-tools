@@ -1272,6 +1272,19 @@ killpane "$g"
 # rg_m14, rg_m15: agent-like TUIs below some static rows. Redrawing the rows
 # above the cursor keeps an exact result; redrawing the input row moves the
 # echo.
+await_tui_line() {
+  local target=$1 line=$2 screen deadline=$((SECONDS + 5))
+  while :; do
+    screen=$(T capture-pane -p -t "$target" 2>&1) || break
+    if grep -Eq "^${line}[[:blank:]]*$" <<<"$screen"; then return 0; fi
+    [ "$SECONDS" -lt "$deadline" ] || break
+    sleep 0.05
+  done
+  fail "TUI pane $target did not render '$line'"
+  printf '%s\n' "$screen" >&2
+  return 1
+}
+
 cat >"$tmp/tui" <<'EOF'
 #!/usr/bin/env bash
 printf 'header %s\n' 1 2 3 4 5 6 7 8
@@ -1284,19 +1297,21 @@ printf '\nreply done\n'
 sleep 100
 EOF
 chmod +x "$tmp/tui"
-tui=$(newpane "$tmp/tui")
-sleep 0.3
-M=$(tp send -t "$tui" 'hello tui' --enter --print-marker)
-sleep 0.6
+# Capture the marker after tmux shows the prompt. Test the read only after
+# tmux shows the reply, which is printed after the redraw.
+tui=$(newpane "$tmp/tui") || exit 1
+await_tui_line "$tui" '>' || exit 1
+M=$(tp send -t "$tui" 'hello tui' --enter --print-marker) || exit 1
+await_tui_line "$tui" 'reply done' || exit 1
 check 'rg_m14 a TUI redrawing above the cursor stays exact' 0 "$(
   tp read -t "$tui" --since "$M" >/dev/null 2>&1
   echo $?
 )"
 killpane "$tui"
-tui=$(newpane "env MOVE=1 '$tmp/tui'")
-sleep 0.3
-M=$(tp send -t "$tui" 'hello tui' --enter --print-marker)
-sleep 0.6
+tui=$(newpane "env MOVE=1 '$tmp/tui'") || exit 1
+await_tui_line "$tui" '>' || exit 1
+M=$(tp send -t "$tui" 'hello tui' --enter --print-marker) || exit 1
+await_tui_line "$tui" 'reply done' || exit 1
 inexact 'rg_m15 a TUI redrawing its input row is inexact' "$tui" "$M" 'echo moved'
 killpane "$tui"
 
