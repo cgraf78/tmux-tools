@@ -169,14 +169,18 @@ earlier history.
   `CI_TMUX_FLOOR` it must match `tmux_minimum`, and under
   `CI_TMUX_FLOOR_EXACT=1` tmux must be exactly that release.
 - CI: `TMUX_TOOLS_REQUIRE_TMUX=1 TMUX_TOOLS_SKIP_SHELLCHECK=1 test/run`
-  through shared shell CI with the `base,tmux-floor,python` profiles, which
-  build the floor release on the leg whose distribution ships an older
-  tmux. The shared matrix has no `fzf`, so the `fzf` job (Ubuntu) and the
-  `macos-bash32` job install it and run `test/tmux-agent-picker-fzf.py`
-  with `TMUX_TOOLS_REQUIRE_FZF=1`.
+  through shared shell CI with `base,tmux-pinned,python` on desktop and
+  the native `tmux` profile on Termux. A separate Ubuntu job uses
+  `tmux-floor-exact` and `test/run --tmux-floor-smoke` to exercise real
+  panes and clients at the supported floor. The shared matrix has no `fzf`,
+  so the `fzf` job (Ubuntu) and the `macos-bash32` job install it and run
+  `test/tmux-agent-picker-fzf.py` with `TMUX_TOOLS_REQUIRE_FZF=1`.
+- Follow the
+  [managed tmux update procedure](https://github.com/cgraf78/actions/blob/main/docs/workflow-api.md#updating-the-managed-tmux-build)
+  to advance the desktop build across all jobs.
 - tmux versions: `tmux-pane` supports 3.3 or newer, like every tool here.
-  3.6 is the primary target, and newer releases are first-class. Gates are
-  always "at least X", a version that does not parse counts as the newest,
+  The shared pinned build is the primary CI target. Gates are always
+  "at least X", a version that does not parse counts as the newest,
   and features are detected directly where tmux exposes them
   (`list-commands paste-buffer` for `-S`, empty `pane_key_mode`, empty
   history counters). Run `test/tmux-pane-test` on the oldest and newest tmux
@@ -224,8 +228,8 @@ earlier history.
   `.github/cgraf78-actions.lock`.
 - `.github/cgraf78-actions.lock` and every `uses: cgraf78/actions/...@sha`
   move together, only via `consumer-ci/sync.sh`.
-- The `Required` job needs `shell`, `macos-bash32` and `fzf`. `test/tmux-tools-test`
-  pins its text, so edit the two together.
+- The `Required` job needs `shell`, `tmux-floor`, `macos-bash32`, and `fzf`.
+  `test/tmux-tools-test` pins its text, so edit the two together.
 - `retry-infrastructure.yml` keys on the workflow name `Tests`; don't
   rename it.
 
