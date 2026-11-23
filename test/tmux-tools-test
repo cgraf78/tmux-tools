@@ -153,6 +153,13 @@ _mode() {
 if [[ "${1:-}" == "--harness-probe" ]]; then
   probe_action=${2:-}
   probe_child=$(_tmpdir) || exit 1
+  if [[ "$probe_action" == git ]]; then
+    git -C "$probe_child" init --quiet --template='' --initial-branch=fixture || exit 1
+    if git -C "$probe_child" config --get harness.caller; then exit 1; fi
+    git -C "$probe_child" config --global harness.writable yes || exit 1
+    git -C "$probe_child" symbolic-ref --short HEAD
+    exit
+  fi
   printf '%s\n%s\n%s\n%s\n%s\n' \
     "$_suite_tmp_root" "$probe_child" "$(_mode "$_suite_tmp_root")" \
     "${TMPDIR:-}" "$_suite_tmux_socket"

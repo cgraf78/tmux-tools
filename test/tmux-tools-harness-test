@@ -10,6 +10,9 @@ cleanup() {
   rm -rf "$probe_parent"
 }
 trap cleanup EXIT
+# shellcheck source=test/fixture-env.sh
+. "$ROOT/test/fixture-env.sh"
+tmux_fixture_git "$probe_parent"
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -56,6 +59,47 @@ run_probe normal 0
 run_probe failure 17
 run_probe int 130
 run_probe term 143
+
+caller="$probe_parent/caller"
+caller_config="$probe_parent/caller.gitconfig"
+mkdir "$caller"
+git -C "$caller" init --quiet --template='' --initial-branch=caller || exit 1
+git config --file "$caller_config" harness.caller preserved || exit 1
+git_status=0
+git_output=$(TMPDIR="$probe_parent" GIT_DIR="$caller/.git" GIT_WORK_TREE="$caller" \
+  GIT_CONFIG_GLOBAL="$caller_config" GIT_CONFIG_COUNT=1 \
+  GIT_CONFIG_KEY_0=harness.caller GIT_CONFIG_VALUE_0=injected \
+  "$ROOT/test/tmux-tools-test" --harness-probe git 2>&1) || git_status=$?
+if [[ "$git_status" != 0 || "$git_output" != fixture ||
+  "$(git -C "$caller" symbolic-ref --short HEAD)" != caller ||
+  "$(cat "$caller_config")" != $'[harness]\n\tcaller = preserved' ]]; then
+  fail "installer Git probe inherits or alters the caller context: $git_output"
+fi
+
+colon_tmp="$probe_parent/tmp:parent"
+mkdir "$colon_tmp"
+colon_status=0
+colon_output=$(TMPDIR="$colon_tmp" "$ROOT/test/tmux-tools-test" \
+  --harness-probe normal 2>&1) || colon_status=$?
+if [[ "$colon_status" != 2 || "$colon_output" != *"TMPDIR must not contain a colon"* ]]; then
+  fail "mock PATH probe accepts a colon in TMPDIR: $colon_output"
+fi
+
+ambient_bin="$probe_parent/ambient-bin"
+private_bin="$probe_parent/private-bin"
+mkdir "$ambient_bin"
+for tool in termnav term-pane-mark; do
+  printf '#!/bin/sh\nexit 47\n' >"$ambient_bin/$tool"
+  chmod +x "$ambient_bin/$tool"
+done
+if ! PATH="$ambient_bin:$PATH" tmux_fixture_tools "$private_bin" cat ||
+  ! env -u BASH_ENV PATH="$private_bin" "$private_bin/bash" -c '
+    command -v cat >/dev/null &&
+      ! command -v termnav >/dev/null &&
+      ! command -v term-pane-mark >/dev/null
+  '; then
+  fail "fixture commands expose ambient optional integrations"
+fi
 
 # The floor smoke must never quietly run the runner's default tmux when the
 # provisioning action did not bind an exact release. A mismatched floor also
