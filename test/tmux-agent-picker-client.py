@@ -17,6 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import tmux_version
+from tmux_agent_fixture import copy_bash
 
 ROOT = Path(__file__).resolve().parent.parent
 PICKER = ROOT / "bin/tmux-agent-picker"
@@ -59,32 +60,6 @@ status=$?
 echo "$status" >>"$PICKER_RECORD"
 exit "$status"
 """
-
-
-def copy_bash(target: Path) -> None:
-    """Copy a bash that runs from TARGET, so it reports TARGET's name.
-
-    Only the bytes and mode are copied: shutil.copy2 also copies file flags,
-    which macOS refuses for its system-protected /bin/bash. Each bash on PATH
-    is tried in turn, in case a copy cannot run where it lands.
-    """
-    candidates = [
-        str(Path(directory) / "bash")
-        for directory in os.environ.get("PATH", "").split(os.pathsep)
-        if directory and os.access(Path(directory) / "bash", os.X_OK)
-    ]
-    for source in dict.fromkeys(candidates + ["/bin/bash"]):
-        if not os.access(source, os.X_OK):
-            continue
-        shutil.copyfile(source, target)
-        target.chmod(0o755)
-        try:
-            ran = subprocess.run([str(target), "-c", ":"], timeout=10, check=False)
-        except OSError:
-            continue
-        if ran.returncode == 0:
-            return
-    raise SystemExit(f"FAIL: no copy of bash runs as a stand-in agent from {target.parent}")
 
 
 masters: dict[int, int] = {}
@@ -130,7 +105,6 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
     # codex. A symlink or a script would report bash or sh instead.
     agent = root / "agents" / "codex"
     agent.parent.mkdir()
-    copy_bash(agent)
     log = root / "fzf"
     record = root / "record"
     # The caller's environment, without TMUX or shell startup files that
@@ -147,6 +121,7 @@ with tempfile.TemporaryDirectory(prefix="tap-client-") as directory:
         SHELL=shutil.which("sh") or "/bin/sh",
         TERM="xterm-256color",
     )
+    copy_bash(agent, env)
 
     def tmux(*args: str, check: bool = True) -> str:
         """Query or mutate only the private test server."""
