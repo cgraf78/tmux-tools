@@ -18,6 +18,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import tmux_version
+from tmux_agent_fixture import copy_bash
 
 ROOT = Path(__file__).resolve().parent.parent
 PICKER = ROOT / "bin/tmux-agent-picker"
@@ -32,32 +33,6 @@ if FZF is None:
 # The fixture config: the man page's example predicates and acknowledgement
 # hooks.
 CONFIG = ROOT / "test/tmux-agent-picker.conf"
-
-
-def copy_bash(target: Path) -> None:
-    """Copy a bash that runs from TARGET, so it reports TARGET's name.
-
-    Only the bytes and mode are copied: shutil.copy2 also copies file flags,
-    which macOS refuses for its system-protected /bin/bash. Each bash on PATH
-    is tried in turn, in case a copy cannot run where it lands.
-    """
-    candidates = [
-        str(Path(directory) / "bash")
-        for directory in os.environ.get("PATH", "").split(os.pathsep)
-        if directory and os.access(Path(directory) / "bash", os.X_OK)
-    ]
-    for source in dict.fromkeys(candidates + ["/bin/bash"]):
-        if not os.access(source, os.X_OK):
-            continue
-        shutil.copyfile(source, target)
-        target.chmod(0o755)
-        try:
-            ran = subprocess.run([str(target), "-c", ":"], timeout=10, check=False)
-        except OSError:
-            continue
-        if ran.returncode == 0:
-            return
-    raise SystemExit(f"FAIL: no copy of bash runs as a stand-in agent from {target.parent}")
 
 
 CSI = re.compile(
@@ -110,19 +85,26 @@ with tempfile.TemporaryDirectory(prefix="tap-fzf-") as directory:
     (bindir / "tmux-agent-picker").symlink_to(PICKER)
     agent = root / "agents" / "codex"
     agent.parent.mkdir()
-    copy_bash(agent)
     flag = root / "refresh"
-    env = {
-        name: value
-        for name, value in os.environ.items()
-        if name not in ("TMUX", "TMUX_PANE", "BASH_ENV", "ENV", "ZDOTDIR", "FZF_DEFAULT_OPTS")
-    }
+    # The popup assertions need the picker's colors and key bindings.
+    excluded_env = (
+        "TMUX",
+        "TMUX_PANE",
+        "BASH_ENV",
+        "ENV",
+        "ZDOTDIR",
+        "FZF_DEFAULT_OPTS",
+        "FZF_DEFAULT_OPTS_FILE",
+        "NO_COLOR",
+    )
+    env = {name: value for name, value in os.environ.items() if name not in excluded_env}
     env.update(
         HOME=str(root),
         PATH=f"{bindir}:{os.environ['PATH']}",
         SHELL=shutil.which("sh") or "/bin/sh",
         TERM="xterm-256color",
     )
+    copy_bash(agent, env)
     # fzf draws the dots only in a UTF-8 locale.
     if "UTF-8" not in (env.get("LC_ALL") or env.get("LC_CTYPE") or env.get("LANG") or "").upper():
         env["LC_ALL"] = "en_US.UTF-8" if sys.platform == "darwin" else "C.UTF-8"
