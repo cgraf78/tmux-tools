@@ -102,6 +102,33 @@ if ! PATH="$ambient_bin:$PATH" tmux_fixture_tools "$private_bin" cat ||
   fail "fixture commands expose ambient optional integrations"
 fi
 
+if [[ ${TMUX_TOOLS_TMUX:-} == ok ]] && command -v python3 >/dev/null 2>&1; then
+  startup="$probe_parent/bash-env"
+  startup_marker="$probe_parent/bash-env-read"
+  cat >"$startup" <<'BASH'
+case "$0" in
+  */term-pane-state)
+    printf '%s\n' "$0" >>"$TERM_PANE_STATE_STARTUP_MARKER"
+    exit 47
+    ;;
+esac
+BASH
+  control_status=0
+  BASH_ENV="$startup" TERM_PANE_STATE_STARTUP_MARKER="$startup_marker" \
+    "$BASH" -c ':' "$ROOT/bin/term-pane-state" || control_status=$?
+  if [[ "$control_status" != 47 || ! -s "$startup_marker" ]]; then
+    fail "real-client startup control did not read the caller's Bash startup file"
+  fi
+  rm -f "$startup_marker"
+  startup_status=0
+  startup_output=$(BASH_ENV="$startup" ENV="$startup" \
+    TERM_PANE_STATE_STARTUP_MARKER="$startup_marker" TMUX_TOOLS_REQUIRE_TMUX=1 \
+    python3 "$ROOT/test/term-pane-state-client.py" 2>&1) || startup_status=$?
+  if [[ "$startup_status" != 0 || -e "$startup_marker" ]]; then
+    fail "real-client test exposes caller shell startup: $startup_output"
+  fi
+fi
+
 # The floor smoke must never quietly run the runner's default tmux when the
 # provisioning action did not bind an exact release. A mismatched floor also
 # stops an older runner before it enters the full suite again.
