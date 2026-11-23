@@ -56,6 +56,10 @@ with tempfile.TemporaryDirectory(prefix="tps-client-") as directory:
         STATE_NATIVE_CALLS=str(calls),
         TERM="xterm-256color",
     )
+    # The real command is a Bash script. Caller startup must not change it
+    # or commands reached indirectly through the private tmux server.
+    for variable in ("BASH_ENV", "ENV"):
+        env.pop(variable, None)
 
     def tmux(*args: str) -> str:
         """Query or mutate only the private test server."""
