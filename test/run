@@ -9,6 +9,9 @@ if [[ ${1:-} == --tmux-floor-smoke &&
 fi
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source=test/fixture-env.sh
+. "$ROOT/test/fixture-env.sh"
+tmux_fixture_path "${TMPDIR:-/tmp}"
 
 # Shared CI owns one required inventory lint; local runs still lint by default.
 if [[ "${TMUX_TOOLS_SKIP_SHELLCHECK:-0}" != 1 ]] &&

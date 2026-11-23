@@ -45,6 +45,10 @@ _signal_exit() {
 trap _cleanup EXIT
 trap '_signal_exit 130' INT
 trap '_signal_exit 143' TERM
+# shellcheck source=test/fixture-env.sh
+. "$ROOT/test/fixture-env.sh"
+tmux_fixture_path "$_suite_tmp_root" || exit "$?"
+tmux_fixture_git "$_suite_tmp_root"
 
 _pass() {
   printf 'ok - %s\n' "$1"

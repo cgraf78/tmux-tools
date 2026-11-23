@@ -18,10 +18,13 @@ export floor_tmux
 
 # shellcheck source=copy-mark-helpers.sh
 . "$TEST_DIR/copy-mark-helpers.sh"
+# shellcheck source=test/fixture-env.sh
+. "$TEST_DIR/fixture-env.sh"
 
 echo "=== tmux-copy-last-output ==="
 
 tmp=$(_tmpdir)
+tmux_fixture_path "$tmp" || exit "$?"
 mock_bin="$tmp/bin"
 mkdir -p "$mock_bin"
 # Pane lookups read the controlling terminal from /proc on Linux. Point that at
@@ -822,9 +825,10 @@ lone_dir="$tmp/lone-notifier"
 mkdir -p "$lone_dir"
 cp "$ROOT/bin/term-notify-sound" "$lone_dir/"
 lone_err="$tmp/lone-notifier.err"
+PATH="$mock_bin:$PATH" tmux_fixture_tools "$tmp/lone-bin" tmux ps date mkdir rmdir || exit 1
 HOME="$tmp/tmux-notify-home" TMUX=/tmp/tmux-test TMUX_PANE=%12 TERM_PROGRAM=tmux \
   TERM_NOTIFY_TTY="$tmp/lone-notifier.tty" TMUX_SET_LOG="$tmp/lone-notifier.log" \
-  PATH="$mock_bin:/usr/bin:/bin" "$lone_dir/term-notify-sound" 2>"$lone_err"
+  PATH="$tmp/lone-bin" "$lone_dir/term-notify-sound" 2>"$lone_err"
 _assert_exit "notify: without term-pane-mark the notification succeeds" "0" "$?"
 _assert_eq "notify: without term-pane-mark nothing is reported" "" "$(cat "$lone_err")"
 _assert_file_content "notify: without term-pane-mark it still emits one BEL" \

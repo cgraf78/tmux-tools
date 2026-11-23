@@ -16,6 +16,8 @@ def copy_bash(target: Path, env: Mapping[str, str]) -> None:
     and mode because macOS refuses to copy the system bash's protected flags.
     Try the fixture's PATH in order, with /bin/bash as a fallback.
     """
+    if os.pathsep in str(target):
+        raise SystemExit("tmux-tools test: TMPDIR must not contain the PATH separator")
     candidates = [
         str(Path(directory) / "bash")
         for directory in env.get("PATH", "").split(os.pathsep)
