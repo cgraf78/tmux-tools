@@ -245,11 +245,39 @@ check_contains 'drift: tmux-pane(1) VERSIONS names the floor' "tmux $floor or ne
 check_contains 'drift: tmux-pane(1) exit 1 names the floor' "older than $floor" "$man_flat"
 # (tmux-tools-test checks the README's floor bullet names this tool.)
 # A tp_ name the docs give must still be the script's.
-stale=''
-while IFS= read -r name; do
-  grep -qw -- "$name" "$TOOL" || stale="$stale $name"
-done < <(grep -ohw 'tp_[a-z_][a-z_]*' "$ROOT/README.md" "$ROOT/AGENTS.md" "$ROOT"/man/man1/*.1 | sort -u)
-check 'drift: every tp_ name in the docs is in the script' '' "$stale"
+documented_tp_refs() {
+  local refs status=0
+  refs=$(grep -ohw 'tp_[a-z_][a-z_]*' "$ROOT/README.md" "$ROOT/AGENTS.md" "$ROOT"/man/man1/*.1) ||
+    status=$?
+  case "$status" in
+    0) printf '%s\n' "$refs" | sort -u ;;
+    1) return 0 ;; # Docs may contain no internal names.
+    *) return "$status" ;;
+  esac
+}
+
+if docs_refs=$(documented_tp_refs); then
+  stale=''
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    grep -qw -- "$name" "$TOOL" || stale="$stale $name"
+  done <<<"$docs_refs"
+  check 'drift: every tp_ name in the docs is in the script' '' "$stale"
+else
+  fail 'drift: cannot enumerate tp_ names from all documentation'
+fi
+
+docs_status=0
+docs_output=$(
+  # shellcheck disable=SC2329 # Invoked by documented_tp_refs below.
+  grep() {
+    printf '%s\n' tp_partial
+    return 37
+  }
+  documented_tp_refs
+) || docs_status=$?
+check 'drift: documentation scan preserves a producer error' 37 "$docs_status"
+check 'drift: documentation scan rejects partial results' '' "$docs_output"
 check_contains 'drift: AGENTS.md names the floor' "supports $floor or newer" "$(cat "$ROOT/AGENTS.md")"
 # AGENTS.md spells the exit statuses as a list with ranges.
 agents_codes=$(tr '\n' ' ' <"$ROOT/AGENTS.md" | sed 's/  */ /g' | sed -n 's/.*Its exit codes (\([^)]*\)).*/\1/p' |
