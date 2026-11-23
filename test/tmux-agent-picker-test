@@ -3,7 +3,7 @@
 # shellcheck disable=SC2016 # tmux ids ($1, %1) are literal text here.
 set -uo pipefail
 unset BASH_ENV ENV
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+ROOT=$(CDPATH='' cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 # The floor and a release just below it, from the tools' own tmux_minimum,
 # so these cases follow a floor bump.
 floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")

@@ -2,7 +2,7 @@
 
 set -uo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # The floor and a release just below it, from the tools' own tmux_minimum,
 # so these cases follow a floor bump.
 floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
@@ -45,6 +45,10 @@ _signal_exit() {
 trap _cleanup EXIT
 trap '_signal_exit 130' INT
 trap '_signal_exit 143' TERM
+# shellcheck source=test/fixture-env.sh
+. "$ROOT/test/fixture-env.sh"
+tmux_fixture_path "$_suite_tmp_root" || exit "$?"
+tmux_fixture_git "$_suite_tmp_root"
 
 _pass() {
   printf 'ok - %s\n' "$1"
@@ -149,6 +153,13 @@ _mode() {
 if [[ "${1:-}" == "--harness-probe" ]]; then
   probe_action=${2:-}
   probe_child=$(_tmpdir) || exit 1
+  if [[ "$probe_action" == git ]]; then
+    git -C "$probe_child" init --quiet --template='' --initial-branch=fixture || exit 1
+    if git -C "$probe_child" config --get harness.caller; then exit 1; fi
+    git -C "$probe_child" config --global harness.writable yes || exit 1
+    git -C "$probe_child" symbolic-ref --short HEAD
+    exit
+  fi
   printf '%s\n%s\n%s\n%s\n%s\n' \
     "$_suite_tmp_root" "$probe_child" "$(_mode "$_suite_tmp_root")" \
     "${TMPDIR:-}" "$_suite_tmux_socket"

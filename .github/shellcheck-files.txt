@@ -15,6 +15,7 @@ program	scripts/checkout-installer.conf
 program	support/install-checkout.sh
 program	test/copy-mark-helpers.sh
 program	test/copy-mark-test
+program	test/fixture-env.sh
 program	test/run
 program	test/tmux-continuum-test
 program	test/tmux-pane-test

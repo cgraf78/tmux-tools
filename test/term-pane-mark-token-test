@@ -2,7 +2,7 @@
 # Real command-queue guards must reject stale lifecycle events atomically.
 set -uo pipefail
 unset BASH_ENV ENV
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+ROOT=$(CDPATH='' cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 if [[ ${TMUX_TOOLS_TMUX:-ok} != ok ]] || ! command -v tmux >/dev/null 2>&1; then
   printf 'SKIP: no supported tmux\n'
   exit 0

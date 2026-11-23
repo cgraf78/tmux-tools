@@ -2,7 +2,7 @@
 # Exercise summary semantics without writing to a user's terminal or server.
 set -uo pipefail
 unset BASH_ENV ENV
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+ROOT=$(CDPATH='' cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 # The floor and a release just below it, from the tools' own tmux_minimum,
 # so these cases follow a floor bump.
 floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
@@ -14,6 +14,9 @@ tmp=$(
   mktemp -d "${TMPDIR:-/tmp}/tps.XXXXXXXX"
 ) || exit 1
 trap 'rm -rf "$tmp"' EXIT
+# shellcheck source=test/fixture-env.sh
+. "$ROOT/test/fixture-env.sh"
+tmux_fixture_path "$tmp" || exit "$?"
 mkdir "$tmp/bin"
 cat >"$tmp/bin/tmux" <<'MOCK'
 #!/usr/bin/env bash
@@ -316,12 +319,11 @@ done
 check 'session identifiers are validated' 64 "$?"
 "$ROOT/bin/term-pane-state" --socket /private/test.sock --session bad >/dev/null 2>&1
 check 'session identifiers are validated for publishing too' 64 "$?"
-mkdir "$tmp/no-route"
-ln -s "$tmp/bin/tmux" "$tmp/no-route/tmux"
+tmux_fixture_tools "$tmp/no-route" tmux sed || exit 1
 export STATE_ROWS='%1 1 0 0 0 a w'
 # shellcheck disable=SC2016 # Literal tmux session identifier.
 export STATE_CLIENTS='12 123 $7 0 xterm-256color /dev/null %1 0 0 0 /dev/null'
-PATH="$tmp/no-route:/usr/bin:/bin" "$ROOT/bin/term-pane-state" --socket /private/test.sock \
+PATH="$tmp/no-route" "$ROOT/bin/term-pane-state" --socket /private/test.sock \
   --client /dev/null --client-pid 12 --client-created 123 >/dev/null 2>&1
 check 'missing hierarchy owner fails closed instead of guessing tty ownership' 1 "$?"
 if command -v python3 >/dev/null 2>&1; then
