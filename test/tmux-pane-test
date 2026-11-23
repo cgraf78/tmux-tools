@@ -13,7 +13,7 @@ unset BASH_ENV ENV TMUX TMUX_PANE
 export NO_COLOR=1
 # tmux runs pane commands with $SHELL -c; keep the user's startup files out.
 export SHELL=/bin/sh
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+ROOT=$(CDPATH='' cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 TOOL="$ROOT/bin/tmux-pane"
 
 failures=0

@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 helper="$ROOT/bin/tmux-continuum-default-server"
 gate="$ROOT/bin/tmux-continuum-save-gate"
 failures=0

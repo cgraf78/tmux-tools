@@ -2,7 +2,7 @@
 
 set -uo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 probe_parent=$(mktemp -d "${TMPDIR:-/tmp}/tmux-tools-harness-test.XXXXXXXX") || exit 1
 failures=0
 
@@ -26,8 +26,9 @@ run_probe() {
 
   output=$(
     umask 000
-    TMPDIR="$probe_parent" \
-      "$ROOT/test/tmux-tools-test" --harness-probe "$action"
+    cd -P -- "$ROOT" || exit 1
+    CDPATH=. TMPDIR="$probe_parent" \
+      test/tmux-tools-test --harness-probe "$action"
   )
   status=$?
   probe_root=$(printf '%s\n' "$output" | sed -n '1p')

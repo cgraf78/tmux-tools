@@ -2,7 +2,7 @@
 # Exercise summary semantics without writing to a user's terminal or server.
 set -uo pipefail
 unset BASH_ENV ENV
-ROOT=$(cd "${BASH_SOURCE[0]%/*}/.." && pwd)
+ROOT=$(CDPATH='' cd "${BASH_SOURCE[0]%/*}/.." && pwd)
 # The floor and a release just below it, from the tools' own tmux_minimum,
 # so these cases follow a floor bump.
 floor_tmux=$(sed -n 's/^tmux_minimum=//p' "$ROOT/bin/tmux-agent-picker")
