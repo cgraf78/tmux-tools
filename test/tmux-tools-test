@@ -33,6 +33,10 @@ _tmpdir() {
 
 _cleanup() {
   local root=${_suite_tmp_root:-}
+  local worker
+  for worker in "${clip_private_a:-}" "${clip_private_b:-}"; do
+    [[ -z "$worker" ]] || wait "$worker" 2>/dev/null || :
+  done
   [[ -z "$root" ]] || rm -rf "$root"
   _suite_tmp_root=""
 }
@@ -812,6 +816,87 @@ _assert_ne "clip paste isolates panes in the same server" "$path_one" "$path_two
 _assert_ne "clip paste isolates panes in different servers" "$path_one" "$path_other_server"
 _assert_eq "clip paste creates its per-user directory privately" \
   "700" "$(_mode "$clip_dir/tmux-tools-$(id -u)/clip-paste")"
+
+clip_private_bin=$(_tmpdir)
+clip_private_mkdir=$(type -P mkdir)
+cat >"$clip_private_bin/mkdir" <<'MOCK'
+#!/usr/bin/env bash
+set -eu
+
+if [[ "${!#}" == "$TMUX_TOOLS_TEST_CREATE_DIR" ]]; then
+  if [[ -n "${TMUX_TOOLS_TEST_CREATE_SYMLINK:-}" ]]; then
+    ln -s "$TMUX_TOOLS_TEST_CREATE_SYMLINK" "$TMUX_TOOLS_TEST_CREATE_DIR"
+    exit 1
+  fi
+  # Both workers must observe the directory as absent before either creates it.
+  : >"$TMPDIR/reached-$TMUX_TOOLS_TEST_CREATE_ROLE"
+  deadline=$((SECONDS + 8))
+  until [[ -e "$TMPDIR/reached-A" && -e "$TMPDIR/reached-B" ]]; do
+    if ((SECONDS >= deadline)); then
+      printf 'private directory race peer did not reach mkdir: %s\n' "$TMUX_TOOLS_TEST_CREATE_ROLE" >&2
+      exit 1
+    fi
+    sleep 0.01
+  done
+fi
+exec "$TMUX_TOOLS_TEST_REAL_MKDIR" "$@"
+MOCK
+chmod +x "$clip_private_bin/mkdir"
+
+_test_clip_private_race() {
+  local level=$1 runtime user_dir create_dir expected_path role status_a=0 status_b=0
+  runtime=$(_tmpdir) || return 1
+  user_dir="$runtime/tmux-tools-$(id -u)"
+  create_dir="$user_dir"
+  if [[ "$level" == clip-paste ]]; then
+    mkdir "$user_dir" || return 1
+    create_dir="$user_dir/clip-paste"
+  fi
+  expected_path="$user_dir/clip-paste/101-1"
+
+  for role in A B; do
+    env -u TMUX -u TMUX_PANE TMPDIR="$runtime" PATH="$clip_private_bin:$clip_bin:$PATH" \
+      TMUX_TOOLS_CLIP_PASTE_FILE= TMUX_TOOLS_TEST_SERVER_PID=101 TMUX_TOOLS_TEST_PANE_ID=1 \
+      TMUX_TOOLS_TEST_REAL_MKDIR="$clip_private_mkdir" TMUX_TOOLS_TEST_CREATE_DIR="$create_dir" \
+      TMUX_TOOLS_TEST_CREATE_SYMLINK= TMUX_TOOLS_TEST_CREATE_ROLE="$role" tmux-clip-paste --path \
+      >"$runtime/output-$role" 2>&1 &
+    if [[ "$role" == A ]]; then
+      clip_private_a=$!
+    else
+      clip_private_b=$!
+    fi
+  done
+  wait "$clip_private_a" || status_a=$?
+  clip_private_a=
+  wait "$clip_private_b" || status_b=$?
+  clip_private_b=
+
+  if [[ ! -e "$runtime/reached-A" || ! -e "$runtime/reached-B" ]]; then
+    _fail "clip paste $level race brought both workers to mkdir"
+  fi
+  _assert_eq "clip paste $level race succeeds for both workers" '0:0' "$status_a:$status_b"
+  _assert_eq "clip paste $level race gives worker A the private path" "$expected_path" "$(cat "$runtime/output-A")"
+  _assert_eq "clip paste $level race gives worker B the private path" "$expected_path" "$(cat "$runtime/output-B")"
+  _assert_eq "clip paste $level race keeps the created directory private" "700" "$(_mode "$create_dir")"
+}
+
+_test_clip_private_race per-user || _fail "could not initialize per-user directory race"
+_test_clip_private_race clip-paste || _fail "could not initialize clip-paste directory race"
+
+clip_symlink_race=$(_tmpdir)
+clip_symlink_target=$(_tmpdir)
+chmod 755 "$clip_symlink_target"
+clip_symlink_result=$(
+  env -u TMUX -u TMUX_PANE TMPDIR="$clip_symlink_race" PATH="$clip_private_bin:$clip_bin:$PATH" \
+    TMUX_TOOLS_CLIP_PASTE_FILE= TMUX_TOOLS_TEST_REAL_MKDIR="$clip_private_mkdir" \
+    TMUX_TOOLS_TEST_CREATE_DIR="$clip_symlink_race/tmux-tools-$(id -u)" \
+    TMUX_TOOLS_TEST_CREATE_SYMLINK="$clip_symlink_target" tmux-clip-paste --path 2>&1
+)
+clip_symlink_status=$?
+_assert_eq "clip paste rejects a symlink installed during directory creation" "1" "$clip_symlink_status"
+_assert_contains "clip paste diagnoses the raced symlink as unsafe" "runtime path is not a private directory" "$clip_symlink_result"
+_assert_eq "clip paste never chmods a raced symlink target" "755" "$(_mode "$clip_symlink_target")"
+_assert_missing "clip paste never creates paths through a raced symlink" "$clip_symlink_target/clip-paste"
 
 explicit_pane_path=$(
   TMPDIR="$clip_dir" PATH="$clip_bin:$PATH" TMUX_PANE=%999 \
