@@ -970,6 +970,36 @@ notify_env TERM_NOTIFY_LOG="$busy_log" TERM_NOTIFY_TTY="$tmp/notify-log-busy.tty
 _assert_file_missing "notify log: a held rotation lock skips rotation" "$busy_log.1"
 _assert_eq "notify log: a held rotation lock still appends the call" \
   1 "$(wc -l <"$busy_log" | tr -d ' ')"
+
+# Reproduce the uutils failure at the CLI's actual lock acquisition. The
+# first writer already made this directory when plain mkdir returns success.
+rotation_mkdir_bin="$tmp/rotation-mkdir-bin"
+mkdir "$rotation_mkdir_bin"
+rotation_native_mkdir=$(type -P gnumkdir || type -P mkdir)
+ln -s "$rotation_native_mkdir" "$rotation_mkdir_bin/gnumkdir"
+cat >"$rotation_mkdir_bin/mkdir" <<'MOCK'
+#!/usr/bin/env bash
+[[ ${!#} != "$TMUX_TEST_ROTATION_LOCK" ]] || exit 0
+exec "$TMUX_TEST_NATIVE_MKDIR" "$@"
+MOCK
+chmod +x "$rotation_mkdir_bin/mkdir"
+racy_log="$tmp/notify-log-racy/calls.log"
+mkdir -p "$racy_log.lock"
+head -c 1048577 /dev/zero | tr '\0' x >"$racy_log"
+PATH="$rotation_mkdir_bin:$PATH" TMUX_TEST_ROTATION_LOCK="$racy_log.lock" \
+  TMUX_TEST_NATIVE_MKDIR="$rotation_native_mkdir" \
+  notify_env TERM_NOTIFY_LOG="$racy_log" TERM_NOTIFY_TTY="$tmp/notify-log-racy.tty" \
+  "$ROOT/bin/term-notify-sound"
+_assert_exit "notify log: a failed rotation claim keeps notification successful" 0 "$?"
+_assert_file_content "notify log: a failed rotation claim still rings" \
+  $'\a' "$tmp/notify-log-racy.tty"
+_assert_file_missing "notify log: duplicate mkdir success cannot rotate a held log" "$racy_log.1"
+if [[ -d "$racy_log.lock" ]]; then
+  _pass "notify log: the rejected rotation keeps the first writer's lock"
+else
+  _fail "notify log: the rejected rotation removed the first writer's lock"
+fi
+
 head -c 2097153 /dev/zero | tr '\0' x >"$busy_log"
 notify_env TERM_NOTIFY_LOG="$busy_log" TERM_NOTIFY_TTY="$tmp/notify-log-busy.tty" \
   "$ROOT/bin/term-notify-sound"
