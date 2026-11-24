@@ -77,13 +77,16 @@ _private_dir() {
   clip_dir="$user_dir/clip-paste"
 
   for dir in "$user_dir" "$clip_dir"; do
-    if [[ -e "$dir" || -L "$dir" ]]; then
-      [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] ||
-        _fail "runtime path is not a private directory owned by the current user: $dir"
-    else
-      (umask 077 && mkdir "$dir") ||
+    if [[ ! -e "$dir" && ! -L "$dir" ]]; then
+      # These directories are shared by this user's concurrent invocations.
+      # A peer may create one first. Validate the resulting path before using it.
+      if ! (umask 077 && mkdir "$dir") 2>/dev/null &&
+        [[ ! -e "$dir" && ! -L "$dir" ]]; then
         _fail "cannot create private runtime directory: $dir"
+      fi
     fi
+    [[ -d "$dir" && ! -L "$dir" && -O "$dir" ]] ||
+      _fail "runtime path is not a private directory owned by the current user: $dir"
     chmod 700 "$dir" || _fail "cannot secure runtime directory: $dir"
   done
 
