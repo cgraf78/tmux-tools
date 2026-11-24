@@ -127,7 +127,11 @@ log_call() {
 # first's history. A busy lock skips rotation for this call; one left by a
 # call that died is cleared once the log reaches twice the limit.
 rotate_log() {
-  if mkdir "$notify_log.lock"; then
+  local mkdir_command
+  # Ubuntu's uutils mkdir can report success to both concurrent creators.
+  # Its packaged GNU alternate honors exclusive creation of the same lock.
+  mkdir_command=$(type -P gnumkdir) || mkdir_command="mkdir"
+  if command "$mkdir_command" "$notify_log.lock"; then
     [ "$(wc -c <"$notify_log")" -le "$notify_log_max_bytes" ] ||
       mv -f "$notify_log" "$notify_log.1"
     rmdir "$notify_log.lock"
